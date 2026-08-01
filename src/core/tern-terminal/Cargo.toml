@@ -1,0 +1,9 @@
+[package]
+name = "tern-terminal"
+version.workspace = true
+edition.workspace = true
+description = "tern terminal: diff-flushes painted buffers to the terminal"
+
+[dependencies]
+tern-core = { path = "../tern-core" }
+crossterm = "0.29"
