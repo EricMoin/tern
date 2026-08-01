@@ -29,5 +29,5 @@ pub use cell::{char_width, Cell, CellUpdate};
 pub use color::Color;
 pub use layout::LayoutEngine;
 pub use rect::{Rect, Size};
-pub use scene::{NodeId, NodeKind, PropMap, PropValue, Scene, SceneNode};
+pub use scene::{NodeId, NodeKind, PropMap, PropValue, Scene, SceneNode, Span};
 pub use style::{BorderStyle, Modifiers, Style};
