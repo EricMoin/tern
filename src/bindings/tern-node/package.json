@@ -1,0 +1,19 @@
+{
+  "name": "tern-node",
+  "version": "0.1.0",
+  "description": "tern napi binding: Deno/Node.js -> tern-core bridge (native addon)",
+  "private": true,
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "build": "napi build --platform && node fix-dts.mjs",
+    "build:release": "napi build --platform --release && node fix-dts.mjs",
+    "smoke:deno": "printf 'q' | script -q /dev/null deno run --allow-all smoke.mjs"
+  },
+  "napi": {
+    "binaryName": "tern-node"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.8.2"
+  }
+}
