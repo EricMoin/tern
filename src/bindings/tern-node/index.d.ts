@@ -16,6 +16,18 @@ export declare class NodeHandle {
    */
   add_child(child: NodeHandle): NodeHandle
   /**
+   * Materialize `child` (a detached `create_node` template) into the scene
+   * under this node, positioned immediately before `anchor` in this node's
+   * children, and return the bound child handle so calls can chain
+   * (`parent.insert_before(create_node(...), existing_child)`).
+   *
+   * `anchor` must be an already-attached child of this node (in this node's
+   * scene); `child` must still be detached. Errors when `self` is detached,
+   * `child` already has a parent, or `anchor` is detached / not a child of
+   * this node.
+   */
+  insert_before(child: NodeHandle, anchor: NodeHandle): NodeHandle
+  /**
    * Detach this node (and its whole subtree) from the scene. Returns
    * `false` when the node was already detached (or is the scene root).
    */
@@ -30,6 +42,17 @@ export declare class NodeHandle {
    * in the node's property map (`text`, layout keywords, ...).
    */
   set_props(props: Record<string, any>): void
+  /**
+   * Append a styled span of text to a `streaming_text` node's stream.
+   *
+   * `style` follows the same style-key convention as `set_props` (`fg`,
+   * `bg`, `border_style`, and the boolean modifiers are lifted into the
+   * span's style; every other key is ignored). The span is appended to the
+   * node's accumulated stream in the shared scene, in call order. Errors
+   * when the node is detached from the scene or is not a `streaming_text`
+   * node.
+   */
+  append_span(text: string, style?: Record<string, any> | undefined | null): void
 }
 
 /**
@@ -76,10 +99,10 @@ export declare class TuiRenderer {
 }
 
 /**
- * Create a detached node template of `type` (`"box"` or `"text"`) with
- * `props`. The handle is materialized into the scene when it is added to a
- * bound parent via `NodeHandle.add_child`. See `set_props` for the style-key
- * convention.
+ * Create a detached node template of `type` (`"box"`, `"text"`, or
+ * `"streaming_text"`) with `props`. The handle is materialized into the scene
+ * when it is added to a bound parent via `NodeHandle.add_child`. See
+ * `set_props` for the style-key convention.
  */
 export declare function create_node(type: string, props?: Record<string, any> | undefined | null): NodeHandle
 
