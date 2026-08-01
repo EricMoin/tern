@@ -18,6 +18,18 @@ pub enum NodeKind {
     Box,
     /// A leaf that renders its `text` prop content.
     Text,
+    /// A leaf that renders incrementally appended styled spans (its `stream`).
+    StreamingText,
+}
+
+/// A styled chunk of streaming text. The compositor concatenates the spans of
+/// a [`SceneNode`]'s stream in order to render the node's content.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Span {
+    /// The chunk's text content.
+    pub text: String,
+    /// The style applied to this chunk.
+    pub style: Style,
 }
 
 /// A property value stored on a scene node.
@@ -53,6 +65,9 @@ pub struct SceneNode {
     pub props: PropMap,
     /// Parent id; `None` for the root.
     pub parent: Option<NodeId>,
+    /// Incrementally appended spans for [`NodeKind::StreamingText`] nodes;
+    /// `None` for every other node kind.
+    pub stream: Option<Vec<Span>>,
 }
 
 /// An owned scene tree with an implicit root node.
@@ -87,6 +102,7 @@ impl Scene {
                 children: Vec::new(),
                 props: PropMap::new(),
                 parent: None,
+                stream: None,
             },
         );
         Self {
@@ -144,6 +160,7 @@ impl Scene {
                 children: Vec::new(),
                 props: PropMap::new(),
                 parent: Some(parent),
+                stream: None,
             },
         );
         self.nodes
@@ -154,6 +171,51 @@ impl Scene {
         Some(id)
     }
 
+    /// Insert a new child of `kind` under `parent` at `index` in the parent's
+    /// ordered children list. Returns the new node's id, or `None` when
+    /// `parent` does not exist or the insertion would violate the scene's root
+    /// invariants (a `NodeKind::Root` node can never be inserted — the scene's
+    /// single root is implicit and is never a child of anything).
+    ///
+    /// `index` is clamped to the children list length: `index == len` appends,
+    /// and any `index > len` is treated as an append as well.
+    pub fn insert_child(
+        &mut self,
+        parent: NodeId,
+        index: usize,
+        kind: NodeKind,
+        style: Style,
+    ) -> Option<NodeId> {
+        if !self.nodes.contains_key(&parent) {
+            return None;
+        }
+        if kind == NodeKind::Root {
+            return None;
+        }
+        let id = NodeId(self.next_id);
+        self.next_id += 1;
+        self.nodes.insert(
+            id,
+            SceneNode {
+                id,
+                kind,
+                style,
+                children: Vec::new(),
+                props: PropMap::new(),
+                parent: Some(parent),
+                stream: None,
+            },
+        );
+        let children = &mut self
+            .nodes
+            .get_mut(&parent)
+            .expect("parent existence checked above")
+            .children;
+        let index = index.min(children.len());
+        children.insert(index, id);
+        Some(id)
+    }
+
     /// Add a Text leaf with its `text` prop pre-populated.
     pub fn add_text(&mut self, parent: NodeId, content: &str, style: Style) -> Option<NodeId> {
         let id = self.add_child(parent, NodeKind::Text, style)?;
@@ -161,9 +223,33 @@ impl Scene {
         Some(id)
     }
 
+    /// Append a styled span to a [`NodeKind::StreamingText`] node's stream.
+    ///
+    /// Creates the stream when the node has none yet. Returns `false` when the
+    /// node does not exist or is not a `StreamingText` node.
+    pub fn append_span(&mut self, id: NodeId, span: Span) -> bool {
+        let Some(n) = self.nodes.get_mut(&id) else {
+            return false;
+        };
+        if n.kind != NodeKind::StreamingText {
+            return false;
+        }
+        n.stream.get_or_insert_with(Vec::new).push(span);
+        true
+    }
+
+    /// The stream of a node, or `None` when the node does not exist or is not
+    /// streaming (`stream` is only ever populated for `StreamingText` nodes).
+    pub fn stream(&self, id: NodeId) -> Option<&[Span]> {
+        self.nodes.get(&id).and_then(|n| n.stream.as_deref())
+    }
+
     /// Remove `id` and all of its descendants, detaching them from their
     /// parent. The root cannot be removed. Returns whether anything was
     /// removed.
+    ///
+    /// Each removed node (including any `stream` it carries) is dropped with
+    /// the removal, so a streaming node's spans never outlive the node.
     pub fn remove(&mut self, id: NodeId) -> bool {
         if id == self.root || !self.nodes.contains_key(&id) {
             return false;
@@ -284,7 +370,7 @@ impl Scene {
 mod tests {
     use super::*;
     use crate::color::Color;
-    use crate::style::BorderStyle;
+    use crate::style::{BorderStyle, Modifiers};
 
     #[test]
     fn scene_has_implicit_root() {
@@ -326,6 +412,104 @@ mod tests {
         assert!(scene
             .add_child(NodeId(999), NodeKind::Box, Style::new())
             .is_none());
+    }
+
+    #[test]
+    fn insert_child_at_head_middle_and_tail() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let a = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        let b = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        let c = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        assert_eq!(scene.children(root).unwrap(), &[a, b, c]);
+
+        // Head: index 0.
+        let h = scene
+            .insert_child(root, 0, NodeKind::Text, Style::new())
+            .unwrap();
+        assert_eq!(scene.children(root).unwrap(), &[h, a, b, c]);
+
+        // Tail: index == len appends.
+        let t = scene
+            .insert_child(root, 4, NodeKind::Text, Style::new())
+            .unwrap();
+        assert_eq!(scene.children(root).unwrap(), &[h, a, b, c, t]);
+
+        // Middle: index 2 in a 5-child list.
+        let m = scene
+            .insert_child(root, 2, NodeKind::Text, Style::new())
+            .unwrap();
+        assert_eq!(scene.children(root).unwrap(), &[h, a, m, b, c, t]);
+
+        // Parent/child links stay consistent for every node.
+        for id in [h, a, m, b, c, t] {
+            assert_eq!(scene.node(id).unwrap().parent, Some(root));
+        }
+        assert_eq!(scene.len(), 7); // root + 6 children
+    }
+
+    #[test]
+    fn insert_child_clamps_index_beyond_len() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let a = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        let b = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        assert_eq!(scene.children(root).unwrap(), &[a, b]);
+
+        // index > len clamps to len, i.e. appends.
+        let t = scene
+            .insert_child(root, 10, NodeKind::Text, Style::new())
+            .unwrap();
+        assert_eq!(scene.children(root).unwrap(), &[a, b, t]);
+    }
+
+    #[test]
+    fn insert_child_after_remove_fills_the_gap() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let a = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        let b = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        let c = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        assert_eq!(scene.children(root).unwrap(), &[a, b, c]);
+
+        assert!(scene.remove(b));
+        assert_eq!(scene.children(root).unwrap(), &[a, c]);
+
+        // Re-insert at the position b used to occupy.
+        let b2 = scene
+            .insert_child(root, 1, NodeKind::Box, Style::new())
+            .unwrap();
+        assert_eq!(scene.children(root).unwrap(), &[a, b2, c]);
+        assert_eq!(scene.node(b2).unwrap().parent, Some(root));
+        assert_ne!(b2, b); // fresh id, not a resurrection
+    }
+
+    #[test]
+    fn insert_child_missing_parent_returns_none() {
+        let mut scene = Scene::new();
+        assert!(scene
+            .insert_child(NodeId(999), 0, NodeKind::Box, Style::new())
+            .is_none());
+        assert_eq!(scene.len(), 1); // nothing inserted
+    }
+
+    #[test]
+    fn root_can_never_be_inserted_into_children() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let a = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+
+        // A Root-kind node can never be inserted under any parent, including
+        // the root itself: the scene's single root is implicit and is never a
+        // child of anything.
+        assert!(scene
+            .insert_child(a, 0, NodeKind::Root, Style::new())
+            .is_none());
+        assert!(scene
+            .insert_child(root, 0, NodeKind::Root, Style::new())
+            .is_none());
+        assert_eq!(scene.children(root).unwrap(), &[a]);
+        assert_eq!(scene.len(), 2); // nothing inserted
     }
 
     #[test]
@@ -429,5 +613,140 @@ mod tests {
             assert!(!ids.contains(&id));
             ids.push(id);
         }
+    }
+
+    #[test]
+    fn append_span_accumulates_in_order() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let s = scene
+            .add_child(root, NodeKind::StreamingText, Style::new())
+            .unwrap();
+
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "Hel".to_string(),
+                style: Style::new(),
+            }
+        ));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "lo".to_string(),
+                style: Style::new(),
+            }
+        ));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "!".to_string(),
+                style: Style::new(),
+            }
+        ));
+
+        let stream = scene.stream(s).unwrap();
+        let texts: Vec<&str> = stream.iter().map(|sp| sp.text.as_str()).collect();
+        assert_eq!(texts, ["Hel", "lo", "!"]);
+    }
+
+    #[test]
+    fn append_span_preserves_per_span_styles() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let s = scene
+            .add_child(root, NodeKind::StreamingText, Style::new())
+            .unwrap();
+
+        let red = Style::new().fg(Color::Rgb(255, 0, 0));
+        let bold = Style::new().add_modifier(Modifiers::BOLD);
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "red".to_string(),
+                style: red,
+            }
+        ));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "bold".to_string(),
+                style: bold,
+            }
+        ));
+
+        let stream = scene.stream(s).unwrap();
+        assert_eq!(stream[0].style.fg, Color::Rgb(255, 0, 0));
+        assert!(!stream[0].style.modifiers.contains(Modifiers::BOLD));
+        assert!(stream[1].style.modifiers.contains(Modifiers::BOLD));
+        assert_eq!(stream[1].style.fg, Color::Default);
+    }
+
+    #[test]
+    fn append_span_keeps_multi_width_chars_intact() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let s = scene
+            .add_child(root, NodeKind::StreamingText, Style::new())
+            .unwrap();
+
+        // U+30B3 (コ) is a double-width CJK character.
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "コ".to_string(),
+                style: Style::new(),
+            }
+        ));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "abc".to_string(),
+                style: Style::new(),
+            }
+        ));
+
+        let stream = scene.stream(s).unwrap();
+        assert_eq!(stream.len(), 2);
+        assert_eq!(stream[0].text, "コ");
+        assert_eq!(stream[1].text, "abc");
+    }
+
+    #[test]
+    fn append_span_rejects_missing_and_non_streaming_nodes() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let t = scene.add_text(root, "plain", Style::new()).unwrap();
+
+        let span = Span {
+            text: "x".to_string(),
+            style: Style::new(),
+        };
+        assert!(!scene.append_span(NodeId(999), span.clone()));
+        assert!(!scene.append_span(t, span.clone()));
+        assert!(scene.stream(NodeId(999)).is_none());
+        assert!(scene.stream(t).is_none());
+    }
+
+    #[test]
+    fn remove_detaches_node_and_its_stream() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let s = scene
+            .add_child(root, NodeKind::StreamingText, Style::new())
+            .unwrap();
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "gone".to_string(),
+                style: Style::new(),
+            }
+        ));
+        assert_eq!(scene.stream(s).unwrap().len(), 1);
+
+        assert!(scene.remove(s));
+        assert!(scene.node(s).is_none());
+        assert!(scene.stream(s).is_none());
+        assert!(scene.children(root).unwrap().is_empty());
     }
 }
