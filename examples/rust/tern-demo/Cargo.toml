@@ -1,0 +1,10 @@
+[package]
+name = "tern-demo"
+version.workspace = true
+edition.workspace = true
+description = "tern demo: example binary driving the tern TUI renderer"
+
+[dependencies]
+tern-components = { path = "../../../src/core/tern-components" }
+tern-core = { path = "../../../src/core/tern-core" }
+tern-terminal = { path = "../../../src/core/tern-terminal" }
