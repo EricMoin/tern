@@ -1,0 +1,30 @@
+{
+  "name": "@tern/react",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tern react — react-reconciler custom renderer for tern",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "check": "deno check src/index.ts",
+    "check:tsc": "tsc --noEmit",
+    "test": "deno test --allow-env=NODE_ENV src",
+    "build": "deno task build",
+    "build:tsc": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tern/core": "0.1.0"
+  },
+  "peerDependencies": {
+    "react": "^19.2.0",
+    "react-reconciler": "^0.33.0"
+  },
+  "devDependencies": {
+    "react": "^19.2.0",
+    "react-reconciler": "^0.33.0",
+    "@types/react": "^19.2.0",
+    "typescript": "^5.9.3",
+    "@types/react-reconciler": "^0.33.0"
+  }
+}
