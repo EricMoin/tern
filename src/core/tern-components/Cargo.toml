@@ -1,0 +1,9 @@
+[package]
+name = "tern-components"
+version.workspace = true
+edition.workspace = true
+description = "tern components: the compositor and imperative Text/Box renderables"
+
+[dependencies]
+tern-core = { path = "../tern-core" }
+tern-layout = { path = "../tern-layout" }
