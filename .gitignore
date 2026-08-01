@@ -1,0 +1,9 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# Node.js dependencies
+node_modules/
+
+# Native addon binaries (napi binding outputs)
+*.node
