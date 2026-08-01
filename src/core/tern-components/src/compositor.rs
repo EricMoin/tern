@@ -10,6 +10,9 @@
 //! * **Text** — paints its `text` prop content starting at the rect origin,
 //!   clipped to the rect (multi-width aware: a wide character never gets
 //!   truncated mid-glyph at the right edge).
+//! * **StreamingText** — paints its accumulated stream spans starting at the
+//!   rect origin, one row per wrapped soft line, honoring each span's style
+//!   (fg/bg/modifiers), clipping to the rect bottom and right.
 //! * **Root** — a plain container; paints nothing itself.
 //!
 //! Nodes are painted in pre-order (parent before children) so children always
@@ -24,7 +27,7 @@ use tern_core::color::Color;
 use tern_core::layout::LayoutEngine;
 use tern_core::rect::{Rect, Size};
 use tern_core::scene::{NodeId, NodeKind, PropValue, Scene, SceneNode};
-use tern_core::style::BorderStyle;
+use tern_core::style::{BorderStyle, Style};
 use tern_layout::TaffyLayoutEngine;
 
 use crate::renderable::Renderable;
@@ -121,6 +124,7 @@ fn paint_node(node: &SceneNode, rect: Rect, buffer: &mut Buffer) {
         NodeKind::Root => {}
         NodeKind::Box => paint_box(node, rect, buffer),
         NodeKind::Text => paint_text(node, rect, buffer),
+        NodeKind::StreamingText => paint_streaming_text(node, rect, buffer),
     }
 }
 
@@ -206,6 +210,165 @@ fn paint_text(node: &SceneNode, rect: Rect, buffer: &mut Buffer) {
     }
 }
 
+/// The cursor for a streaming-text paint pass: the next row and column to
+/// paint at, in scene coordinates.
+struct WrapCursor {
+    row: i32,
+    col: i32,
+}
+
+/// Paint a `StreamingText` leaf: its accumulated stream spans are
+/// concatenated in order and painted into the rect starting at its origin,
+/// one row per wrapped soft line.
+///
+/// Wrapping is greedy and token-aware: a token (a whitespace-free run) that
+/// does not fit on the current row wraps whole to the next row; a token wider
+/// than the whole rect is hard-broken across rows. Each span paints with its
+/// own style (fg/bg/modifiers); span boundaries are flush points so one span's
+/// style never bleeds into the next. A wide character that would straddle the
+/// right edge — or that is wider than the row itself — is dropped, never split
+/// mid-glyph. Painting stops at the rect's bottom edge; both edges are clipped
+/// to the buffer.
+fn paint_streaming_text(node: &SceneNode, rect: Rect, buffer: &mut Buffer) {
+    let Some(stream) = node.stream.as_deref() else {
+        return;
+    };
+    if stream.is_empty() {
+        return;
+    }
+    let right = rect.right().min(buffer.width as i32);
+    let bottom = rect.bottom().min(buffer.height as i32);
+    if right <= rect.x || bottom <= rect.y {
+        return;
+    }
+
+    let mut cursor = WrapCursor {
+        row: rect.y,
+        col: rect.x,
+    };
+    let mut word = String::new();
+    let mut word_style = Style::new();
+
+    for span in stream {
+        for ch in span.text.chars() {
+            match ch {
+                // Hard break: flush the pending word, then start a new row.
+                '\n' => {
+                    paint_word(
+                        &word,
+                        word_style,
+                        rect.x,
+                        right,
+                        bottom,
+                        &mut cursor,
+                        buffer,
+                    );
+                    word.clear();
+                    cursor.row += 1;
+                    cursor.col = rect.x;
+                    if cursor.row >= bottom {
+                        return;
+                    }
+                }
+                // Soft break: flush the pending word, then place the space
+                // only when it fits; a trailing space at a row's end is
+                // dropped (the wrap would collapse it anyway).
+                ' ' => {
+                    paint_word(
+                        &word,
+                        word_style,
+                        rect.x,
+                        right,
+                        bottom,
+                        &mut cursor,
+                        buffer,
+                    );
+                    word.clear();
+                    if cursor.row < bottom && cursor.col < right {
+                        buffer.set_char(cursor.col as u16, cursor.row as u16, ' ', span.style);
+                        cursor.col += 1;
+                    }
+                }
+                _ => {
+                    if word.is_empty() {
+                        word_style = span.style;
+                    }
+                    word.push(ch);
+                }
+            }
+        }
+        // Span boundary: flush so per-span styles stay exact across spans.
+        paint_word(
+            &word,
+            word_style,
+            rect.x,
+            right,
+            bottom,
+            &mut cursor,
+            buffer,
+        );
+        word.clear();
+        if cursor.row >= bottom {
+            return;
+        }
+    }
+}
+
+/// Paint one whitespace-free token with `style` at the cursor, soft-wrapping
+/// at `right` (column, exclusive) and clipping below `bottom` (row,
+/// exclusive).
+///
+/// A token that does not fit on the current row (which already holds content)
+/// moves whole to the next row; a token wider than the whole row is
+/// hard-broken across rows. A wide character that would straddle `right` — or
+/// that is wider than the row itself — is dropped, never split mid-glyph. The
+/// cursor advances past every token glyph, including dropped ones.
+fn paint_word(
+    word: &str,
+    style: Style,
+    line_start: i32,
+    right: i32,
+    bottom: i32,
+    cursor: &mut WrapCursor,
+    buffer: &mut Buffer,
+) {
+    if word.is_empty() {
+        return;
+    }
+    let width: i32 = word.chars().map(|c| char_width(c) as i32).sum();
+    // Wrap the whole token when it does not fit on the current row and can fit
+    // on a fresh row; a token wider than the row itself is hard-broken below.
+    if cursor.col > line_start && cursor.col + width > right && width <= right - line_start {
+        cursor.row += 1;
+        cursor.col = line_start;
+        if cursor.row >= bottom {
+            return;
+        }
+    }
+    for ch in word.chars() {
+        let w = char_width(ch);
+        if w == 0 {
+            continue;
+        }
+        if cursor.col + w as i32 > right {
+            // Does not fit on this row: wrap. A wide char that still cannot
+            // fit on a fresh row (wider than the row) is dropped whole.
+            cursor.row += 1;
+            cursor.col = line_start;
+            if cursor.row >= bottom {
+                return;
+            }
+            if cursor.col + w as i32 > right {
+                return;
+            }
+        }
+        if cursor.col >= 0 && cursor.row >= 0 {
+            buffer.set_char(cursor.col as u16, cursor.row as u16, ch, style);
+        }
+        cursor.col += w as i32;
+    }
+}
+
 /// The concrete glyph set for a border style: top-left, top-right,
 /// bottom-left, bottom-right corners, horizontal edge, vertical edge.
 ///
@@ -225,7 +388,8 @@ fn border_glyphs(style: BorderStyle) -> Option<(char, char, char, char, char, ch
 mod tests {
     use super::*;
     use crate::renderable::{Box, Text};
-    use tern_core::style::Style;
+    use tern_core::scene::Span;
+    use tern_core::style::{Modifiers, Style};
 
     /// Paint a renderable tree and return it as a `Vec<String>` grid for
     /// debugging and golden comparisons.
@@ -238,6 +402,32 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// Paint a raw scene and return it as a `Vec<String>` grid for golden
+    /// comparisons.
+    fn render_scene_rows(scene: &Scene, viewport: Size) -> Vec<String> {
+        let buffer = Compositor::new().paint_scene(scene, viewport);
+        (0..buffer.height)
+            .map(|y| {
+                (0..buffer.width)
+                    .map(|x| buffer.cell(x, y).map(|c| c.ch).unwrap_or(' '))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A scene with a `StreamingText` child sized to `width` x `height` at the
+    /// origin of a same-sized viewport.
+    fn streaming_scene(width: i64, height: i64) -> Scene {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let s = scene
+            .add_child(root, NodeKind::StreamingText, Style::new())
+            .expect("add streaming text");
+        scene.set_prop(s, "width", PropValue::Int(width));
+        scene.set_prop(s, "height", PropValue::Int(height));
+        scene
     }
 
     #[test]
@@ -367,5 +557,108 @@ mod tests {
             Some(('┌', '┐', '└', '┘', '─', '│'))
         );
         assert_eq!(border_glyphs(BorderStyle::None), None);
+    }
+
+    #[test]
+    fn golden_streaming_text_spans_styles_in_12x3() {
+        // A 12x3 StreamingText rect holding spans 'abc' (fg red) + 'def'
+        // (bold): the concatenated content paints on the first row, each span
+        // keeping its own style; rows 1-2 stay blank (the node is one content
+        // line tall inside its 3-row rect).
+        let mut scene = streaming_scene(12, 3);
+        let root = scene.root_id();
+        let s = scene.children(root).unwrap()[0];
+        let red = Style::new().fg(Color::Rgb(255, 0, 0));
+        let bold = Style::new().add_modifier(Modifiers::BOLD);
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "abc".to_string(),
+                style: red,
+            }
+        ));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "def".to_string(),
+                style: bold,
+            }
+        ));
+
+        let buffer = Compositor::new().paint_scene(&scene, Size::new(12, 3));
+
+        // Expected cell grid:
+        //   abcdef
+        //   (blank row)
+        //   (blank row)
+        let mut expected = Buffer::new(12, 3);
+        for (x, ch) in "abc".chars().enumerate() {
+            expected.set_char(x as u16, 0, ch, red);
+        }
+        for (x, ch) in "def".chars().enumerate() {
+            expected.set_char(x as u16 + 3, 0, ch, bold);
+        }
+
+        assert_eq!(buffer, expected);
+        let rows = render_scene_rows(&scene, Size::new(12, 3));
+        assert_eq!(rows, ["abcdef      ", "            ", "            "]);
+    }
+
+    #[test]
+    fn streaming_text_wraps_long_span_onto_two_lines() {
+        // A 4x2 rect holding the single span 'abcdef': the token is wider than
+        // the rect, so it hard-wraps onto two rows: 'abcd' then 'ef'.
+        let mut scene = streaming_scene(4, 2);
+        let root = scene.root_id();
+        let s = scene.children(root).unwrap()[0];
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "abcdef".to_string(),
+                style: Style::new(),
+            }
+        ));
+
+        let rows = render_scene_rows(&scene, Size::new(4, 2));
+        assert_eq!(rows, ["abcd", "ef  "]);
+    }
+
+    #[test]
+    fn streaming_text_drops_wide_char_at_rect_edge() {
+        // A wide char (コ) that would straddle the right edge of the 3-wide
+        // rect is dropped whole — never truncated mid-glyph. It rides in the
+        // same token as 'ab', so no wrap separates it: it simply does not fit.
+        let mut scene = streaming_scene(3, 1);
+        let root = scene.root_id();
+        let s = scene.children(root).unwrap()[0];
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "abコ".to_string(),
+                style: Style::new(),
+            }
+        ));
+
+        let buffer = Compositor::new().paint_scene(&scene, Size::new(3, 1));
+        assert_eq!(buffer.cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(buffer.cell(1, 0).unwrap().ch, 'b');
+        // Column 2 stays blank: コ was dropped, not truncated to a half-glyph
+        // (no masked continuation cell either).
+        assert_eq!(buffer.cell(2, 0).unwrap(), &Cell::default());
+        assert_eq!(render_scene_rows(&scene, Size::new(3, 1)), ["ab "]);
+
+        // A wide char wider than the whole rect is dropped as well.
+        let mut scene2 = streaming_scene(1, 1);
+        let root2 = scene2.root_id();
+        let s2 = scene2.children(root2).unwrap()[0];
+        assert!(scene2.append_span(
+            s2,
+            Span {
+                text: "コ".to_string(),
+                style: Style::new(),
+            }
+        ));
+        let buffer2 = Compositor::new().paint_scene(&scene2, Size::new(1, 1));
+        assert_eq!(buffer2.cell(0, 0).unwrap(), &Cell::default());
     }
 }
