@@ -2,14 +2,16 @@
  * @tern/react — mutation-mode react-reconciler HostConfig for tern.
  *
  * Maps React host components onto tern scene nodes through the `packages/core`
- * factories (`Box` / `Text` / `Node`). The tree lives in the tern scene; the
- * reconciler is a thin driver that translates React's commit-phase mutations
- * into `Node.addChild` / `Node.remove` / `Node.setProps` calls.
+ * factories (`Box` / `Text` / `StreamingText` / `Node`). The tree lives in the
+ * tern scene; the reconciler is a thin driver that translates React's
+ * commit-phase mutations into `Node.addChild` / `Node.remove` /
+ * `Node.setProps` calls.
  *
  * ## HostConfig mapping (per the MVP strategy)
  *
  * - `supportsMutation: true` — mutation mode (append/insert/remove ops).
- * - `createInstance(type, props)` -> tern node via `Box(props)` / `Text(props)`.
+ * - `createInstance(type, props)` -> tern node via `Box(props)` /
+ *   `Text(props)` / `StreamingText(props)`.
  * - `createTextInstance` throws — tern requires an explicit `<Text>` element,
  *   bare string children are rejected at render time.
  * - `appendChild` / `insertBefore` / `removeChild` -> tern tree ops. The core
@@ -43,6 +45,7 @@ import {
 } from "react";
 import {
   Box,
+  StreamingText,
   Text,
   type KeyEvent,
   type Node,
@@ -122,13 +125,23 @@ export type UseInputHandler = (event: KeyEvent) => void;
 const REACT_RESERVED_PROPS = new Set(["children", "key", "ref"]);
 
 /**
- * Strip the React-only props, leaving the tern node props (style + layout
- * keys) that the core factories and `Node.setProps` understand.
+ * Component-consumed props of `<StreamingText>` that must never reach a scene
+ * node: `stream` is a non-scalar async iterable (the binding drops objects)
+ * and `autoScroll` / `wrap` are component behavior flags, not tern node
+ * props.
  */
-export function toNodeProps(props: TernProps): NodeProps {
+const STREAMING_TEXT_PROPS = new Set(["stream", "autoScroll", "wrap"]);
+
+/**
+ * Strip the React-only props (and, for `streaming_text`, the component-level
+ * `<StreamingText>` props), leaving the tern node props (style + layout keys)
+ * that the core factories and `Node.setProps` understand.
+ */
+export function toNodeProps(props: TernProps, type?: string): NodeProps {
   const out: NodeProps = {};
   for (const [key, value] of Object.entries(props)) {
     if (REACT_RESERVED_PROPS.has(key) || value === undefined) continue;
+    if (type === "streaming_text" && STREAMING_TEXT_PROPS.has(key)) continue;
     out[key] = value;
   }
   return out;
@@ -199,8 +212,17 @@ export const hostConfig: HostConfig = {
   // --- tree construction (render phase) ------------------------------------
 
   createInstance(type, props) {
-    const nodeProps = toNodeProps(props);
-    return type === "box" ? Box(nodeProps) : Text(nodeProps);
+    const nodeProps = toNodeProps(props, type);
+    switch (type) {
+      case "box":
+        return Box(nodeProps);
+      case "text":
+        return Text(nodeProps);
+      case "streaming_text":
+        return StreamingText(nodeProps);
+      default:
+        throw new Error(`@tern/react: unknown host element type "${type}"`);
+    }
   },
 
   createTextInstance() {
@@ -297,8 +319,8 @@ export const hostConfig: HostConfig = {
 
   commitMount() {},
 
-  commitUpdate(instance, _type, _prevProps, nextProps) {
-    instance.setProps(toNodeProps(nextProps));
+  commitUpdate(instance, type, _prevProps, nextProps) {
+    instance.setProps(toNodeProps(nextProps, type));
   },
 
   commitTextUpdate() {
@@ -312,7 +334,7 @@ export const hostConfig: HostConfig = {
   },
 
   unhideInstance(instance, props) {
-    instance.setProps({ ...toNodeProps(props), hidden: false });
+    instance.setProps({ ...toNodeProps(props, instance.type), hidden: false });
   },
 
   hideTextInstance() {},

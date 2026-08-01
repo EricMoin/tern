@@ -11,13 +11,14 @@
  */
 
 import { act, createElement } from "react";
-import { Box as CoreBox, type KeyEvent, type Renderer } from "@tern/core";
+import { Box as CoreBox, type KeyEvent, type Renderer, type Span } from "@tern/core";
 
 // React 19 requires act() to be enabled explicitly in non-test-runner envs.
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 import {
   Box,
+  StreamingText,
   Text,
   createRoot,
   hostConfig,
@@ -80,7 +81,7 @@ Deno.test("react exports package metadata", () => {
 });
 
 Deno.test("public API surface is exported", () => {
-  for (const fn of [Box, Text, createRoot, render, useApp, useInput]) {
+  for (const fn of [Box, Text, StreamingText, createRoot, render, useApp, useInput]) {
     if (typeof fn !== "function") {
       throw new Error(`expected ${String(fn)} to be a function`);
     }
@@ -136,6 +137,10 @@ Deno.test("createInstance maps host types to tern node factories", () => {
   if (text.type !== "text") throw new Error(`text type = ${text.type}`);
   if (text.props.text !== "hi") throw new Error(`text = ${text.props.text}`);
   if (text.props.bold !== true) throw new Error(`bold = ${text.props.bold}`);
+
+  const stream = hc.createInstance("streaming_text", { text: "old" }, container, {}, null);
+  if (stream.type !== "streaming_text") throw new Error(`streaming_text type = ${stream.type}`);
+  if (stream.props.text !== "old") throw new Error(`streaming_text text = ${stream.props.text}`);
 });
 
 Deno.test("createInstance strips React-only props before the factories", () => {
@@ -431,4 +436,123 @@ Deno.test("useInput with isActive: false stays detached", async () => {
     ternRoot.render(createElement(InactiveProbe));
   });
   if (keyHandlers.size !== 0) throw new Error("inactive handler must not subscribe");
+});
+
+// ---------------------------------------------------------------------------
+// StreamingText
+// ---------------------------------------------------------------------------
+
+Deno.test("StreamingText appends spans from an async iterable in order", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  async function* stream(): AsyncIterable<Span> {
+    yield { text: "hello" };
+    yield { text: " world", style: { bold: true } };
+    yield { text: "!" };
+  }
+
+  await act(async () => {
+    ternRoot.render(
+      createElement(StreamingText, { stream: stream(), autoScroll: false, wrap: false, width: 30 }),
+    );
+  });
+  await act(async () => {}); // drain the stream's microtask chain
+
+  const node = root.children[0]!;
+  if (node.type !== "streaming_text") throw new Error(`type = ${node.type}`);
+  const texts = node.spans.map((span) => span.text);
+  if (texts.join("") !== "hello world!") {
+    throw new Error(`spans not appended in order: ${JSON.stringify(texts)}`);
+  }
+  if (node.spans[1]!.style?.bold !== true) {
+    throw new Error("span style must be forwarded to appendSpan");
+  }
+  // Component-consumed props must never reach the scene node; tern props must.
+  if ("stream" in node.props || "autoScroll" in node.props || "wrap" in node.props) {
+    throw new Error(`component props leaked into node props: ${JSON.stringify(node.props)}`);
+  }
+  if (node.props.width !== 30) throw new Error(`tern props lost: width = ${node.props.width}`);
+});
+
+Deno.test("unmounting a StreamingText cancels the iteration (no appends after unmount)", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let generatorFinally = false;
+
+  async function* gated(): AsyncIterable<Span> {
+    try {
+      yield { text: "first" };
+      await gate; // block until released
+      yield { text: "late" };
+    } finally {
+      generatorFinally = true;
+    }
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(StreamingText, { stream: gated() }));
+  });
+  await act(async () => {}); // let the first span land
+
+  const node = root.children[0]!;
+  if (node.spans.length !== 1 || node.spans[0]!.text !== "first") {
+    throw new Error(`expected only the first span, got ${JSON.stringify(node.spans)}`);
+  }
+
+  await act(async () => {
+    ternRoot.unmount();
+  });
+  release(); // unblock the producer so the return() teardown can run
+  await act(async () => {});
+
+  if (node.spans.length !== 1) {
+    throw new Error(`appends after unmount: ${JSON.stringify(node.spans)}`);
+  }
+  if (!generatorFinally) {
+    throw new Error("iterator.return() must be signalled on unmount");
+  }
+});
+
+Deno.test("StreamingText invokes render() after stream appends", async () => {
+  const { renderer, root, renderCalls } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+
+  async function* gated(): AsyncIterable<Span> {
+    yield { text: "a" };
+    yield { text: "b" };
+    await gate; // split the stream so a later batch lands after a baseline
+    yield { text: "c" };
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(StreamingText, { stream: gated() }));
+  });
+  await act(async () => {}); // let "a" and "b" land
+
+  const node = root.children[0]!;
+  const before = node.spans.map((span) => span.text).join("");
+  if (before !== "ab") throw new Error(`expected "a","b" to land, got ${before}`);
+  const rendersBeforeBatch = renderCalls.length;
+
+  release(); // unblock the later batch
+  await act(async () => {});
+
+  const after = node.spans.map((span) => span.text).join("");
+  if (after !== "abc") throw new Error(`expected "c" to land, got ${after}`);
+  const rendersAfterBatch = renderCalls.length;
+  if (rendersAfterBatch <= rendersBeforeBatch) {
+    throw new Error(
+      `render() must be invoked after appends (${rendersBeforeBatch} -> ${rendersAfterBatch})`,
+    );
+  }
+  await act(async () => {
+    ternRoot.unmount();
+  });
 });
