@@ -2,6 +2,9 @@
   "name": "@tern/solid",
   "version": "0.1.0",
   "exports": "./src/index.ts",
+  "imports": {
+    "solid-js": "../../node_modules/solid-js/dist/solid.js"
+  },
   "tasks": {
     "check": "deno check src/index.ts",
     "test": "deno test src",
