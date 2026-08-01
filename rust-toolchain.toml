@@ -1,0 +1,4 @@
+# tern workspace toolchain — pinned to stable Rust 1.94.
+[toolchain]
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]

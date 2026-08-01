@@ -1,0 +1,28 @@
+# tern — Fuchsia-style Cargo workspace
+#
+# Layout convention (see docs/architecture.md):
+#   src/core/*       Rust core crates (scene tree, layout, terminal, components)
+#   src/bindings/*   Language bindings (napi binding for Node.js)
+#   examples/rust/*  Rust example binaries
+#
+# Other top-level trees (packages/, tools/, tests/, third_party/) are
+# documented in docs/architecture.md and live outside the Rust workspace.
+
+[workspace]
+resolver = "2"
+members = [
+    "src/core/tern-core",
+    "src/core/tern-layout",
+    "src/core/tern-terminal",
+    "src/core/tern-components",
+    "src/bindings/tern-node",
+    "examples/rust/tern-demo",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+# Release profile for the napi cdylib (tern-node): LTO keeps the addon lean.
+[profile.release]
+lto = true
