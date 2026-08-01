@@ -1,0 +1,17 @@
+{
+  "name": "@tern/examples",
+  "version": "0.1.0",
+  "exports": "./src/index.ts",
+  "tasks": {
+    "check": "deno check src/index.ts",
+    "test": "deno test src",
+    "build": "deno check src/index.ts"
+  },
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": true
+  }
+}

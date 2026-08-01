@@ -1,0 +1,22 @@
+{
+  "name": "@tern/examples",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tern examples — runnable demos for the tern TUI renderers",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "check": "deno check src/index.ts",
+    "check:tsc": "tsc --noEmit",
+    "test": "deno test src",
+    "build": "deno task build",
+    "build:tsc": "tsc --noEmit",
+    "demo:react": "deno run --allow-all react-demo.ts",
+    "demo:solid": "deno run --allow-all solid-demo.ts",
+    "smoke": "bash run-smoke.sh"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
