@@ -1,0 +1,19 @@
+{
+  "name": "@tern/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tern core — TypeScript bindings for the tern TUI engine",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "check": "deno check src/index.ts",
+    "check:tsc": "tsc --noEmit",
+    "test": "deno test src",
+    "build": "deno task build",
+    "build:tsc": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
