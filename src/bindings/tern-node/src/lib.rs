@@ -35,7 +35,7 @@ use napi_derive::napi;
 
 use tern_components::Compositor;
 use tern_core::buffer::{diff, Buffer};
-use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene};
+use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene, Span};
 use tern_core::style::{BorderStyle, Modifiers, Style};
 use tern_core::{Color, Size};
 use tern_terminal::backend::Backend;
@@ -303,6 +303,67 @@ impl NodeHandle {
         })
     }
 
+    /// Materialize `child` (a detached `create_node` template) into the scene
+    /// under this node, positioned immediately before `anchor` in this node's
+    /// children, and return the bound child handle so calls can chain
+    /// (`parent.insert_before(create_node(...), existing_child)`).
+    ///
+    /// `anchor` must be an already-attached child of this node (in this node's
+    /// scene); `child` must still be detached. Errors when `self` is detached,
+    /// `child` already has a parent, or `anchor` is detached / not a child of
+    /// this node.
+    #[napi(js_name = "insert_before")]
+    pub fn insert_before(&self, child: &NodeHandle, anchor: &NodeHandle) -> Result<NodeHandle> {
+        let (parent_id, parent_scene) = {
+            let parent = self.inner.lock().expect("node inner poisoned");
+            let id = parent
+                .id
+                .ok_or_else(|| Error::from_reason("parent node is not attached to a scene"))?;
+            (id, parent.scene.clone())
+        };
+        // Snapshot the detached child's materialization data before touching
+        // the anchor: `child` and `anchor` may alias the same handle, and no
+        // two handle mutexes are ever held at once.
+        let (kind, style, props) = {
+            let child_inner = child.inner.lock().expect("node inner poisoned");
+            if child_inner.id.is_some() {
+                return Err(Error::from_reason("child node already has a parent"));
+            }
+            (child_inner.kind, child_inner.style, child_inner.props.clone())
+        };
+        let anchor_id = {
+            let anchor_inner = anchor.inner.lock().expect("node inner poisoned");
+            let id = anchor_inner
+                .id
+                .ok_or_else(|| Error::from_reason("anchor node is not attached to a scene"))?;
+            if !Arc::ptr_eq(&anchor_inner.scene, &parent_scene) {
+                return Err(Error::from_reason("anchor node is not a child of this node"));
+            }
+            id
+        };
+        let mut scene = parent_scene.lock().expect("scene poisoned");
+        let index = scene
+            .children(parent_id)
+            .ok_or_else(|| Error::from_reason("parent node not found in scene"))?
+            .iter()
+            .position(|c| *c == anchor_id)
+            .ok_or_else(|| Error::from_reason("anchor node is not a child of this node"))?;
+        let id = scene
+            .insert_child(parent_id, index, kind, style)
+            .ok_or_else(|| Error::from_reason("parent node not found in scene"))?;
+        scene.set_props(id, props);
+        drop(scene);
+        // Bind the child handle into the scene, mirroring `add_child`.
+        {
+            let mut child_inner = child.inner.lock().expect("node inner poisoned");
+            child_inner.id = Some(id);
+            child_inner.scene = parent_scene.clone();
+        }
+        Ok(NodeHandle {
+            inner: child.inner.clone(),
+        })
+    }
+
     /// Detach this node (and its whole subtree) from the scene. Returns
     /// `false` when the node was already detached (or is the scene root).
     #[napi(js_name = "remove")]
@@ -339,12 +400,43 @@ impl NodeHandle {
         }
         Ok(())
     }
+
+    /// Append a styled span of text to a `streaming_text` node's stream.
+    ///
+    /// `style` follows the same style-key convention as `set_props` (`fg`,
+    /// `bg`, `border_style`, and the boolean modifiers are lifted into the
+    /// span's style; every other key is ignored). The span is appended to the
+    /// node's accumulated stream in the shared scene, in call order. Errors
+    /// when the node is detached from the scene or is not a `streaming_text`
+    /// node.
+    #[napi(js_name = "append_span")]
+    pub fn append_span(
+        &self,
+        text: String,
+        style: Option<HashMap<String, serde_json::Value>>,
+    ) -> Result<()> {
+        let (style, _) = props_to_style_map(style.unwrap_or_default());
+        let inner = self.inner.lock().expect("node inner poisoned");
+        let Some(id) = inner.id else {
+            return Err(Error::from_reason("node is not attached to a scene"));
+        };
+        if inner.kind != NodeKind::StreamingText {
+            return Err(Error::from_reason(
+                "append_span requires a streaming_text node",
+            ));
+        }
+        let mut scene = inner.scene.lock().expect("scene poisoned");
+        if !scene.append_span(id, Span { text, style }) {
+            return Err(Error::from_reason("node not found in scene"));
+        }
+        Ok(())
+    }
 }
 
-/// Create a detached node template of `type` (`"box"` or `"text"`) with
-/// `props`. The handle is materialized into the scene when it is added to a
-/// bound parent via `NodeHandle.add_child`. See `set_props` for the style-key
-/// convention.
+/// Create a detached node template of `type` (`"box"`, `"text"`, or
+/// `"streaming_text"`) with `props`. The handle is materialized into the scene
+/// when it is added to a bound parent via `NodeHandle.add_child`. See
+/// `set_props` for the style-key convention.
 #[napi(js_name = "create_node")]
 pub fn create_node(
     r#type: String,
@@ -353,9 +445,10 @@ pub fn create_node(
     let kind = match r#type.as_str() {
         "box" => NodeKind::Box,
         "text" => NodeKind::Text,
+        "streaming_text" => NodeKind::StreamingText,
         other => {
             return Err(Error::from_reason(format!(
-                "unknown node type {other:?} (expected \"box\" or \"text\")"
+                "unknown node type {other:?} (expected \"box\", \"text\", or \"streaming_text\")"
             )))
         }
     };
@@ -603,5 +696,317 @@ mod tests {
         assert_eq!(json_to_prop_value(serde_json::json!(true)), Some(PropValue::Bool(true)));
         assert_eq!(json_to_prop_value(serde_json::json!(null)), None);
         assert_eq!(json_to_prop_value(serde_json::json!([1, 2])), None);
+    }
+
+    #[test]
+    fn create_node_accepts_streaming_text_type() {
+        let node = create_node("streaming_text".to_string(), None).expect("create streaming node");
+        assert_eq!(node.inner.lock().expect("node inner poisoned").kind, NodeKind::StreamingText);
+    }
+
+    #[test]
+    fn create_node_rejects_unknown_type() {
+        let err = match create_node("marquee".to_string(), None) {
+            Ok(_) => panic!("unknown type must error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("streaming_text"), "{err}");
+    }
+
+    #[test]
+    fn append_span_lands_span_in_scene_stream() {
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let id = {
+            let mut s = scene.lock().expect("scene poisoned");
+            let root = s.root_id();
+            s.add_child(root, NodeKind::StreamingText, Style::new())
+                .expect("add streaming node")
+        };
+        let node = NodeHandle::materialized(
+            scene.clone(),
+            id,
+            NodeKind::StreamingText,
+            Style::new(),
+            PropMap::new(),
+        );
+        let style = HashMap::from([
+            ("fg".to_string(), serde_json::json!("#ff0000")),
+            ("bold".to_string(), serde_json::json!(true)),
+            // A non-style key is ignored by the style-lifting convention.
+            ("padding".to_string(), serde_json::json!(2)),
+        ]);
+        node.append_span("hello".to_string(), Some(style))
+            .expect("append_span succeeds");
+        let s = scene.lock().expect("scene poisoned");
+        let stream = s.stream(id).expect("stream exists");
+        assert_eq!(stream.len(), 1);
+        assert_eq!(stream[0].text, "hello");
+        assert_eq!(stream[0].style.fg, _Color::Rgb(255, 0, 0));
+        assert!(stream[0].style.modifiers.contains(Modifiers::BOLD));
+    }
+
+    #[test]
+    fn append_span_accumulates_spans_in_call_order() {
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let id = {
+            let mut s = scene.lock().expect("scene poisoned");
+            let root = s.root_id();
+            s.add_child(root, NodeKind::StreamingText, Style::new())
+                .expect("add streaming node")
+        };
+        let node = NodeHandle::materialized(
+            scene.clone(),
+            id,
+            NodeKind::StreamingText,
+            Style::new(),
+            PropMap::new(),
+        );
+        node.append_span("a".to_string(), None).expect("first span");
+        node.append_span("b".to_string(), None).expect("second span");
+        let s = scene.lock().expect("scene poisoned");
+        let texts: Vec<&str> = s
+            .stream(id)
+            .expect("stream exists")
+            .iter()
+            .map(|sp| sp.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn append_span_errors_when_node_is_detached() {
+        let node = create_node("streaming_text".to_string(), None).expect("create streaming node");
+        let err = node
+            .append_span("hi".to_string(), None)
+            .expect_err("detached node must error");
+        assert!(err.to_string().contains("not attached"), "{err}");
+    }
+
+    #[test]
+    fn append_span_errors_on_non_streaming_node() {
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let id = {
+            let mut s = scene.lock().expect("scene poisoned");
+            let root = s.root_id();
+            s.add_child(root, NodeKind::Text, Style::new())
+                .expect("add text node")
+        };
+        let node = NodeHandle::materialized(
+            scene.clone(),
+            id,
+            NodeKind::Text,
+            Style::new(),
+            PropMap::new(),
+        );
+        let err = node
+            .append_span("hi".to_string(), None)
+            .expect_err("non-streaming node must error");
+        assert!(err.to_string().contains("streaming_text"), "{err}");
+    }
+
+    /// The scene id of an attached handle.
+    fn attached_id(handle: &NodeHandle) -> NodeId {
+        handle
+            .inner
+            .lock()
+            .expect("node inner poisoned")
+            .id
+            .expect("handle is attached")
+    }
+
+    /// The ordered scene ids of `parent`'s children.
+    fn child_ids(scene: &Arc<Mutex<Scene>>, parent: &NodeHandle) -> Vec<NodeId> {
+        let parent_id = attached_id(parent);
+        let s = scene.lock().expect("scene poisoned");
+        s.children(parent_id).expect("parent in scene").to_vec()
+    }
+
+    /// A detached `text` template for insertion tests.
+    fn text_template() -> NodeHandle {
+        create_node("text".to_string(), None).expect("create text template")
+    }
+
+    #[test]
+    fn insert_before_lands_at_anchor_index() {
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let root_id = scene.lock().expect("scene poisoned").root_id();
+        let root =
+            NodeHandle::materialized(scene.clone(), root_id, NodeKind::Root, Style::new(), PropMap::new());
+
+        let a = root.add_child(&text_template()).expect("add a");
+        let b = root.add_child(&text_template()).expect("add b");
+        let c = root.add_child(&text_template()).expect("add c");
+        assert_eq!(
+            child_ids(&scene, &root),
+            vec![attached_id(&a), attached_id(&b), attached_id(&c)]
+        );
+
+        // Before the first child.
+        let x = root
+            .insert_before(&text_template(), &a)
+            .expect("insert before first");
+        assert_eq!(
+            child_ids(&scene, &root),
+            vec![attached_id(&x), attached_id(&a), attached_id(&b), attached_id(&c)]
+        );
+
+        // Before the middle child.
+        let y = root
+            .insert_before(&text_template(), &b)
+            .expect("insert before middle");
+        assert_eq!(
+            child_ids(&scene, &root),
+            vec![attached_id(&x), attached_id(&a), attached_id(&y), attached_id(&b), attached_id(&c)]
+        );
+
+        // Before the last child (c sits at index 4 of [x, a, y, b, c]).
+        let z = root
+            .insert_before(&text_template(), &c)
+            .expect("insert before last");
+        assert_eq!(
+            child_ids(&scene, &root),
+            vec![
+                attached_id(&x),
+                attached_id(&a),
+                attached_id(&y),
+                attached_id(&b),
+                attached_id(&z),
+                attached_id(&c),
+            ]
+        );
+
+        // Every inserted node is a child of `root` in scene order.
+        let s = scene.lock().expect("scene poisoned");
+        for handle in [&x, &a, &y, &z, &b, &c] {
+            let n = s.node(attached_id(handle)).expect("node in scene");
+            assert_eq!(n.parent, Some(root_id));
+        }
+    }
+
+    #[test]
+    fn insert_before_binds_child_like_add_child() {
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let root_id = scene.lock().expect("scene poisoned").root_id();
+        let root =
+            NodeHandle::materialized(scene.clone(), root_id, NodeKind::Root, Style::new(), PropMap::new());
+
+        let anchor = root.add_child(&text_template()).expect("add anchor");
+        let child = create_node(
+            "box".to_string(),
+            Some(HashMap::from([("text".to_string(), serde_json::json!("hi"))])),
+        )
+        .expect("create child with props");
+        let bound = root.insert_before(&child, &anchor).expect("insert before");
+
+        // The returned handle shares the child's inner state and is attached.
+        assert!(Arc::ptr_eq(&child.inner, &bound.inner));
+        assert_ne!(attached_id(&bound), attached_id(&anchor));
+        // Scoped so the scene guard is dropped before `bound` is used as a
+        // parent below (a MutexGuard is not released by NLL early).
+        {
+            let s = scene.lock().expect("scene poisoned");
+            assert_eq!(
+                s.prop(attached_id(&bound), "text"),
+                Some(&PropValue::Str("hi".to_string()))
+            );
+        }
+
+        // The bound handle can itself be a parent.
+        let grandchild = bound.add_child(&text_template()).expect("add grandchild");
+        {
+            let s = scene.lock().expect("scene poisoned");
+            assert_eq!(
+                s.node(attached_id(&grandchild)).unwrap().parent,
+                Some(attached_id(&bound))
+            );
+            assert_eq!(
+                s.children(attached_id(&bound)).unwrap(),
+                &[attached_id(&grandchild)]
+            );
+        }
+    }
+
+    #[test]
+    fn insert_before_rejects_child_with_parent() {
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let root_id = scene.lock().expect("scene poisoned").root_id();
+        let root =
+            NodeHandle::materialized(scene.clone(), root_id, NodeKind::Root, Style::new(), PropMap::new());
+
+        let a = root.add_child(&text_template()).expect("add a");
+        let b = root.add_child(&text_template()).expect("add b");
+
+        let err = match root.insert_before(&a, &b) {
+            Ok(_) => panic!("attached child must error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("already has a parent"), "{err}");
+        // Nothing was inserted.
+        assert_eq!(
+            child_ids(&scene, &root),
+            vec![attached_id(&a), attached_id(&b)]
+        );
+    }
+
+    #[test]
+    fn insert_before_rejects_detached_anchor() {
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let root_id = scene.lock().expect("scene poisoned").root_id();
+        let root =
+            NodeHandle::materialized(scene.clone(), root_id, NodeKind::Root, Style::new(), PropMap::new());
+
+        let a = root.add_child(&text_template()).expect("add a");
+        let detached = text_template();
+
+        let err = match root.insert_before(&text_template(), &detached) {
+            Ok(_) => panic!("detached anchor must error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("anchor"), "{err}");
+        assert_eq!(child_ids(&scene, &root), vec![attached_id(&a)]);
+    }
+
+    #[test]
+    fn insert_before_rejects_foreign_anchor() {
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let root_id = scene.lock().expect("scene poisoned").root_id();
+        let root =
+            NodeHandle::materialized(scene.clone(), root_id, NodeKind::Root, Style::new(), PropMap::new());
+
+        // `parent` is a box under root; the anchor is attached under root as
+        // a sibling of `parent`, so it is not one of `parent`'s children.
+        let parent = root.add_child(&create_node("box".to_string(), None).expect("create box"))
+            .expect("add box");
+        let _a = parent.add_child(&text_template()).expect("add a");
+        let foreign = root.add_child(&text_template()).expect("add foreign");
+
+        let err = match parent.insert_before(&text_template(), &foreign) {
+            Ok(_) => panic!("foreign anchor must error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("not a child of this node"), "{err}");
+        // The foreign sibling's sibling order is untouched.
+        assert_eq!(
+            child_ids(&scene, &root),
+            vec![attached_id(&parent), attached_id(&foreign)]
+        );
+    }
+
+    #[test]
+    fn insert_before_rejects_detached_parent() {
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let root_id = scene.lock().expect("scene poisoned").root_id();
+        let root =
+            NodeHandle::materialized(scene.clone(), root_id, NodeKind::Root, Style::new(), PropMap::new());
+
+        let a = root.add_child(&text_template()).expect("add a");
+        let detached = create_node("box".to_string(), None).expect("create detached parent");
+
+        let err = match detached.insert_before(&text_template(), &a) {
+            Ok(_) => panic!("detached parent must error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("not attached"), "{err}");
+        assert_eq!(child_ids(&scene, &root), vec![attached_id(&a)]);
     }
 }
