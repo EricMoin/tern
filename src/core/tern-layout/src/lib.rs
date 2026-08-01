@@ -132,9 +132,10 @@ fn build_node(
         };
     }
 
-    // Text nodes are leaves; build their (by construction empty) children
-    // list and register the content for measurement.
-    let children: Vec<TaffyNodeId> = if node.kind == NodeKind::Text {
+    // Text and StreamingText nodes are leaves; build their (by construction
+    // empty) children list and register the content for measurement.
+    let is_leaf = matches!(node.kind, NodeKind::Text | NodeKind::StreamingText);
+    let children: Vec<TaffyNodeId> = if is_leaf {
         Vec::new()
     } else {
         node.children
@@ -143,16 +144,28 @@ fn build_node(
             .collect()
     };
 
-    let taffy_node = if node.kind == NodeKind::Text {
-        let t = taffy.new_leaf(style).ok()?;
-        if let Some(PropValue::Str(content)) = node.props.get("text") {
-            text_map.insert(t, content.clone());
+    let taffy_node = match node.kind {
+        NodeKind::Text => {
+            let t = taffy.new_leaf(style).ok()?;
+            if let Some(PropValue::Str(content)) = node.props.get("text") {
+                text_map.insert(t, content.clone());
+            }
+            t
         }
-        t
-    } else if children.is_empty() {
-        taffy.new_leaf(style).ok()?
-    } else {
-        taffy.new_with_children(style, &children).ok()?
+        NodeKind::StreamingText => {
+            let t = taffy.new_leaf(style).ok()?;
+            // The compositor renders the node's accumulated stream; register
+            // the concatenated span texts so the measure closure sizes the
+            // leaf to its display width (same path as `text` content).
+            let content: String = scene
+                .stream(id)
+                .map(|spans| spans.iter().map(|span| span.text.as_str()).collect())
+                .unwrap_or_default();
+            text_map.insert(t, content);
+            t
+        }
+        _ if children.is_empty() => taffy.new_leaf(style).ok()?,
+        _ => taffy.new_with_children(style, &children).ok()?,
     };
 
     node_map.insert(id, taffy_node);
@@ -268,7 +281,7 @@ fn layout_to_rect(layout: &TaffyLayout) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tern_core::scene::Scene;
+    use tern_core::scene::{Scene, Span};
     use tern_core::style::Style as CellStyle;
 
     fn new_scene() -> Scene {
@@ -389,6 +402,40 @@ mod tests {
 
         let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 10));
         assert_eq!(rect_of(&out, t), Rect::new(0, 0, 3, 1));
+    }
+
+    #[test]
+    fn streaming_text_leaf_is_sized_to_concatenated_content() {
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        // flex-start alignment keeps the leaf at its measured height of 1
+        // instead of stretching to the container height.
+        set_prop(&mut scene, root, "align_items", PropValue::Str("flex-start".into()));
+        let s = scene
+            .add_child(root, NodeKind::StreamingText, CellStyle::new())
+            .expect("add streaming text");
+        assert!(scene.append_span(s, Span { text: "Hello".into(), style: CellStyle::new() }));
+        assert!(scene.append_span(s, Span { text: " world".into(), style: CellStyle::new() }));
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 10));
+        // "Hello" (5) + " world" (6) -> 11 cells.
+        assert_eq!(rect_of(&out, s), Rect::new(0, 0, 11, 1));
+    }
+
+    #[test]
+    fn streaming_text_measure_is_multi_width_aware() {
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        set_prop(&mut scene, root, "align_items", PropValue::Str("flex-start".into()));
+        let s = scene
+            .add_child(root, NodeKind::StreamingText, CellStyle::new())
+            .expect("add streaming text");
+        // 'コ' is a 2-cell wide char; 'a' is 1 cell -> width 3.
+        assert!(scene.append_span(s, Span { text: "コ".into(), style: CellStyle::new() }));
+        assert!(scene.append_span(s, Span { text: "a".into(), style: CellStyle::new() }));
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 10));
+        assert_eq!(rect_of(&out, s), Rect::new(0, 0, 3, 1));
     }
 
     #[test]
