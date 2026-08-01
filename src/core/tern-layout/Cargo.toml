@@ -1,0 +1,10 @@
+[package]
+name = "tern-layout"
+version.workspace = true
+edition.workspace = true
+description = "tern layout: computes sizes and positions for the scene tree"
+
+[dependencies]
+tern-core = { path = "../tern-core" }
+taffy = "0.7"
+unicode-width = "0.2"
