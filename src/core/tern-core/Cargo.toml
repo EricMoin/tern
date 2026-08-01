@@ -1,0 +1,8 @@
+[package]
+name = "tern-core"
+version.workspace = true
+edition.workspace = true
+description = "tern scene tree: the core scene graph for the TUI renderer"
+
+[dependencies]
+unicode-width = "0.2"
