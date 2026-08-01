@@ -6,10 +6,12 @@
  *
  * - `createRenderer(options)` constructs a `Renderer` (a native `TuiRenderer`
  *   in raw mode + alternate screen) and exposes the scene root as a `Node`.
- * - `Text(props)` / `Box(props, ...children)` are factory functions returning
- *   `Node` objects. They are pure data (no native calls) until a node is
- *   attached under the scene root with `Node.addChild`, which materializes it
- *   in the shared scene.
+ * - `Text(props)` / `Box(props, ...children)` / `StreamingText(props)` are
+ *   factory functions returning `Node` objects. They are pure data (no native
+ *   calls) until a node is attached under the scene root with
+ *   `Node.addChild`, which materializes it in the shared scene. Spans fed
+ *   to a `streaming_text` node via `Node.appendSpan` while detached are
+ *   flushed to the native handle on attach.
  * - `Renderer` owns the render/input loop: `render()`, `pollEvents()`,
  *   `onKey(cb)`, `onResize(cb)` and `destroy()`.
  *
@@ -42,8 +44,8 @@ import type {
 } from "../../../src/bindings/tern-node/index.d.ts";
 import { loadAddon } from "./addon.ts";
 
-/** The two node kinds the MVP binding materializes. */
-export type NodeType = "box" | "text";
+/** The node kinds the binding materializes. */
+export type NodeType = "box" | "text" | "streaming_text";
 
 /**
  * Props for a scene node. Style keys (`fg`, `bg`, `border_style`, the boolean
@@ -79,6 +81,20 @@ export interface NodeProps {
 export type KeyHandler = (event: KeyEvent) => void;
 export type ResizeHandler = () => void;
 
+/**
+ * A single styled segment of a `streaming_text` node's stream, appended via
+ * `Node.appendSpan`. `style` follows the same scalar-prop JSON convention as
+ * `NodeProps` (and `setProps`): the recognized style keys (`fg`, `bg`,
+ * `border_style`, the boolean modifiers) are lifted into the span's style by
+ * the binding; every other key is ignored.
+ */
+export interface Span {
+  /** The span's text content. */
+  text: string;
+  /** Optional style keys for this span. */
+  style?: NodeProps;
+}
+
 /** Options accepted by `createRenderer`. */
 export interface CreateRendererOptions {
   /**
@@ -103,6 +119,7 @@ export class Node {
   #props: NodeProps;
   #children: Node[];
   #attached: boolean;
+  #spans: Span[];
 
   /** @internal — use `Text` / `Box` (or `Node.wrapRoot`) to create nodes. */
   private constructor(type: NodeType, props: NodeProps, children: Node[]) {
@@ -111,6 +128,7 @@ export class Node {
     this.#props = { ...props };
     this.#children = [...children];
     this.#attached = false;
+    this.#spans = [];
   }
 
   /** @internal — build a detached node object. */
@@ -139,7 +157,10 @@ export class Node {
     return { ...this.#props };
   }
 
-  /** The children declared at creation (or added via `addChild`). */
+  /**
+   * The children declared at creation, or added via `addChild` /
+   * `insertBefore`, in scene order. Returns a copy.
+   */
   get children(): readonly Node[] {
     return [...this.#children];
   }
@@ -168,12 +189,72 @@ export class Node {
   }
 
   /**
+   * Insert `child` into this node's children immediately before `anchor`,
+   * returning `child` for chaining.
+   *
+   * When this node is already attached, the child is materialized into the
+   * scene at `anchor`'s position via the native handle's `insert_before`, and
+   * the child's own subtree is attached (mirroring `addChild`). When this
+   * node is detached, the child is recorded positionally in the children
+   * list, so the reorder lands in the scene automatically once this node
+   * attaches (`#attach` materializes `#children` in order).
+   *
+   * Throws when `child` is already a child of this node, or when `anchor` is
+   * not a child of this node.
+   */
+  insertBefore(child: Node, anchor: Node): Node {
+    if (this.#children.includes(child)) {
+      throw new Error("child node is already attached to this parent");
+    }
+    const index = this.#children.indexOf(anchor);
+    if (index === -1) {
+      throw new Error("anchor node is not a child of this parent");
+    }
+    if (this.#attached) {
+      this.#ensureHandle().insert_before(child.#ensureHandle(), anchor.#ensureHandle());
+      child.#attach();
+    }
+    this.#children.splice(index, 0, child);
+    return child;
+  }
+
+  /**
    * Replace this node's props (and style keys) in the scene. On a detached
    * node the props are recorded and applied when the node materializes.
    */
   setProps(props: NodeProps): void {
     this.#props = { ...props };
     if (this.#handle !== null) this.#handle.set_props(props);
+  }
+
+  /**
+   * Append a styled span of text to this node's stream.
+   *
+   * On a detached node the span is recorded and flushed to the native handle
+   * (in call order) when the node is attached to the scene. On an attached
+   * node the span is appended to the native handle immediately. `style` is
+   * serialized with the same scalar-prop JSON convention as `setProps`: the
+   * binding lifts the recognized style keys into the span's style and ignores
+   * every other key.
+   *
+   * The native binding errors when the node is not a `streaming_text` node,
+   * so appending to a `Text`/`Box` node surfaces that error at attach time.
+   */
+  appendSpan(text: string, style?: NodeProps): void {
+    if (this.#attached && this.#handle !== null) {
+      this.#handle.append_span(text, style);
+    } else {
+      this.#spans.push(style === undefined ? { text } : { text, style });
+    }
+  }
+
+  /**
+   * The spans appended while this node was detached, in call order. Empty
+   * once the node is attached (recorded spans are flushed to the native
+   * handle). Returns a copy.
+   */
+  get spans(): readonly Span[] {
+    return [...this.#spans];
   }
 
   /**
@@ -200,10 +281,23 @@ export class Node {
     if (this.#attached) return;
     this.#attached = true;
     const handle = this.#ensureHandle();
+    this.#flushSpans(handle);
     for (const child of this.#children) {
       handle.add_child(child.#ensureHandle());
       child.#attach();
     }
+  }
+
+  /**
+   * Replay spans recorded while detached onto the now-attached handle.
+   * Called only after the handle is bound into the scene (`add_child`), since
+   * the native `append_span` errors on a not-yet-bound handle.
+   */
+  #flushSpans(handle: NativeNodeHandle): void {
+    for (const span of this.#spans) {
+      handle.append_span(span.text, span.style);
+    }
+    this.#spans = [];
   }
 
   #unattach(): void {
@@ -220,6 +314,15 @@ export function Text(props: NodeProps = {}): Node {
 /** Create a `box` node object with optional child nodes. */
 export function Box(props: NodeProps = {}, ...children: Node[]): Node {
   return Node.create("box", props, children);
+}
+
+/**
+ * Create a `streaming_text` node object. Its stream is fed with
+ * `Node.appendSpan` (spans are recorded while the node is detached and
+ * flushed to the native handle in call order on attach).
+ */
+export function StreamingText(props: NodeProps = {}): Node {
+  return Node.create("streaming_text", props);
 }
 
 /**

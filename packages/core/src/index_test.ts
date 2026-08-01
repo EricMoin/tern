@@ -13,12 +13,19 @@
 import {
   Box,
   Node,
+  StreamingText,
   Text,
   createRenderer,
   name,
   version,
 } from "./index.ts";
-import type { KeyEvent, NodeHandle, TuiRenderer, TuiRendererOptions } from "./index.ts";
+import type {
+  KeyEvent,
+  NodeHandle,
+  Span,
+  TuiRenderer,
+  TuiRendererOptions,
+} from "./index.ts";
 
 Deno.test("core exports package metadata", () => {
   if (name !== "@tern/core") {
@@ -129,11 +136,118 @@ Deno.test("addChild rejects duplicate children", () => {
   if (!threw) throw new Error("adding the same child twice must throw");
 });
 
+Deno.test("insertBefore before-first and between siblings reflects the new order in children", () => {
+  const a = Text({ text: "a" });
+  const b = Text({ text: "b" });
+  const c = Text({ text: "c" });
+  const parent = Box({}, a, b, c);
+
+  // Before-first: insert x ahead of the current first child `a`.
+  const x = Text({ text: "x" });
+  const returned = parent.insertBefore(x, a);
+  if (returned !== x) throw new Error("insertBefore must return the child");
+  let kids = parent.children;
+  if (kids.length !== 4) throw new Error(`children.length = ${kids.length}`);
+  if (kids[0] !== x || kids[1] !== a || kids[2] !== b || kids[3] !== c) {
+    throw new Error("insertBefore before-first must place the child ahead of the anchor");
+  }
+
+  // Between siblings: insert y between a and b.
+  const y = Text({ text: "y" });
+  parent.insertBefore(y, b);
+  kids = parent.children;
+  if (kids.length !== 5) throw new Error(`children.length = ${kids.length}`);
+  if (kids[0] !== x || kids[1] !== a || kids[2] !== y || kids[3] !== b || kids[4] !== c) {
+    throw new Error("insertBefore between siblings must preserve the surrounding order");
+  }
+
+  // The detached parent (and the inserted children) stay unattached; the
+  // reorder is recorded positionally and lands in the scene on attach.
+  if (parent.attached) throw new Error("detached parent must stay unattached");
+  if (x.attached || y.attached) throw new Error("inserted children must stay unattached");
+});
+
+Deno.test("insertBefore rejects an anchor that is not a child of this node", () => {
+  const parent = Box();
+  const a = Text({ text: "a" });
+  const b = Text({ text: "b" });
+  parent.addChild(a);
+  const foreign = Text({ text: "foreign" });
+  let threw = false;
+  try {
+    parent.insertBefore(b, foreign);
+  } catch {
+    threw = true;
+  }
+  if (!threw) throw new Error("inserting before a foreign anchor must throw");
+  const kids = parent.children;
+  if (kids.length !== 1) throw new Error("failed insert must not mutate children");
+  if (kids[0] !== a) throw new Error("failed insert must not reorder children");
+});
+
+Deno.test("insertBefore rejects duplicate children", () => {
+  const parent = Box();
+  const a = Text({ text: "a" });
+  const b = Text({ text: "b" });
+  parent.addChild(a);
+  parent.addChild(b);
+  let threw = false;
+  try {
+    parent.insertBefore(a, b);
+  } catch {
+    threw = true;
+  }
+  if (!threw) throw new Error("inserting an existing child must throw");
+  const kids = parent.children;
+  if (kids.length !== 2) throw new Error("failed insert must not mutate children");
+  if (kids[0] !== a || kids[1] !== b) throw new Error("failed insert must not reorder children");
+});
+
 Deno.test("setProps works on a detached template", () => {
   const node = Text({ text: "old" });
   node.setProps({ text: "new", bold: true });
   if (node.props.text !== "new") throw new Error(`text = ${node.props.text}`);
   if (node.props.bold !== true) throw new Error(`bold = ${node.props.bold}`);
+});
+
+Deno.test("StreamingText builds a streaming_text node", () => {
+  const node = StreamingText();
+  if (!(node instanceof Node)) throw new Error("StreamingText() must return a Node");
+  if (node.type !== "streaming_text") throw new Error(`type = ${node.type}`);
+  if (Object.keys(node.props).length !== 0) {
+    throw new Error(`expected empty props, got ${JSON.stringify(node.props)}`);
+  }
+  if (node.children.length !== 0) throw new Error("streaming_text nodes have no children");
+  const styled = StreamingText({ fg: "#00ff00", bold: true });
+  if (styled.props.fg !== "#00ff00" || styled.props.bold !== true) {
+    throw new Error("StreamingText must forward props");
+  }
+});
+
+Deno.test("appendSpan on a detached node records spans", () => {
+  const node = StreamingText();
+  node.appendSpan("hello", { bold: true });
+  node.appendSpan("world");
+  const spans: readonly Span[] = node.spans;
+  if (spans.length !== 2) throw new Error(`spans.length = ${spans.length}`);
+  const first = spans[0];
+  const second = spans[1];
+  if (first === undefined || second === undefined) throw new Error("recorded spans missing");
+  if (first.text !== "hello") throw new Error(`spans[0].text = ${first.text}`);
+  if (first.style?.bold !== true) throw new Error("span style must be recorded");
+  if (second.text !== "world") throw new Error(`spans[1].text = ${second.text}`);
+  if (second.style !== undefined) throw new Error("omitted style must stay undefined");
+  if (node.attached) throw new Error("node must stay unattached");
+  (spans as Span[]).length = 0;
+  if (node.spans.length !== 2) throw new Error("spans getter must return a copy");
+});
+
+Deno.test("setProps still works on streaming nodes", () => {
+  const node = StreamingText({ text: "old" });
+  node.setProps({ text: "new", fg: "#0000ff" });
+  if (node.type !== "streaming_text") throw new Error(`type = ${node.type}`);
+  if (node.props.text !== "new") throw new Error(`text = ${node.props.text}`);
+  if (node.props.fg !== "#0000ff") throw new Error(`fg = ${node.props.fg}`);
 });
 
 Deno.test("remove on a detached template returns false", () => {
