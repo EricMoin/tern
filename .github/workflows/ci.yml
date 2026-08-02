@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust (build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Reads the toolchain pinned in rust-toolchain.toml (Rust 1.94.0).
+      # rustflags is cleared so the build matches a plain local
+      # `cargo build --workspace` invocation (the action's default
+      # RUSTFLAGS=-D warnings would be stricter than local).
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+
+      - name: Build workspace
+        run: cargo build --workspace
+
+      - name: Test workspace
+        run: cargo test --workspace
+
+  js:
+    name: JS workspace (check + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      # The repo's package.json scripts run deno check / deno test.
+      - uses: denoland/setup-deno@v2
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Type check (deno check)
+        run: npm run check
+
+      - name: Tests (deno test)
+        run: npm test
