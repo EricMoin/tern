@@ -9,10 +9,15 @@
  *   Bare string children are rejected at render time — text lives in an
  *   explicit `<Text text="..." />` element.
  * - The roadmap host components `<Input>` / `<Spinner>` / `<StatusBar>` /
- *   `<Panels>` materialize the core factories of the same name. `<Spinner>`
- *   runs its tick timer while mounted (cleared on unmount); `<Input>` with a
- *   `focusId` registers with a `FocusManager` so routed keys edit it
- *   (`onChange` / `onSubmit`).
+ *   `<Panels>` / `<DiffView>` / `<Select>` / `<ScrollView>` materialize the
+ *   core factories of the same name. `<Spinner>` runs its tick timer while
+ *   mounted (cleared on unmount); `<Input>` / `<Select>` with a `focusId`
+ *   register with a `FocusManager` so routed keys edit them (`onChange` /
+ *   `onSubmit`, `onChange` / `onConfirm` / `onDismiss`). `<ScrollView>` is a
+ *   clip/scroll region box (the engine's `clip_*` / `scroll_*` props); the
+ *   core `scrollTo` / `scrollBy` / `scrollTop` helpers drive its offsets
+ *   (clamped against `Node.contentSize()`), optionally with a track + thumb
+ *   scrollbar leaf.
  * - `render(element, renderer)` / `createRoot(renderer)` mount a tree onto a
  *   core renderer's scene root; every commit paints the scene via
  *   `renderer.render()`.
@@ -20,13 +25,17 @@
  *   `useInput(handler)` subscribes to keyboard input for the tree, routing
  *   each key to the focused element's handler first (via the core
  *   `FocusManager`) and falling back to the tree handler. `useFocus()` hooks
- *   an arbitrary element's node into a `FocusManager`.
+ *   an arbitrary element's node into a `FocusManager`. `useResize(handler)`
+ *   subscribes to terminal resize events, re-invoking `renderer.render()`
+ *   after each so the compositor re-lays out at the new terminal size.
  *
  * See `./reconciler.ts` for the HostConfig mapping table.
  */
 
 import {
+  createContext,
   createElement,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -35,18 +44,40 @@ import {
   type RefObject,
 } from "react";
 import {
+  defaultTheme,
+  dragPanels,
   editKey,
+  endPanelDrag,
   focusManager,
+  mergeTheme,
+  resolveTheme,
+  scrollBy,
+  scrollTo,
+  scrollTop,
+  selectKey,
+  setStreamAutoScroll,
+  startPanelDrag,
+  syncStreamTail,
   tick,
   useFocus as coreUseFocus,
   FocusManager,
+  type DiffLine,
   type FocusHandle,
   type KeyHandler,
   type Node,
   type NodeProps,
+  type PanelDragHandle,
+  type PanelDragResult,
   type PanelSpec,
+  type ResizeHandler,
+  type SelectOption,
+  type SelectState,
   type Span,
   type StatusBarSegment,
+  type Theme,
+  type ThemeComponent,
+  type ThemeOverrides,
+  type ThemeRole,
 } from "@tern/core";
 import { useApp } from "./reconciler.ts";
 
@@ -59,10 +90,18 @@ export const version = "0.1.0";
 
 /**
  * Props accepted by the tern host components: the tern node props (style +
- * layout keys, see `@tern/core` `NodeProps`) plus React `children`.
+ * layout keys, see `@tern/core` `NodeProps`) plus React `children` and the
+ * semantic theme hints `role` / `component` (consumed by the host component
+ * via `resolveTheme` — never scene props).
  */
 export interface TernNodeProps extends NodeProps {
   children?: ReactNode;
+  /** Resolve the node's `fg`/`bg` from this palette role (consumed, never a
+   *  scene prop). */
+  role?: ThemeRole;
+  /** Resolve the node's `fg`/`bg`/`border_style` from this component preset
+   *  (consumed, never a scene prop). */
+  component?: ThemeComponent;
 }
 
 /** Props for `<Box>`. */
@@ -79,8 +118,12 @@ export interface StreamingTextProps extends TernNodeProps {
   /** The async stream of styled spans appended to the node. */
   stream: AsyncIterable<Span>;
   /**
-   * Follow the stream tail as it grows (default `true`). The MVP compositor
-   * always follows the tail, so the flag is accepted for API stability.
+   * Follow the stream tail as it grows (default `true`). While following,
+   * each appended span pins the node's `scroll_y` to the content tail — the
+   * stream's `Node.contentSize()` height vs the `clip_height` viewport (see
+   * `@tern/core` `syncStreamTail` / `followTail`). A manual scroll above the
+   * tail (via `scrollTo` / `scrollBy` / `scrollTop`) detaches the follow and
+   * pins the view where the user left it; `followTail` re-attaches.
    */
   autoScroll?: boolean;
   /**
@@ -88,6 +131,50 @@ export interface StreamingTextProps extends TernNodeProps {
    * compositor always soft-wraps, so the flag is accepted for API stability.
    */
   wrap?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
+
+/**
+ * The React context carrying the active `Theme`. Defaults to the core
+ * `defaultTheme`, so host components resolve against the default theme when
+ * no `ThemeProvider` is mounted (provider fallback).
+ */
+export const ThemeContext = createContext<Theme>(defaultTheme);
+
+/** Props for `ThemeProvider`: the (partial) theme plus the tree it applies
+ * to. The theme is merged over the core `defaultTheme`, so a partial theme
+ * keeps the default palette/presets for everything it does not override. */
+export interface ThemeProviderProps {
+  /** The theme (or a partial override) applied to the subtree. */
+  theme?: ThemeOverrides;
+  children?: ReactNode;
+}
+
+/**
+ * Provide a theme to the host components below it. The given `theme` is
+ * merged over the core `defaultTheme` (`mergeTheme`), so partial overrides
+ * keep the default palette and presets. Host components (`<Box>`, `<Text>`,
+ * the roadmap components) resolve their `role` / `component` hints against
+ * this theme at element-creation time, stamping plain `fg` / `bg` /
+ * `border_style` node props.
+ */
+export function ThemeProvider(props: ThemeProviderProps): ReactElement<ThemeProviderProps> {
+  const theme = useMemo(
+    () => (props.theme === undefined ? defaultTheme : mergeTheme(defaultTheme, props.theme)),
+    [props.theme],
+  );
+  return createElement(ThemeContext.Provider, { value: theme }, props.children);
+}
+
+/**
+ * The active theme for the current tree — the value of the nearest
+ * `ThemeProvider`, or the core `defaultTheme` when none is mounted.
+ */
+export function useTheme(): Theme {
+  return useContext(ThemeContext);
 }
 
 // ---------------------------------------------------------------------------
@@ -104,19 +191,24 @@ const HOST_STREAMING_TEXT: string = "streaming_text";
 
 /**
  * The `<Box>` host component: a container node (border, background, padding,
- * flex layout). Maps to the core `Box(props)` factory.
+ * flex layout). Maps to the core `Box(props)` factory. The active theme is
+ * resolved onto the props at element-creation time (`role` / `component`
+ * hints become plain `fg` / `bg` / `border_style`).
  */
 export function Box(props: BoxProps): ReactElement<BoxProps> {
-  return createElement(HOST_BOX, props);
+  const theme = useTheme();
+  return createElement(HOST_BOX, resolveTheme(theme, props) as BoxProps);
 }
 
 /**
  * The `<Text>` host component: a leaf node carrying its content in the
  * `text` prop. Maps to the core `Text(props)` factory. String children are
- * not allowed — use `<Text text="..." />`.
+ * not allowed — use `<Text text="..." />`. The active theme is resolved onto
+ * the props at element-creation time.
  */
 export function Text(props: TextProps): ReactElement<TextProps> {
-  return createElement(HOST_TEXT, props);
+  const theme = useTheme();
+  return createElement(HOST_TEXT, resolveTheme(theme, props) as TextProps);
 }
 
 /**
@@ -131,9 +223,19 @@ export function Text(props: TextProps): ReactElement<TextProps> {
  * `stream` change — cancels the iteration via `iterator.return()`, the
  * AbortController-style cleanup that lets the producer run its own
  * teardown.
+ *
+ * With `autoScroll` (the default), each append also feeds the core auto-scroll
+ * (`syncStreamTail`): the node's `scroll_y` stays pinned to the stream tail
+ * (`Node.contentSize()` height vs the `clip_height` viewport) while the user
+ * does not scroll up; a manual scroll above the tail detaches and
+ * `followTail` re-attaches. A separate effect keeps the core follow state in
+ * sync with the `autoScroll` prop (the reconciler strips the flag from the
+ * scene props, so the core factory's default-on must be corrected for an
+ * explicit `autoScroll: false`).
  */
 export function StreamingText(props: StreamingTextProps): ReactElement<StreamingTextProps> {
   const { renderer } = useApp();
+  const theme = useTheme();
   const nodeRef = useRef<Node | null>(null);
 
   useEffect(() => {
@@ -149,6 +251,10 @@ export function StreamingText(props: StreamingTextProps): ReactElement<Streaming
           const { done, value } = await iterator.next();
           if (done || cancelled) break;
           node.appendSpan(value.text, value.style);
+          // Auto-scroll: keep the view pinned to the growing stream tail when
+          // following (a no-op while detached, when `autoScroll` is off, or
+          // after a manual scroll detached the follow).
+          syncStreamTail(node);
           renderer.render();
         }
       } finally {
@@ -166,7 +272,20 @@ export function StreamingText(props: StreamingTextProps): ReactElement<Streaming
     };
   }, [renderer, props.stream]);
 
-  return createElement(HOST_STREAMING_TEXT, { ...props, ref: nodeRef });
+  // Sync the core follow state with the `autoScroll` flag. The reconciler
+  // strips `autoScroll` before the core factory sees it, so the node defaults
+  // to following; this corrects an explicit `autoScroll: false` and re-enables
+  // on toggle. The node ref is stable across renders.
+  useEffect(() => {
+    const node = nodeRef.current;
+    if (node === null) return;
+    setStreamAutoScroll(node, props.autoScroll !== false);
+  }, [props.autoScroll]);
+
+  return createElement(HOST_STREAMING_TEXT, {
+    ...(resolveTheme(theme, props) as StreamingTextProps),
+    ref: nodeRef,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +303,9 @@ const HOST_INPUT: string = "input";
 const HOST_SPINNER: string = "spinner";
 const HOST_STATUS_BAR: string = "status_bar";
 const HOST_PANELS: string = "panels";
+const HOST_DIFF: string = "diff";
+const HOST_SELECT: string = "select";
+const HOST_SCROLL_VIEW: string = "scroll_view";
 
 /** The state reported by `<Input>` callbacks after a routed key. */
 export interface InputState {
@@ -272,6 +394,69 @@ export interface PanelsProps extends TernNodeProps {
 }
 
 /**
+ * Props for `<DiffView>`: the tern node props plus the unified-diff line
+ * model and the scroll-region passthroughs, forwarded verbatim to the core
+ * `DiffView` factory (`hunks` is JS bookkeeping — the lines become composed
+ * text leaves and never reach the scene props).
+ */
+export interface DiffViewProps extends TernNodeProps {
+  /** The unified-diff lines to render, in scene order. */
+  hunks: DiffLine[];
+  /** The horizontal scroll offset in cells (default 0). */
+  scroll_x?: number;
+  /** The vertical scroll offset in cells (default 0). */
+  scroll_y?: number;
+  /**
+   * Passed through to each content text leaf: `false` keeps every diff line
+   * single-row (no soft wrap — the classic diff look).
+   */
+  wrap?: boolean;
+}
+
+/**
+ * Props for `<Select>`: the tern node props plus the options list, the
+ * interactive state (forwarded verbatim to the core `Select` factory — the
+ * option list is JS bookkeeping and never reaches the scene props) and the
+ * focus/callback wiring (consumed by the component).
+ */
+export interface SelectProps extends TernNodeProps {
+  /** The options to choose from, in list order. */
+  options: SelectOption[];
+  /** Multi-select mode: space toggles checkmarks (default `false`). */
+  multi?: boolean;
+  /** Single mode: the confirmed value; multi mode: the selected values. */
+  value?: string | string[];
+  /** The highlighted option's index within the filtered list (default 0). */
+  highlighted?: number;
+  /** The typeahead filter query narrowing the visible options (default
+   * `""`). */
+  filter?: string;
+  /** Whether the dropdown is open (default `true`). */
+  open?: boolean;
+  /** Render as a floating overlay via the root box's `z_index` prop
+   * (default 0). */
+  floating?: boolean;
+  /** The overlay's paint z-order (used when `floating`; default 0). */
+  z_index?: number;
+  /**
+   * Register the select with a `FocusManager` under this id so routed keys
+   * (via `useInput`) drive it through the core `selectKey`. Omit to leave
+   * the select inert to keys.
+   */
+  focusId?: string;
+  /** The `FocusManager` to register with (defaults to the core
+   *  `focusManager`). */
+  focusManager?: FocusManager;
+  /** Fired after a routed key changes the highlight, filter or selection. */
+  onChange?: (state: SelectState) => void;
+  /** Fired when the Enter key routes to this select (the confirmed
+   *  state — single mode `value` carries the highlighted option). */
+  onConfirm?: (state: SelectState) => void;
+  /** Fired when the Escape key routes to this select (dismissal). */
+  onDismiss?: (state: SelectState) => void;
+}
+
+/**
  * The `<Input>` host component: a framed box with a text leaf carrying the
  * value and caret (core `Input` factory). When `focusId` is given, the input
  * registers with a `FocusManager` on mount and routed keys (via `useInput`)
@@ -281,6 +466,7 @@ export interface PanelsProps extends TernNodeProps {
  * its composition is fixed by the factory.
  */
 export function Input(props: InputProps): ReactElement<InputProps> {
+  const theme = useTheme();
   const nodeRef = useRef<Node | null>(null);
   const manager = props.focusManager ?? focusManager;
   // The callbacks are read through refs so a parent re-render with new
@@ -305,7 +491,10 @@ export function Input(props: InputProps): ReactElement<InputProps> {
     }, manager).dispose;
   }, [props.focusId, manager]);
 
-  return createElement(HOST_INPUT, { ...props, ref: nodeRef });
+  return createElement(HOST_INPUT, {
+    ...(resolveTheme(theme, { ...props, component: "input" }) as InputProps),
+    ref: nodeRef,
+  });
 }
 
 /**
@@ -314,41 +503,182 @@ export function Input(props: InputProps): ReactElement<InputProps> {
  * interval (`interval` prop, default 100ms) advances the frame via the core
  * `tick` and repaints the scene; the interval is cleared on unmount. The
  * element takes no React children.
+ *
+ * The tick is focus-aware (roadmap Phase 2): the effect subscribes to
+ * `renderer.onFocus` and skips `tick()`/`render()` while `focus_gained` is
+ * `false` — the frames are invisible while the terminal is unfocused, so the
+ * redraw cost is wasted — resuming on focus regain.
  */
 export function Spinner(props: SpinnerProps): ReactElement<SpinnerProps> {
   const { renderer } = useApp();
+  const theme = useTheme();
   const nodeRef = useRef<Node | null>(null);
   const interval = props.interval ?? 100;
 
   useEffect(() => {
     const node = nodeRef.current;
     if (node === null) return;
+    // The terminal starts focused; the onFocus subscription flips the flag on
+    // blur/regain so the interval skips tick()/render() while unfocused.
+    let focused = true;
     const id = setInterval(() => {
+      if (!focused) return;
       tick(node);
       renderer.render();
     }, interval);
-    return () => clearInterval(id);
+    const unsubscribeFocus = renderer.onFocus((event) => {
+      focused = event.focus_gained;
+    });
+    return () => {
+      clearInterval(id);
+      unsubscribeFocus();
+    };
   }, [renderer, interval]);
 
-  return createElement(HOST_SPINNER, { ...props, ref: nodeRef });
+  return createElement(HOST_SPINNER, {
+    ...(resolveTheme(theme, { ...props, component: "spinner" }) as SpinnerProps),
+    ref: nodeRef,
+  });
 }
 
 /**
  * The `<StatusBar>` host component: a single-row flex strip whose children
  * are the left/center/right segment `Text` nodes (core `StatusBar` factory).
- * Pure prop forwarding — no React-level wiring. Takes no React children.
+ * The `status_bar` component preset is resolved onto the strip's props at
+ * element-creation time. Takes no React children.
  */
 export function StatusBar(props: StatusBarProps): ReactElement<StatusBarProps> {
-  return createElement(HOST_STATUS_BAR, props);
+  const theme = useTheme();
+  return createElement(
+    HOST_STATUS_BAR,
+    resolveTheme(theme, { ...props, component: "status_bar" }) as StatusBarProps,
+  );
 }
 
 /**
  * The `<Panels>` host component: a flex stack of panel boxes, each with a
- * header `Text` and a body node (core `Panels` factory). Pure prop
- * forwarding — no React-level wiring. Takes no React children.
+ * header `Text` and a body node (core `Panels` factory). The `panels`
+ * component preset is resolved onto the stack's props at element-creation
+ * time. Takes no React children.
  */
 export function Panels(props: PanelsProps): ReactElement<PanelsProps> {
-  return createElement(HOST_PANELS, props);
+  const theme = useTheme();
+  return createElement(
+    HOST_PANELS,
+    resolveTheme(theme, { ...props, component: "panels" }) as PanelsProps,
+  );
+}
+
+/**
+ * The `<DiffView>` host component: a scrollable column of per-line rows
+ * rendering a unified diff (core `DiffView` factory) — a dimmed gutter with
+ * the old/new line numbers, a `+`/`-`/` ` marker, and the line content
+ * styled per kind (added green, deleted red, context dimmed). `scroll_x` /
+ * `scroll_y` pan the rows inside the clip region; `wrap` passes through to
+ * each content leaf. The `diff` component preset is resolved onto the root
+ * box's props at element-creation time. Takes no React children.
+ */
+export function DiffView(props: DiffViewProps): ReactElement<DiffViewProps> {
+  const theme = useTheme();
+  return createElement(
+    HOST_DIFF,
+    resolveTheme(theme, { ...props, component: "diff" }) as DiffViewProps,
+  );
+}
+
+/**
+ * The `<Select>` host component: a flex column of text leaves — a filter
+ * row, one option row per visible option (the highlighted row reversed,
+ * multi-mode rows `✓ `/`  `-prefixed), and in multi mode a selected-count
+ * summary row (core `Select` factory). When `focusId` is given, the select
+ * registers with a `FocusManager` on mount and routed keys (via `useInput`)
+ * drive it through the core `selectKey` — `onChange` fires after the
+ * highlight/filter/selection changes, `onConfirm` on Enter and `onDismiss`
+ * on Escape. The select's ref is managed internally; the element takes no
+ * React children — its composition is fixed by the factory.
+ */
+export function Select(props: SelectProps): ReactElement<SelectProps> {
+  const theme = useTheme();
+  const nodeRef = useRef<Node | null>(null);
+  const manager = props.focusManager ?? focusManager;
+  // The callbacks are read through refs so a parent re-render with new
+  // callbacks is picked up without re-registering the element.
+  const onChangeRef = useRef(props.onChange);
+  onChangeRef.current = props.onChange;
+  const onConfirmRef = useRef(props.onConfirm);
+  onConfirmRef.current = props.onConfirm;
+  const onDismissRef = useRef(props.onDismiss);
+  onDismissRef.current = props.onDismiss;
+
+  useEffect(() => {
+    const node = nodeRef.current;
+    if (node === null || props.focusId === undefined) return;
+    return coreUseFocus(props.focusId, node, (event) => {
+      const before = node.props as SelectProps;
+      const next = selectKey(node, event);
+      const changed =
+        next.highlighted !== before.highlighted ||
+        next.filter !== before.filter ||
+        next.value !== before.value ||
+        next.open !== before.open;
+      if (event.name === "enter") {
+        onConfirmRef.current?.(next);
+      } else if (event.name === "escape") {
+        onDismissRef.current?.(next);
+      } else if (changed) {
+        onChangeRef.current?.(next);
+      }
+    }, manager).dispose;
+  }, [props.focusId, manager]);
+
+  return createElement(HOST_SELECT, {
+    ...(resolveTheme(theme, { ...props, component: "select" }) as SelectProps),
+    ref: nodeRef,
+  });
+}
+
+/**
+ * Props for `<ScrollView>`: the tern node props plus the engine's scene
+ * region props (the clip rect and the scroll offset) and the scrollbar flag,
+ * forwarded verbatim to the core `ScrollView` factory. The view's content is
+ * its React children (the reconciler appends them after the scrollbar leaf).
+ */
+export interface ScrollViewProps extends TernNodeProps {
+  /** The clip rect's left edge in cells (default unset — no clip). */
+  clip_x?: number;
+  /** The clip rect's top edge in cells (default unset — no clip). */
+  clip_y?: number;
+  /** The clip rect's width in cells (default unset — no clip). */
+  clip_width?: number;
+  /** The clip rect's height in cells (default unset — no clip). */
+  clip_height?: number;
+  /** The horizontal scroll offset in cells (default 0). */
+  scroll_x?: number;
+  /** The vertical scroll offset in cells (default 0). */
+  scroll_y?: number;
+  /**
+   * Append a vertical scrollbar text leaf (track + thumb) to the composition
+   * (default `false`), refreshed by the core `scrollTo` / `scrollBy` /
+   * `scrollTop` helpers.
+   */
+  showScrollbar?: boolean;
+}
+
+/**
+ * The `<ScrollView>` host component: a clip/scroll region box carrying the
+ * engine's `clip_x` / `clip_y` / `clip_width` / `clip_height` and `scroll_x`
+ * / `scroll_y` props (core `ScrollView` factory). Its content is the React
+ * children, and the core `scrollTo` / `scrollBy` / `scrollTop` helpers drive
+ * the offsets (clamped against `Node.contentSize()`). The `scroll_view`
+ * component preset is resolved onto the box's props at element-creation
+ * time. Takes React children.
+ */
+export function ScrollView(props: ScrollViewProps): ReactElement<ScrollViewProps> {
+  const theme = useTheme();
+  return createElement(
+    HOST_SCROLL_VIEW,
+    resolveTheme(theme, { ...props, component: "scroll_view" }) as ScrollViewProps,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +729,74 @@ export function useFocus(
   );
 }
 
+/**
+ * Subscribe to terminal resize events for the current tree. The handler
+ * receives the new size as `{ width, height }` (the core `ResizeHandler`
+ * payload); after it runs, `renderer.render()` is re-invoked so the
+ * compositor re-lays out the scene at the new terminal size. The handler is
+ * read through a ref so a parent re-render with a new handler is picked up
+ * without re-subscribing. Returns nothing; the subscription is torn down when
+ * the component unmounts.
+ */
+export function useResize(handler: ResizeHandler): void {
+  const { renderer } = useApp();
+  // The handler is read through a ref so a parent re-render with a new
+  // handler is picked up without re-subscribing.
+  const handlerRef = useRef(handler);
+  handlerRef.current = handler;
+
+  useEffect(() => {
+    return renderer.onResize((event) => {
+      handlerRef.current(event);
+      // The compositor sizes the scene from the terminal; re-paint so the
+      // layout reflects the new width/height.
+      renderer.render();
+    });
+  }, [renderer]);
+}
+
+// ---------------------------------------------------------------------------
+// Mouse hooks
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire mouse drag-resize for a `<Panels>` element (roadmap Phase 2). The
+ * element's scene node must be read from `panelsRef` (e.g.
+ * `<Panels ref={panelsRef} ... />` — refs populate after commit, so the
+ * subscription is established in an effect and torn down on unmount).
+ *
+ * Mouse routing (via `Renderer.hit_test`): a `down_left` press starts a drag
+ * only when the pressed cell is covered by a painted scene node — the gutter
+ * cells inside the panels element are (the element's background covers them),
+ * while dead cells outside any node are not. Once the drag starts, each
+ * `drag_left` moves the split by setting the adjacent pane's `flex_basis`
+ * (`dragPanels`, clamped to the pane's min size) and re-invokes
+ * `renderer.render()` so the compositor re-flows; drags continue even when
+ * the cursor leaves the stack (the clamp bounds the split). Any `up_*` event
+ * ends the drag (`endPanelDrag`).
+ */
+export function usePanelMouseDrag(panelsRef: RefObject<Node | null>): void {
+  const { renderer } = useApp();
+
+  useEffect(() => {
+    return renderer.onMouse((event) => {
+      const panels = panelsRef.current;
+      if (panels === null) return;
+      if (event.kind === "down_left") {
+        // The press must land on a painted cell: `hit_test` returns the scene
+        // node ids covering the cell (empty off any node — the scene root is
+        // never reported, so a cell the panels element does not cover misses).
+        if (renderer.hit_test(event.column, event.row).length === 0) return;
+        startPanelDrag(panels, event);
+      } else if (event.kind === "drag_left") {
+        if (dragPanels(panels, event) !== null) renderer.render();
+      } else if (event.kind.startsWith("up_")) {
+        endPanelDrag(panels);
+      }
+    });
+  }, [renderer, panelsRef]);
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -421,16 +819,53 @@ export { hostConfig, toNodeProps } from "./reconciler.ts";
 // input handlers without importing @tern/core directly. (`FocusManager` is a
 // class — it is exported as a value below, which carries its type.)
 export type {
+  DiffLine,
   FocusHandle,
   KeyEvent,
   KeyHandler,
   Node,
   NodeProps,
+  PanelDragHandle,
+  PanelDragResult,
   PanelSpec,
   Renderer,
+  ResizeHandler,
+  SelectOption,
+  SelectState,
   Span,
   StatusBarSegment,
 } from "@tern/core";
-// Core values re-exported: the focus machinery and the element edit helpers
-// used by the roadmap host components.
-export { editKey, focusManager, FocusManager, tick } from "@tern/core";
+// Core values re-exported: the focus machinery, the element edit helpers
+// used by the roadmap host components, the scroll helpers (including the
+// streaming auto-scroll `followTail` / `syncStreamTail` / `isStreamFollowing`),
+// the panel drag-resize helpers, and the theme surface.
+export {
+  defaultTheme,
+  dragPanels,
+  editKey,
+  endPanelDrag,
+  focusManager,
+  followTail,
+  FocusManager,
+  isStreamFollowing,
+  mergeTheme,
+  resolveTheme,
+  scrollBy,
+  scrollTo,
+  scrollTop,
+  selectKey,
+  startPanelDrag,
+  syncStreamTail,
+  tick,
+} from "@tern/core";
+// Core theme types re-exported so consumers can type themes without
+// importing @tern/core directly.
+export type {
+  Theme,
+  ThemeComponent,
+  ThemeOverrides,
+  ThemeResolvableProps,
+  ThemeRole,
+  ThemeRoleColors,
+  ThemeStylePreset,
+} from "@tern/core";

@@ -11,20 +11,41 @@
  */
 
 import { act, createElement } from "react";
-import { Box as CoreBox, FocusManager, type KeyEvent, type Node, type Renderer, type Span } from "@tern/core";
+import {
+  Box as CoreBox,
+  FocusManager,
+  createRenderer,
+  followTail,
+  isStreamFollowing,
+  scrollTo,
+  syncStreamTail,
+  type KeyEvent,
+  type Node,
+  type Renderer,
+  type ResizeHandler,
+  type Span,
+  type TernEventJs,
+} from "@tern/core";
+import { setAddonForTesting } from "../../core/src/addon.ts";
+import type { TernAddon } from "../../core/src/addon.ts";
 
 // React 19 requires act() to be enabled explicitly in non-test-runner envs.
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 import {
   Box,
+  DiffView,
   Input,
   Panels,
+  ScrollView,
+  Select,
   Spinner,
   StatusBar,
   StreamingText,
   Text,
+  ThemeProvider,
   createRoot,
+  defaultTheme,
   hostConfig,
   name,
   render,
@@ -32,9 +53,12 @@ import {
   useApp,
   useFocus,
   useInput,
+  usePanelMouseDrag,
+  useResize,
+  useTheme,
   version,
 } from "./index.ts";
-import type { AppHandle, TernProps } from "./index.ts";
+import type { AppHandle, TernProps, Theme, ThemeOverrides } from "./index.ts";
 
 // The @types HostConfig marks the mutation methods optional; our config
 // implements them all, so widen the surface for direct calls in tests.
@@ -50,9 +74,13 @@ function mockRenderer(): {
   root: ReturnType<typeof CoreBox>;
   renderCalls: number[];
   keyHandlers: Set<(event: KeyEvent) => void>;
+  resizeHandlers: Set<ResizeHandler>;
+  focusHandlers: Set<(event: { focus_gained: boolean }) => void>;
 } {
   const renderCalls: number[] = [];
   const keyHandlers = new Set<(event: KeyEvent) => void>();
+  const resizeHandlers = new Set<ResizeHandler>();
+  const focusHandlers = new Set<(event: { focus_gained: boolean }) => void>();
   const root = CoreBox();
   const renderer = {
     root,
@@ -63,9 +91,17 @@ function mockRenderer(): {
       keyHandlers.add(handler);
       return () => keyHandlers.delete(handler);
     },
+    onResize: (handler: ResizeHandler) => {
+      resizeHandlers.add(handler);
+      return () => resizeHandlers.delete(handler);
+    },
+    onFocus: (handler: (event: { focus_gained: boolean }) => void) => {
+      focusHandlers.add(handler);
+      return () => focusHandlers.delete(handler);
+    },
     destroy: () => {},
   } as unknown as Renderer;
-  return { renderer, root, renderCalls, keyHandlers };
+  return { renderer, root, renderCalls, keyHandlers, resizeHandlers, focusHandlers };
 }
 
 function keyEvent(over: Partial<KeyEvent> = {}): KeyEvent {
@@ -94,7 +130,10 @@ Deno.test("public API surface is exported", () => {
     Spinner,
     StatusBar,
     Panels,
+    DiffView,
+    ScrollView,
     useFocus,
+    useResize,
     createRoot,
     render,
     useApp,
@@ -198,6 +237,47 @@ Deno.test("createInstance maps roadmap host types to the core factories", () => 
   if (panels.children.length !== 1) throw new Error(`panels = ${panels.children.length}`);
   if (panels.children[0]?.children[0]?.props.text !== "A") {
     throw new Error("panel header must be the first child");
+  }
+
+  const diff = hc.createInstance(
+    "diff",
+    { hunks: [{ kind: "add", old_line: 0, new_line: 1, text: "+x" }] } as never,
+    container,
+    {},
+    null,
+  );
+  if (diff.type !== "diff") throw new Error(`diff type = ${diff.type}`);
+  if (diff.children.length !== 1) throw new Error(`diff rows = ${diff.children.length}`);
+  const diffRow = diff.children[0]!;
+  if (diffRow.children.length !== 3) throw new Error("a diff row must be gutter + marker + content");
+  if (diffRow.children[1]?.props.text !== "+") {
+    throw new Error("add marker must be the first-row marker");
+  }
+});
+
+Deno.test("createInstance maps scroll_view to the core ScrollView factory", () => {
+  const container = { root: CoreBox(), renderer: mockRenderer().renderer };
+  const view = hc.createInstance(
+    "scroll_view",
+    { clip_x: 1, clip_y: 2, clip_width: 10, clip_height: 4, scroll_y: 3, showScrollbar: true },
+    container,
+    {},
+    null,
+  );
+  if (view.type !== "scroll_view") throw new Error(`type = ${view.type}`);
+  if (view.props.clip_x !== 1 || view.props.clip_y !== 2) {
+    throw new Error(`clip origin = ${JSON.stringify(view.props)}`);
+  }
+  if (view.props.clip_width !== 10 || view.props.clip_height !== 4) {
+    throw new Error(`clip size = ${JSON.stringify(view.props)}`);
+  }
+  if (view.props.scroll_y !== 3) throw new Error(`scroll_y = ${view.props.scroll_y}`);
+  // `showScrollbar` is consumed by the factory (a scrollbar leaf is composed),
+  // never a scene prop.
+  if ("showScrollbar" in view.props) throw new Error("showScrollbar must not reach the scene props");
+  const leaf = view.children[0];
+  if (leaf === undefined || leaf.type !== "text" || leaf.props.position !== "absolute") {
+    throw new Error("showScrollbar must compose a scrollbar text leaf");
   }
 });
 
@@ -655,6 +735,44 @@ Deno.test("useInput with isActive: false stays detached", async () => {
   if (keyHandlers.size !== 0) throw new Error("inactive handler must not subscribe");
 });
 
+Deno.test("useResize subscribes to renderer resize events, re-renders, and detaches on unmount", async () => {
+  const { renderer, resizeHandlers, renderCalls } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  const last: { size: { width: number; height: number } | null } = { size: null };
+  function ResizeProbe() {
+    useResize((size) => {
+      last.size = size;
+    });
+    return createElement(Text, { text: "resize" });
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(ResizeProbe));
+  });
+
+  if (resizeHandlers.size !== 1) {
+    throw new Error(`expected 1 resize handler, got ${resizeHandlers.size}`);
+  }
+  // The mount commit already painted (prepareForCommit/resetAfterCommit);
+  // a resize must add at least one more render() call on top of that.
+  const rendersBeforeResize = renderCalls.length;
+  for (const handler of resizeHandlers) handler({ width: 120, height: 40 });
+  if (last.size === null || last.size.width !== 120 || last.size.height !== 40) {
+    throw new Error(`useResize handler must receive the new size, got ${JSON.stringify(last.size)}`);
+  }
+  if (renderCalls.length <= rendersBeforeResize) {
+    throw new Error(
+      `useResize must re-invoke renderer.render() on resize (${rendersBeforeResize} -> ${renderCalls.length})`,
+    );
+  }
+
+  await act(async () => {
+    ternRoot.unmount();
+  });
+  if (resizeHandlers.size >= 1) throw new Error("resize handler must be detached on unmount");
+});
+
 // ---------------------------------------------------------------------------
 // StreamingText
 // ---------------------------------------------------------------------------
@@ -775,6 +893,342 @@ Deno.test("StreamingText invokes render() after stream appends", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// StreamingText auto-scroll wiring
+//
+// `<StreamingText>` feeds the core auto-scroll after each appended span:
+// `syncStreamTail` pins `scroll_y` to the stream tail (content height minus
+// the `clip_height` viewport) while following; a manual scroll above the tail
+// detaches (pins the view); `followTail` re-attaches and snaps back. The
+// tree mounts onto a real core `Renderer` over a *size-aware fake addon*
+// (the `setAddonForTesting` seam — same approach as the @tern/core tests), so
+// `Node.contentSize()` measures the streamed spans and the scroll offsets are
+// observable as scene props.
+// ---------------------------------------------------------------------------
+
+/** A push-driven async span source with an interruptible iterator. */
+function manualSpanSource(): {
+  push(span: Span): void;
+  stream: AsyncIterable<Span>;
+} {
+  const queue: Span[] = [];
+  let wake: (() => void) | undefined;
+  let closed = false;
+
+  const step = (resolve: (r: IteratorResult<Span>) => void): void => {
+    const span = queue.shift();
+    if (span !== undefined) {
+      resolve({ value: span, done: false });
+      return;
+    }
+    if (closed) {
+      resolve({ value: undefined, done: true });
+      return;
+    }
+    wake = () => step(resolve);
+  };
+
+  const iterator: AsyncIterator<Span> = {
+    next(): Promise<IteratorResult<Span>> {
+      return new Promise((resolve) => step(resolve));
+    },
+    return(): Promise<IteratorResult<Span>> {
+      closed = true;
+      wake?.(); // release a parked next() with done:true
+      return Promise.resolve({ value: undefined, done: true });
+    },
+  };
+
+  return {
+    push(span: Span): void {
+      queue.push(span);
+      wake?.();
+    },
+    stream: { [Symbol.asyncIterator]: () => iterator },
+  };
+}
+
+/** Per-handle `content_size` overrides for the panel-drag geometry tests
+ * (keyed by the `FakeStreamNodeHandle` instance backing the node). */
+const fakeDragSizes = new Map<object, { width: number; height: number }>();
+
+/** Mouse events queued for the next `poll_events` call of the drag-test fake
+ * renderer (consumed in order). */
+const pendingMouseEvents: TernEventJs[] = [];
+
+/** A size-aware fake native handle: `content_size` measures streamed spans. */
+class FakeStreamNodeHandle {
+  readonly kind: string;
+  streamText = "";
+  constructor(type: string) {
+    this.kind = type;
+  }
+  content_size(): { width: number; height: number } {
+    // Per-handle override for the panel-drag geometry tests.
+    const override = fakeDragSizes.get(this);
+    if (override !== undefined) return override;
+    if (this.kind === "streaming_text") {
+      const lines = this.streamText.split("\n");
+      let width = 0;
+      for (const line of lines) width = Math.max(width, line.length);
+      return { width, height: lines.length };
+    }
+    return { width: 11, height: 2 };
+  }
+  add_child(child: unknown): unknown {
+    return child;
+  }
+  insert_before(child: unknown, _anchor: unknown): unknown {
+    return child;
+  }
+  set_props(_props: unknown): void {}
+  append_span(text: string, _style?: unknown): void {
+    this.streamText += text;
+  }
+  remove(): boolean {
+    return true;
+  }
+}
+
+/** A fake native `TuiRenderer` standing in for the real addon. */
+class FakeStreamTuiRenderer {
+  destroyed = false;
+  constructor(_options: unknown) {}
+  root(): unknown {
+    return new FakeStreamNodeHandle("box");
+  }
+  poll_events(_timeoutMs: number): unknown[] {
+    return [];
+  }
+  render(): void {}
+  destroy(): void {
+    this.destroyed = true;
+  }
+}
+
+/** The size-aware fake addon injected through `setAddonForTesting`. */
+const streamFakeAddon = {
+  TuiRenderer: FakeStreamTuiRenderer,
+  NodeHandle: FakeStreamNodeHandle,
+  create_node: (type: string) => new FakeStreamNodeHandle(type),
+} as unknown as TernAddon;
+
+/** A fake native `TuiRenderer` whose `poll_events` drains `pendingMouseEvents`
+ * (the panel-drag tests dispatch mouse events through it). */
+class DragFakeTuiRenderer {
+  destroyed = false;
+  constructor(_options: unknown) {}
+  root(): unknown {
+    return new FakeStreamNodeHandle("box");
+  }
+  poll_events(_timeoutMs: number): TernEventJs[] {
+    return pendingMouseEvents.splice(0);
+  }
+  hit_test(_col: number, _row: number): bigint[] {
+    // Every press lands on a painted cell (the routing gate in
+    // `usePanelMouseDrag` consults this).
+    return [7n];
+  }
+  render(): void {}
+  destroy(): void {
+    this.destroyed = true;
+  }
+}
+
+/** The fake addon for the panel-drag tests: mouse events flow through
+ * `poll_events` and `content_size` reads the per-handle registry. */
+const dragFakeAddon = {
+  TuiRenderer: DragFakeTuiRenderer,
+  NodeHandle: FakeStreamNodeHandle,
+  create_node: (type: string) => new FakeStreamNodeHandle(type),
+} as unknown as TernAddon;
+
+Deno.test("StreamingText auto-scrolls to the tail, detaches on scroll-up, re-attaches via followTail", async () => {
+  setAddonForTesting(streamFakeAddon);
+  try {
+    const renderer = createRenderer();
+    const ternRoot = createRoot(renderer);
+    const source = manualSpanSource();
+
+    await act(async () => {
+      ternRoot.render(
+        createElement(StreamingText, { stream: source.stream, clip_height: 2, width: 10 }),
+      );
+    });
+    await act(async () => {}); // mount effects; the pump parks on next()
+
+    // Three newline-terminated spans -> content 4 rows -> tail 4 - 2 = 2.
+    // One push per act: each act drains the pump's microtasks, so the pump
+    // parks on a fresh next() before the next push is delivered.
+    await act(async () => {
+      source.push({ text: "a\n" });
+    });
+    await act(async () => {
+      source.push({ text: "b\n" });
+    });
+    await act(async () => {
+      source.push({ text: "c\n" });
+    });
+
+    const node = renderer.root.children[0]!;
+    if (node.type !== "streaming_text") throw new Error(`type = ${node.type}`);
+    if (!isStreamFollowing(node)) throw new Error("autoScroll must default to following");
+    const y = (): number => node.props.scroll_y as number;
+    if (y() !== 2) throw new Error(`tail scroll_y = ${y()}`);
+
+    // Manual scroll up above the tail: the follow detaches and pins the view.
+    scrollTo(node, 0, 0);
+    if (isStreamFollowing(node)) throw new Error("a scroll above the tail must detach");
+    await act(async () => {
+      source.push({ text: "d\n" }); // 5 rows now — the view stays pinned
+    });
+    if (y() !== 0) throw new Error(`pinned scroll_y = ${y()}`);
+
+    // followTail: re-attach and snap to the current tail (5 - 2 = 3).
+    followTail(node);
+    if (!isStreamFollowing(node)) throw new Error("followTail must re-attach");
+    if (y() !== 3) throw new Error(`snap scroll_y = ${y()}`);
+
+    // And follows subsequent growth again (6 rows -> tail 4).
+    await act(async () => {
+      source.push({ text: "e\n" });
+    });
+    if (y() !== 4) throw new Error(`follow scroll_y = ${y()}`);
+
+    await act(async () => {
+      ternRoot.unmount();
+    });
+  } finally {
+    setAddonForTesting(null);
+  }
+});
+
+Deno.test("StreamingText with autoScroll: false keeps the view pinned", async () => {
+  setAddonForTesting(streamFakeAddon);
+  try {
+    const renderer = createRenderer();
+    const ternRoot = createRoot(renderer);
+    const source = manualSpanSource();
+
+    await act(async () => {
+      ternRoot.render(
+        createElement(StreamingText, { stream: source.stream, autoScroll: false, clip_height: 2, width: 10 }),
+      );
+    });
+    await act(async () => {});
+    await act(async () => {
+      source.push({ text: "a\n" });
+      source.push({ text: "b\n" });
+      source.push({ text: "c\n" });
+    });
+
+    const node = renderer.root.children[0]!;
+    if (isStreamFollowing(node)) throw new Error("autoScroll: false must not follow");
+    if (node.props.scroll_y !== undefined) {
+      throw new Error(`scroll_y must stay unset, got ${node.props.scroll_y}`);
+    }
+    if ("autoScroll" in node.props) {
+      throw new Error(`autoScroll leaked into props: ${JSON.stringify(node.props)}`);
+    }
+
+    await act(async () => {
+      ternRoot.unmount();
+    });
+  } finally {
+    setAddonForTesting(null);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Panel drag-resize (usePanelMouseDrag)
+//
+// The hook subscribes to the renderer's mouse events; a `down_left` on the
+// 1-cell gutter between adjacent panels starts a drag, each `drag_left`
+// mutates the adjacent pane's `flex_basis` (clamped to the pane's min size)
+// and re-renders, and `up_left` ends it. The tree mounts over the drag fake
+// addon so `Node.contentSize()` reports the per-handle laid-out sizes.
+// ---------------------------------------------------------------------------
+
+/** A `usePanelMouseDrag` probe: renders `<Panels>` and hooks the drag wiring
+ * onto the panels node. */
+function DragProbe(props: {
+  panelsRef: { current: Node | null };
+  panels: Array<{ header: string; body: Node }>;
+}): ReturnType<typeof createElement> {
+  usePanelMouseDrag(props.panelsRef);
+  return createElement(Panels, { ref: props.panelsRef, panels: props.panels, direction: "column" });
+}
+
+Deno.test("usePanelMouseDrag resizes a panels split on gutter drags and clamps to the pane min", async () => {
+  setAddonForTesting(dragFakeAddon);
+  try {
+    const renderer = createRenderer();
+    const ternRoot = createRoot(renderer);
+    const panelsRef: { current: Node | null } = { current: null };
+
+    await act(async () => {
+      ternRoot.render(
+        createElement(DragProbe, {
+          panelsRef,
+          panels: [
+            { header: "A", body: CoreBox() },
+            { header: "B", body: CoreBox() },
+          ],
+        }),
+      );
+    });
+    await act(async () => {}); // flush the mount effect (mouse subscription)
+
+    const panels = panelsRef.current;
+    if (panels === null) throw new Error("ref must receive the panels node");
+    // Laid-out sizes: panel A rows 0-2, gutter row 3, panel B rows 4-5,
+    // stack 9 rows tall.
+    fakeDragSizes.set(panels.handle, { width: 60, height: 9 });
+    fakeDragSizes.set(panels.children[0]!.handle, { width: 60, height: 3 });
+    fakeDragSizes.set(panels.children[1]!.handle, { width: 60, height: 2 });
+
+    const emit = (kind: string, column: number, row: number): void => {
+      pendingMouseEvents.push({
+        type: "mouse",
+        mouse: { kind, column, row, ctrl: false, alt: false, shift: false },
+      });
+      renderer.pollEvents(0);
+    };
+
+    // down_left on gutter 0, then drag down 1 cell: panel A's flex_basis 3 -> 4.
+    emit("down_left", 0, 3);
+    emit("drag_left", 0, 4);
+    const panelA = panels.children[0]!;
+    // Read through a function so TS control-flow narrowing does not pin the
+    // prop to the literal of the first assertion.
+    const basis = (): number => panelA.props.flex_basis as number;
+    if (basis() !== 4) {
+      throw new Error(`flex_basis after drag = ${basis()}`);
+    }
+
+    // Drag up far above the split: clamps to the pane min (1).
+    emit("drag_left", 0, -20);
+    if (basis() !== 1) {
+      throw new Error(`min-clamped flex_basis = ${basis()}`);
+    }
+
+    // up_left ends the drag; a later drag_left is inert.
+    emit("up_left", 0, -20);
+    emit("drag_left", 0, 5);
+    if (basis() !== 1) {
+      throw new Error(`post-up drag flex_basis = ${basis()}`);
+    }
+
+    await act(async () => {
+      ternRoot.unmount();
+    });
+  } finally {
+    setAddonForTesting(null);
+    pendingMouseEvents.length = 0;
+    fakeDragSizes.clear();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Roadmap host components
 // ---------------------------------------------------------------------------
 
@@ -860,6 +1314,61 @@ Deno.test("Panels materializes panel boxes with headers and honors collapsed", a
   if ("panels" in panels.props) throw new Error("panels spec must not reach the scene props");
 });
 
+Deno.test("DiffView materializes per-hunk rows with gutter, markers, kind colors and scroll props", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(async () => {
+    ternRoot.render(
+      createElement(DiffView, {
+        hunks: [
+          { kind: "ctx", old_line: 1, new_line: 1, text: "  fn main() {" },
+          { kind: "del", old_line: 2, new_line: 0, text: "    let x = 1;" },
+          { kind: "add", old_line: 0, new_line: 2, text: "    let x = 2;" },
+        ],
+        scroll_y: 3,
+        wrap: false,
+      }),
+    );
+  });
+
+  const diff = root.children[0];
+  if (!diff || diff.type !== "diff") throw new Error("expected a diff node");
+  if (diff.props.scroll_y !== 3) throw new Error(`scroll_y = ${diff.props.scroll_y}`);
+  if ("hunks" in diff.props) throw new Error("hunks must not reach the scene props");
+  if (diff.children.length !== 3) throw new Error(`rows = ${diff.children.length}`);
+
+  const ctxRow = diff.children[0]!;
+  const delRow = diff.children[1]!;
+  const addRow = diff.children[2]!;
+  // Gutter: right-aligned old/new line numbers (single-digit -> width 1).
+  if (ctxRow.children[0]?.props.text !== "1 1") {
+    throw new Error(`ctx gutter = ${JSON.stringify(ctxRow.children[0]?.props.text)}`);
+  }
+  if (delRow.children[0]?.props.text !== "2  ") {
+    throw new Error(`del gutter = ${JSON.stringify(delRow.children[0]?.props.text)}`);
+  }
+  // Markers: space / '-' / '+'.
+  if (ctxRow.children[1]?.props.text !== " " || delRow.children[1]?.props.text !== "-" ||
+      addRow.children[1]?.props.text !== "+") {
+    throw new Error("marker chars must be space/-/+ per kind");
+  }
+  // Kind colors: del red, add green, ctx dimmed.
+  if (delRow.children[1]?.props.fg !== "#e06c75" || delRow.children[2]?.props.fg !== "#e06c75") {
+    throw new Error(`del colors = ${JSON.stringify(delRow.children[1]?.props.fg)}`);
+  }
+  if (addRow.children[1]?.props.fg !== "#98c379" || addRow.children[2]?.props.fg !== "#98c379") {
+    throw new Error(`add colors = ${JSON.stringify(addRow.children[1]?.props.fg)}`);
+  }
+  if (ctxRow.children[2]?.props.dim !== true) throw new Error("ctx content must be dimmed");
+  // wrap passes through to the content leaves.
+  for (const row of diff.children) {
+    if (row.children[2]?.props.wrap !== false) {
+      throw new Error("content leaves must carry wrap=false");
+    }
+  }
+});
+
 Deno.test("Spinner advances while mounted and clears its interval on unmount", async () => {
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
@@ -882,6 +1391,59 @@ Deno.test("Spinner advances while mounted and clears its interval on unmount", a
   const frozen = text();
   await new Promise((resolve) => setTimeout(resolve, 40));
   if (text() !== frozen) throw new Error("spinner interval must be cleared on unmount");
+});
+
+Deno.test("Spinner pauses ticks while unfocused and resumes on focus regain", async () => {
+  const { renderer, root, renderCalls, focusHandlers } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(async () => {
+    ternRoot.render(createElement(Spinner, { interval: 5 }));
+  });
+  const spinner = root.children[0];
+  if (!spinner || spinner.type !== "spinner") throw new Error("expected a spinner node");
+  // The effect must subscribe to renderer.onFocus alongside the interval.
+  if (focusHandlers.size !== 1) {
+    throw new Error(`expected 1 focus handler, got ${focusHandlers.size}`);
+  }
+  // The core `tick` stores the running frame counter on the node's props; it
+  // is monotonic across ticks (the rendered glyph wraps), so it is the fake
+  // tick counter for the test.
+  const ticks = () => (typeof spinner.props.frame === "number" ? spinner.props.frame : 0);
+
+  // Blur the terminal: ticks and repaints must freeze.
+  for (const handler of focusHandlers) handler({ focus_gained: false });
+  const ticksAtBlur = ticks();
+  const rendersAtBlur = renderCalls.length;
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  if (ticks() !== ticksAtBlur) {
+    throw new Error(`spinner must not tick while unfocused (${ticksAtBlur} -> ${ticks()})`);
+  }
+  if (renderCalls.length !== rendersAtBlur) {
+    throw new Error(
+      `render() must not run while unfocused (${rendersAtBlur} -> ${renderCalls.length})`,
+    );
+  }
+
+  // Regain focus: ticks and repaints resume from where they froze.
+  for (const handler of focusHandlers) handler({ focus_gained: true });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  if (ticks() === ticksAtBlur) {
+    throw new Error("spinner must resume ticking after focus regain");
+  }
+  if (renderCalls.length <= rendersAtBlur) {
+    throw new Error(
+      `render() must resume after focus regain (${rendersAtBlur} -> ${renderCalls.length})`,
+    );
+  }
+
+  // Unmount tears the focus subscription down with the interval.
+  await act(async () => {
+    ternRoot.unmount();
+  });
+  if (focusHandlers.size >= 1) {
+    throw new Error("focus subscription must be torn down on unmount");
+  }
 });
 
 Deno.test("a focused Input receives routed keys and fires onChange/onSubmit", async () => {
@@ -945,6 +1507,255 @@ Deno.test("a focused Input receives routed keys and fires onChange/onSubmit", as
   if (manager.activeId !== null) throw new Error("active focus must clear on unregister");
 });
 
+Deno.test("Select materializes with filter and option rows and strips component props", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(async () => {
+    ternRoot.render(
+      createElement(Select, {
+        options: [
+          { value: "a", label: "A" },
+          { value: "b", label: "B" },
+        ],
+        focusId: "s",
+        onChange: () => {},
+        onConfirm: () => {},
+        onDismiss: () => {},
+      }),
+    );
+  });
+
+  const select = root.children[0];
+  if (!select || select.type !== "select") throw new Error("expected a select node");
+  // Component-consumed props must never reach the scene node.
+  for (const key of ["focusId", "focusManager", "onChange", "onConfirm", "onDismiss"]) {
+    if (key in select.props) throw new Error(`select component prop leaked: ${key}`);
+  }
+  // The option list is JS bookkeeping, never scene props.
+  if ("options" in select.props) throw new Error("options must not reach the scene props");
+  // Filter row + 2 option rows.
+  if (select.children.length !== 3) throw new Error(`rows = ${select.children.length}`);
+  if (select.children[0]?.props.text !== "filter…") throw new Error("filter row");
+  if (select.children[1]?.props.text !== "A" || select.children[2]?.props.text !== "B") {
+    throw new Error(`rows = ${select.children.map((c) => c.props.text).join(",")}`);
+  }
+});
+
+Deno.test("a focused Select receives routed keys: filter narrows and enter confirms", async () => {
+  const { renderer, root, keyHandlers } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const manager = new FocusManager();
+  const changes: Array<{ filter: string; highlighted: number }> = [];
+  const confirms: Array<{ value: string | string[] }> = [];
+  const dismisses: Array<{ open: boolean }> = [];
+  // Length read through functions: TS narrows a const-typed empty array's
+  // `length` to 0 (the pushes happen inside closures it cannot see).
+  const changeCount = () => changes.length;
+  const confirmCount = () => confirms.length;
+  const dismissCount = () => dismisses.length;
+
+  function App() {
+    // The tree-level key subscription routes each key through the manager
+    // before falling back to its own (no-op) handler.
+    useInput(() => {}, { focusManager: manager });
+    return createElement(Select, {
+      options: [
+        { value: "apple", label: "Apple" },
+        { value: "banana", label: "Banana" },
+      ],
+      focusId: "sel",
+      focusManager: manager,
+      onChange: (state) => changes.push(state),
+      onConfirm: (state) => confirms.push(state),
+      onDismiss: (state) => dismisses.push(state),
+    });
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(App));
+  });
+
+  if (!manager.has("sel")) throw new Error("select must register under focusId");
+  // Not focused: keys fall through to the tree handler (a no-op here).
+  for (const handler of keyHandlers) handler(keyEvent({ char: "b" }));
+  if (changeCount() !== 0) throw new Error("unfocused select must not receive keys");
+
+  // Focused: the typeahead filter narrows the visible rows on the scene node.
+  if (!manager.focus("sel")) throw new Error("focus(sel) must succeed");
+  for (const handler of keyHandlers) handler(keyEvent({ char: "b" }));
+  const select = root.children[0]!;
+  if (select.children.length !== 2) throw new Error(`rows after filter = ${select.children.length}`);
+  if (select.children[1]?.props.text !== "Banana") {
+    throw new Error(`visible = ${select.children[1]?.props.text}`);
+  }
+  if (changeCount() !== 1 || changes[0]!.filter !== "b") {
+    throw new Error(`onChange = ${JSON.stringify(changes)}`);
+  }
+
+  // Enter confirms the highlighted (filtered) option and dismisses.
+  for (const handler of keyHandlers) handler(keyEvent({ name: "enter" }));
+  if (confirmCount() !== 1 || confirms[0]!.value !== "banana") {
+    throw new Error(`onConfirm = ${JSON.stringify(confirms)}`);
+  }
+  if (select.props.value !== "banana") throw new Error(`node value = ${select.props.value}`);
+  if (select.props.open !== false) throw new Error("enter must dismiss the dropdown");
+  if (dismissCount() !== 0) throw new Error("enter must not fire onDismiss");
+
+  // Escape fires onDismiss.
+  for (const handler of keyHandlers) handler(keyEvent({ name: "escape" }));
+  if (dismissCount() !== 1 || dismisses[0]!.open !== false) {
+    throw new Error(`onDismiss = ${JSON.stringify(dismisses)}`);
+  }
+
+  await act(async () => {
+    ternRoot.unmount();
+  });
+  if (manager.has("sel")) throw new Error("select must unregister on unmount");
+  if (manager.activeId !== null) throw new Error("active focus must clear on unregister");
+});
+
+Deno.test("Select multi mode toggles a checkmark through routed keys", async () => {
+  const { renderer, root, keyHandlers } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const manager = new FocusManager();
+  const rowText = () => root.children[0]?.children[1]?.props.text;
+  const summaryText = () => root.children[0]?.children[3]?.props.text;
+
+  function App() {
+    useInput(() => {}, { focusManager: manager });
+    return createElement(Select, {
+      options: [
+        { value: "a", label: "A" },
+        { value: "b", label: "B" },
+      ],
+      multi: true,
+      focusId: "multi",
+      focusManager: manager,
+    });
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(App));
+  });
+
+  if (!manager.focus("multi")) throw new Error("focus(multi) must succeed");
+  // Space checks the highlighted (first) option; space again unchecks it.
+  for (const handler of keyHandlers) handler(keyEvent({ char: " " }));
+  if (rowText() !== "✓ A") throw new Error(`row = ${rowText()}`);
+  if (summaryText() !== "1 selected") throw new Error(`summary = ${summaryText()}`);
+  for (const handler of keyHandlers) handler(keyEvent({ char: " " }));
+  if (rowText() !== "  A") throw new Error(`row = ${rowText()}`);
+  if (summaryText() !== "0 selected") throw new Error(`summary = ${summaryText()}`);
+
+  await act(async () => {
+    ternRoot.unmount();
+  });
+});
+
+Deno.test("Select floating mode sets a z_index prop", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(async () => {
+    ternRoot.render(
+      createElement(Select, {
+        options: [
+          { value: "a", label: "A" },
+          { value: "b", label: "B" },
+        ],
+        floating: true,
+      }),
+    );
+  });
+
+  const select = root.children[0];
+  if (!select || select.type !== "select") throw new Error("expected a select node");
+  if (select.props.z_index !== 0) throw new Error(`z_index = ${select.props.z_index}`);
+  if ("floating" in select.props) throw new Error("floating must not reach the scene props");
+});
+
+Deno.test("ScrollView materializes with region props, children and a scrollbar leaf", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(async () => {
+    ternRoot.render(
+      createElement(
+        ScrollView,
+        { clip_x: 1, clip_y: 2, clip_width: 10, clip_height: 4, scroll_y: 2, showScrollbar: true },
+        createElement(Text, { text: "content" }),
+      ),
+    );
+  });
+
+  const view = root.children[0];
+  if (!view || view.type !== "scroll_view") throw new Error("expected a scroll_view node");
+  if (view.props.clip_x !== 1 || view.props.clip_y !== 2) {
+    throw new Error(`clip origin = ${JSON.stringify(view.props)}`);
+  }
+  if (view.props.clip_width !== 10 || view.props.clip_height !== 4) {
+    throw new Error(`clip size = ${JSON.stringify(view.props)}`);
+  }
+  if (view.props.scroll_y !== 2) throw new Error(`scroll_y = ${view.props.scroll_y}`);
+  // The scrollbar leaf is composed at factory time; the React content child
+  // is appended after it (the leaf is absolutely positioned, so the paint
+  // order is unaffected).
+  const content = view.children.find((child) => child.props.text === "content");
+  if (content === undefined) throw new Error("content child must mount under the view");
+  const leaf = view.children[0];
+  if (leaf === undefined || leaf.type !== "text" || leaf.props.position !== "absolute") {
+    throw new Error("scrollbar leaf must be composed");
+  }
+  // `showScrollbar` is consumed by the factory — never a scene prop.
+  if ("showScrollbar" in view.props) throw new Error("showScrollbar leaked into scene props");
+});
+
+Deno.test("ScrollView re-render updates scroll props and keeps the scrollbar leaf", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const el = (y: number) =>
+    createElement(
+      ScrollView,
+      { scroll_y: y, showScrollbar: true },
+      createElement(Text, { text: "c" }),
+    );
+
+  await act(async () => {
+    ternRoot.render(el(1));
+  });
+  const view = root.children[0]!;
+  const firstLeaf = view.children[0];
+
+  await act(async () => {
+    ternRoot.render(el(3));
+  });
+  if (view.props.scroll_y !== 3) throw new Error(`scroll_y = ${view.props.scroll_y}`);
+  if (view.children[0] !== firstLeaf) throw new Error("scrollbar leaf must survive re-render");
+});
+
+Deno.test("ScrollView resolves the scroll_view component preset from the theme", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(async () => {
+    ternRoot.render(
+      createElement(
+        ThemeProvider,
+        { theme: { components: { scroll_view: { fg: "#eeeeee", bg: "#111111" } } } },
+        createElement(ScrollView, { scroll_y: 1 }),
+      ),
+    );
+  });
+
+  const view = root.children[0]!;
+  if (view.type !== "scroll_view") throw new Error(`type = ${view.type}`);
+  if (view.props.fg !== "#eeeeee" || view.props.bg !== "#111111") {
+    throw new Error(`stamped region box = ${JSON.stringify(view.props)}`);
+  }
+  if (view.props.scroll_y !== 1) throw new Error(`scroll_y = ${view.props.scroll_y}`);
+});
+
 Deno.test("useFocus registers a ref'd element and routes routed keys to it", async () => {
   const { renderer, keyHandlers } = mockRenderer();
   const ternRoot = createRoot(renderer);
@@ -974,4 +1785,147 @@ Deno.test("useFocus registers a ref'd element and routes routed keys to it", asy
     ternRoot.unmount();
   });
   if (manager.has("probe")) throw new Error("useFocus must dispose on unmount");
+});
+
+// ---------------------------------------------------------------------------
+// Theme system
+// ---------------------------------------------------------------------------
+
+Deno.test("host components fall back to the default theme without a provider", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(async () => {
+    ternRoot.render(createElement(Text, { text: "err", role: "danger" }));
+  });
+
+  const node = root.children[0]!;
+  if (node.props.fg !== defaultTheme.palette.danger.fg) {
+    throw new Error(`fallback fg = ${node.props.fg}`);
+  }
+  if (node.props.bg !== defaultTheme.palette.danger.bg) {
+    throw new Error(`fallback bg = ${node.props.bg}`);
+  }
+  // The semantic hints are consumed by the host component — never scene props.
+  if ("role" in node.props || "component" in node.props) {
+    throw new Error(`semantic hints leaked: ${JSON.stringify(node.props)}`);
+  }
+});
+
+Deno.test("ThemeProvider partial theme merges over the default and stamps roles", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(async () => {
+    ternRoot.render(
+      createElement(
+        ThemeProvider,
+        { theme: { palette: { danger: { fg: "#ff0000" } } } },
+        createElement(Text, { text: "err", role: "danger" }),
+      ),
+    );
+  });
+
+  const node = root.children[0]!;
+  if (node.props.fg !== "#ff0000") throw new Error(`overridden fg = ${node.props.fg}`);
+  // The un-overridden bg comes from the default theme (merged, not replaced).
+  if (node.props.bg !== defaultTheme.palette.danger.bg) {
+    throw new Error(`merged bg = ${node.props.bg}`);
+  }
+});
+
+Deno.test("ThemeProvider component presets stamp onto roadmap host components", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(async () => {
+    ternRoot.render(
+      createElement(
+        ThemeProvider,
+        { theme: { components: { status_bar: { fg: "#eeeeee", bg: "#111111" } } } },
+        createElement(StatusBar, { left: "L" }),
+      ),
+    );
+  });
+
+  const bar = root.children[0]!;
+  if (bar.type !== "status_bar") throw new Error(`type = ${bar.type}`);
+  if (bar.props.fg !== "#eeeeee" || bar.props.bg !== "#111111") {
+    throw new Error(`stamped strip = ${JSON.stringify(bar.props)}`);
+  }
+  // The preset resolution must not disturb the element's composition.
+  if (bar.children.length !== 1 || bar.children[0]?.props.text !== "L") {
+    throw new Error(`segments = ${bar.children.map((c) => c.props.text).join(",")}`);
+  }
+});
+
+Deno.test("a theme change re-resolves stamped props on re-render", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  function App(props: { theme: ThemeOverrides }) {
+    return createElement(
+      ThemeProvider,
+      { theme: props.theme },
+      createElement(Text, { text: "x", role: "danger" }),
+    );
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(App, { theme: { palette: { danger: { fg: "#ff0000" } } } }));
+  });
+  const node = root.children[0]!;
+  // Captured into a fresh local per assertion: TS narrows getter-only prop
+  // accesses across calls (memory gotcha), which would flag the second
+  // comparison as "no overlap".
+  const first = node.props.fg;
+  if (first !== "#ff0000") throw new Error(`first fg = ${first}`);
+
+  await act(async () => {
+    ternRoot.render(createElement(App, { theme: { palette: { danger: { fg: "#00ff00" } } } }));
+  });
+  const second = node.props.fg;
+  if (second !== "#00ff00") throw new Error(`re-resolved fg = ${second}`);
+});
+
+Deno.test("useTheme returns the provider theme and merges over the default", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const captured: { theme: Theme | null } = { theme: null };
+
+  function Probe() {
+    captured.theme = useTheme();
+    return createElement(Text, { text: "p" });
+  }
+
+  await act(async () => {
+    ternRoot.render(
+      createElement(
+        ThemeProvider,
+        { theme: { palette: { primary: { fg: "#123456", bg: "#000000" } } } },
+        createElement(Probe),
+      ),
+    );
+  });
+
+  if (captured.theme === null) throw new Error("useTheme must return the theme");
+  if (captured.theme.palette.primary.fg !== "#123456") {
+    throw new Error(`primary fg = ${captured.theme.palette.primary.fg}`);
+  }
+  // Merged over the default: un-overridden roles are preserved.
+  if (captured.theme.palette.danger.fg !== defaultTheme.palette.danger.fg) {
+    throw new Error(`unoverridden role changed: ${captured.theme.palette.danger.fg}`);
+  }
+});
+
+Deno.test("toNodeProps strips the semantic theme hints from scene props", () => {
+  const out = toNodeProps({
+    text: "x",
+    role: "danger",
+    component: "input",
+  } as unknown as TernProps);
+  if ("role" in out || "component" in out) {
+    throw new Error(`theme hints leaked: ${JSON.stringify(out)}`);
+  }
+  if (out.text !== "x") throw new Error(`text = ${out.text}`);
 });
