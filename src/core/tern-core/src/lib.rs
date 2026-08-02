@@ -4,8 +4,11 @@
 //! tern-components:
 //!
 //! * [`Cell`] / [`Style`] / [`Color`] — the terminal cell model
+//! * [`Cursor`] — the frame's text cursor: position, visibility, render style
 //! * [`Buffer`] + [`diff`] — the compositor's 2D cell grid and the
 //!   multi-width-aware minimal diff between two buffers
+//! * [`Region`] — a bounded drawing region (clip rect + scroll offset) for
+//!   scrollable panes and clipped overlays
 //! * [`Rect`] / [`Size`] — geometry used by layout
 //! * [`Scene`] / [`SceneNode`] — the scene tree produced by the reconciler
 //! * [`LayoutEngine`] — the trait implemented by tern-layout
@@ -19,14 +22,16 @@
 pub mod buffer;
 pub mod cell;
 pub mod color;
+pub mod cursor;
 pub mod layout;
 pub mod rect;
 pub mod scene;
 pub mod style;
 
-pub use buffer::{diff, Buffer};
+pub use buffer::{diff, Buffer, Region};
 pub use cell::{char_width, Cell, CellUpdate};
 pub use color::Color;
+pub use cursor::Cursor;
 pub use layout::LayoutEngine;
 pub use rect::{Rect, Size};
 pub use scene::{NodeId, NodeKind, PropMap, PropValue, Scene, SceneNode, Span};
