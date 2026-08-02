@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # run-smoke.sh — PTY smoke for the @tern/examples demos.
 #
-# Runs react-demo and solid-demo inside a macOS `script` pseudo-TTY with 'q'
-# piped into it, and asserts each exits 0. A demo only exits 0 when its
-# scene rendered AND the event loop quit on 'q' — each demo asserts its
-# scene (a box column holding the two expected text leaves), paints it, and
-# prints "ok: ... quit on 'q'" before exiting 0.
+# Runs the four demos (react-demo, solid-demo, kitchen-sink-react,
+# kitchen-sink-solid) inside a macOS `script` pseudo-TTY with 'q' piped into
+# it, and asserts each exits 0. A demo only exits 0 when its scene rendered
+# AND its scene assertions held AND the event loop quit on 'q' — each demo
+# asserts its scene, paints it, and prints "ok: ..." lines (with a final
+# "quit on 'q'" line) before exiting 0.
 #
 # Runtime: Deno-first (project preference). Each demo runs under
 # `deno run --allow-all`; a demo falls back to `node` on its own only when
@@ -15,7 +16,7 @@
 # says so. Either way the runtime each demo used is reported below.
 #
 # Usage: bash packages/examples/run-smoke.sh
-# Exit: 0 when both demos pass; 1 otherwise.
+# Exit: 0 when all four demos pass; 1 otherwise.
 
 set -u
 
@@ -75,10 +76,12 @@ echo "tern examples PTY smoke"
 echo "======================="
 run_demo react-demo "$SCRIPT_DIR/react-demo.ts"
 run_demo solid-demo "$SCRIPT_DIR/solid-demo.ts"
+run_demo kitchen-sink-react "$SCRIPT_DIR/kitchen-sink-react.ts"
+run_demo kitchen-sink-solid "$SCRIPT_DIR/kitchen-sink-solid.ts"
 
 echo "======================="
 if [ "$fail" -eq 0 ]; then
-  echo "run-smoke: PASS — react-demo and solid-demo both rendered and quit on 'q'"
+  echo "run-smoke: PASS — all 4 demos (react-demo, solid-demo, kitchen-sink-react, kitchen-sink-solid) rendered, asserted their scenes, and quit on 'q'"
   exit 0
 fi
 echo "run-smoke: FAIL — $fail demo(s) failed"
