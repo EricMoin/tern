@@ -15,7 +15,7 @@
  * options key:
  *
  * - `createElement(type)`        -> tern node factory (`Box`/`Text`/`StreamingText`
- *   and the roadmap elements `Input`/`Spinner`/`StatusBar`/`Panels`)
+ *   and the roadmap elements `Input`/`Spinner`/`StatusBar`/`Panels`/`DiffView`/`Select`)
  * - `createTextNode(value)`      -> `Text` node
  * - `replaceText`/`isTextNode`   -> text content re-point / type check
  * - `insertNode`/`removeNode`    -> tree ops (`Node.insertBefore`/`Node.addChild` / `Node.remove`)
@@ -34,12 +34,20 @@
  * package import map (deno.json) to the client build, so signal-driven
  * updates actually reach the scene ops.
  *
- * The roadmap element factories (`Input`/`Spinner`/`StatusBar`/`Panels`)
- * materialize the @tern/core factories of the same name, matching what the
- * `@tern/react` host components map to (feature parity): same props -> same
- * scene node structure. `subscribeInput` wires a renderer's key events
- * through the core `FocusManager` (the Solid-flavored `useInput` equivalent —
- * Solid has no context, so the renderer is an explicit argument).
+ * The roadmap element factories (`Input`/`Spinner`/`StatusBar`/`Panels`/
+ * `DiffView`/`Select`/`ScrollView`) materialize the @tern/core factories of
+ * the same name, matching what the `@tern/react` host components map to
+ * (feature parity): same props -> same scene node structure. `subscribeInput`
+ * wires a renderer's key events through the core `FocusManager` (the
+ * Solid-flavored `useInput` equivalent — Solid has no context, so the
+ * renderer is an explicit argument); `subscribeResize` wires a renderer's
+ * terminal resize events to a handler, re-invoking `renderer.render()` after
+ * each so the compositor re-lays out at the new terminal size (the
+ * Solid-flavored `useResize` equivalent). `subscribeFocus` wires a renderer's
+ * terminal focus events (`{ focus_gained }`) to a handler, and `startSpinner`
+ * drives a spinner node's frame ticks with a focus-aware timer — pausing
+ * while the terminal is unfocused, resuming on regain (the `@tern/react`
+ * `<Spinner>` effect equivalent, roadmap Phase 2).
  */
 
 import {
@@ -48,23 +56,49 @@ import {
 } from "./universal.ts";
 import {
   Box as TernBox,
+  DiffView as TernDiffView,
   Input as TernInput,
   Panels as TernPanels,
+  ScrollView as TernScrollView,
+  Select as TernSelect,
   Spinner as TernSpinner,
   StatusBar as TernStatusBar,
   StreamingText as TernStreamingText,
   Text as TernText,
+  defaultTheme,
+  dragPanels,
+  endPanelDrag,
   focusManager,
+  followTail,
+  isStreamFollowing,
+  startPanelDrag,
   FocusManager,
+  mergeTheme,
+  resolveTheme,
+  scrollBy,
+  scrollTo,
+  scrollTop,
+  setStreamAutoScroll,
+  syncStreamTail,
+  tick,
+  type DiffViewProps,
+  type FocusHandler,
   type InputProps,
   type KeyHandler,
   type Node,
   type NodeProps,
+  type PanelDragHandle,
+  type PanelDragResult,
   type PanelsProps,
   type Renderer,
+  type ResizeHandler,
+  type ScrollViewProps,
+  type SelectProps,
   type Span,
   type SpinnerProps,
   type StatusBarProps,
+  type Theme,
+  type ThemeOverrides,
 } from "@tern/core";
 
 export const name = "@tern/solid";
@@ -74,15 +108,25 @@ export const version = "0.1.0";
 // consumers can type elements, props, focus handles and input handlers without
 // importing @tern/core directly (the same surface @tern/react re-exports).
 export type {
+  DiffLine,
+  DiffViewProps,
   FocusHandle,
+  FocusHandler,
   InputProps,
   KeyEvent,
   KeyHandler,
   Node,
   NodeProps,
+  PanelDragHandle,
+  PanelDragResult,
   PanelSpec,
   PanelsProps,
   Renderer,
+  ResizeHandler,
+  ScrollViewProps,
+  SelectOption,
+  SelectProps,
+  SelectState,
   Span,
   SpinnerProps,
   StatusBarProps,
@@ -90,18 +134,73 @@ export type {
 } from "@tern/core";
 
 // The @tern/core values behind the roadmap elements and the focus wiring:
-// element edit/drive helpers and the focus machinery.
+// element edit/drive helpers, the scroll helpers (including the streaming
+// auto-scroll `followTail` / `syncStreamTail` / `isStreamFollowing`), the
+// panel drag-resize helpers, the focus machinery, and the theme surface.
 export {
   collapsePanel,
+  defaultTheme,
+  dragPanels,
   editKey,
+  endPanelDrag,
   expandPanel,
+  followTail,
   focusManager,
   focusPanel,
+  isStreamFollowing,
   FocusManager,
+  mergeTheme,
+  resolveTheme,
+  scrollBy,
+  scrollTo,
+  scrollTop,
+  selectKey,
+  startPanelDrag,
+  syncStreamTail,
   tick,
   togglePanel,
   useFocus,
 } from "@tern/core";
+
+// The @tern/core theme types, re-exported so consumers can type themes
+// without importing @tern/core directly.
+export type {
+  Theme,
+  ThemeComponent,
+  ThemeOverrides,
+  ThemeResolvableProps,
+  ThemeRole,
+  ThemeRoleColors,
+  ThemeStylePreset,
+} from "@tern/core";
+
+// ---------------------------------------------------------------------------
+// Theme
+//
+// Solid has no React-style context, so the theme is module-level state: the
+// element factories below resolve their `role` / `component` hints against
+// the active theme (see {@link getTheme}) at element-creation time, and
+// `setTheme` swaps it. The active theme always merges over the core
+// `defaultTheme`, so partial themes keep the default palette/presets.
+// ---------------------------------------------------------------------------
+
+/** The active theme resolved by the element factories. */
+let activeTheme: Theme = defaultTheme;
+
+/**
+ * Set the active theme merged over the core `defaultTheme` (`mergeTheme`):
+ * a partial theme keeps the default palette and presets for everything it
+ * does not override. Subsequent element-creation resolves against the new
+ * theme — the Solid-flavored `ThemeProvider` equivalent.
+ */
+export function setTheme(theme: ThemeOverrides): void {
+  activeTheme = mergeTheme(defaultTheme, theme);
+}
+
+/** The active theme currently resolved by the element factories. */
+export function getTheme(): Theme {
+  return activeTheme;
+}
 
 /**
  * Apply a single prop to a tern scene node. @tern/core's `Node.setProps`
@@ -159,9 +258,19 @@ const options: RendererOptions<Node> = {
         // `panels` is the one required prop of the core factory; an empty
         // spec list yields a valid, empty stack.
         return TernPanels({ panels: [] });
+      case "diff":
+        // `hunks` is the one required prop of the core factory; an empty
+        // line list yields a valid, empty diff.
+        return TernDiffView({ hunks: [] });
+      case "select":
+        // `options` is the one required prop of the core factory; an empty
+        // option list yields a valid, empty dropdown.
+        return TernSelect({ options: [] });
+      case "scroll_view":
+        return TernScrollView({});
       default:
         throw new Error(
-          `@tern/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "spinner", "status_bar", or "panels")`,
+          `@tern/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "spinner", "status_bar", "panels", "diff", "select", or "scroll_view")`,
         );
     }
   },
@@ -313,34 +422,49 @@ export const {
  * Create a `box` scene node through the solid renderer. Props (including
  * static `children` nodes) are applied via the renderer's `spread`, which
  * funnels into `Node.setProps` (props) and `Node.addChild`/`Node.insertBefore`
- * (children).
+ * (children). The active theme is resolved onto the props at element-creation
+ * time (`role` / `component` hints become plain `fg` / `bg` / `border_style`).
  */
 export function Box(props: NodeProps = {}): Node {
   const node = createElement("box");
-  spread(node, props);
+  spread(node, resolveTheme(getTheme(), props));
   return node;
 }
 
 /**
  * Create a `text` scene node through the solid renderer. Props (e.g.
- * `{ text: "hi" }`) are applied via the renderer's `spread`.
+ * `{ text: "hi" }`) are applied via the renderer's `spread`. The active
+ * theme is resolved onto the props at element-creation time.
  */
 export function Text(props: NodeProps = {}): Node {
   const node = createElement("text");
-  spread(node, props);
+  spread(node, resolveTheme(getTheme(), props));
   return node;
 }
 
 /**
  * Create a `streaming_text` scene node through the solid renderer. Props are
- * applied via the renderer's `spread`. The node's stream is fed with
+ * applied via the renderer's `spread`. The active theme is resolved onto the
+ * props at element-creation time. The node's stream is fed with
  * `subscribeStream` (or directly via `Node.appendSpan`); spans appended
  * while the node is detached are recorded and flushed to the native handle
  * in call order when the node is attached (see `@tern/core`).
+ *
+ * The `autoScroll` key is a component behavior flag (default `true`): the
+ * node registers itself as following its content tail, and each appended
+ * span (via `subscribeStream`, which feeds `syncStreamTail`) pins `scroll_y`
+ * to the tail offset — `Node.contentSize()` height vs the `clip_height`
+ * viewport. A manual scroll above the tail (via `scrollTo` / `scrollBy` /
+ * `scrollTop`) detaches the follow and pins the view; `followTail`
+ * re-attaches. The key is consumed and never reaches the scene props.
  */
 export function StreamingText(props: NodeProps = {}): Node {
   const node = createElement("streaming_text");
-  spread(node, props);
+  const plain = { ...props };
+  const autoScroll = plain.autoScroll !== false;
+  delete plain.autoScroll;
+  spread(node, resolveTheme(getTheme(), plain));
+  setStreamAutoScroll(node, autoScroll);
   return node;
 }
 
@@ -365,41 +489,87 @@ export function StreamingText(props: NodeProps = {}): Node {
 /**
  * Create an `input` scene node: the core `Input` factory materialized with
  * `props` — a framed box with a text leaf carrying the value and caret (and
- * a dim placeholder when the value is empty). Edit it with `editKey` (the
- * focused-element handler wired by `useFocus` + `subscribeInput`).
+ * a dim placeholder when the value is empty). The `input` component preset is
+ * resolved onto the framed box at element-creation time. Edit it with
+ * `editKey` (the focused-element handler wired by `useFocus` +
+ * `subscribeInput`).
  */
 export function Input(props: InputProps = {}): Node {
-  return TernInput(props);
+  return TernInput(resolveTheme(getTheme(), { ...props, component: "input" }));
 }
 
 /**
  * Create a `spinner` scene node: the core `Spinner` factory materialized with
  * `props` — a text leaf rendering a determinate `'▓'`/`'░'` progress bar
  * (from `value`/`max`/`width`) or an indeterminate frame glyph (from
- * `frames`/`frame`). Advance it with `tick` on an interval.
+ * `frames`/`frame`). The `spinner` component preset is resolved onto the
+ * leaf at element-creation time. Advance it with `tick` on an interval.
  */
 export function Spinner(props: SpinnerProps = {}): Node {
-  return TernSpinner(props);
+  return TernSpinner(resolveTheme(getTheme(), { ...props, component: "spinner" }));
 }
 
 /**
  * Create a `status_bar` scene node: the core `StatusBar` factory materialized
  * with `props` — a single-row flex strip whose children are the left/center/
- * right segment `Text` nodes. The segment keys are lifted out of the strip's
- * props by the core factory.
+ * right segment `Text` nodes. The `status_bar` component preset is resolved
+ * onto the strip at element-creation time. The segment keys are lifted out
+ * of the strip's props by the core factory.
  */
 export function StatusBar(props: StatusBarProps = {}): Node {
-  return TernStatusBar(props);
+  return TernStatusBar(resolveTheme(getTheme(), { ...props, component: "status_bar" }));
 }
 
 /**
  * Create a `panels` scene node: the core `Panels` factory materialized with
  * `props` — a flex stack of panel boxes, each with a header `Text` and a body
- * node (the active panel's header is bold). Manage panels with
+ * node (the active panel's header is bold). The `panels` component preset is
+ * resolved onto the stack at element-creation time. Manage panels with
  * `collapsePanel`/`expandPanel`/`togglePanel`/`focusPanel`.
  */
 export function Panels(props: PanelsProps): Node {
-  return TernPanels(props);
+  return TernPanels(resolveTheme(getTheme(), { ...props, component: "panels" }) as PanelsProps);
+}
+
+/**
+ * Create a `diff` scene node: the core `DiffView` factory materialized with
+ * `props` — a scrollable column of per-line rows (a dimmed gutter with the
+ * old/new line numbers, a `+`/`-`/` ` marker, and the line content styled per
+ * kind: added green, deleted red, context dimmed). `scroll_x` / `scroll_y`
+ * pan the rows inside the clip region; `wrap` passes through to each content
+ * leaf. The `diff` component preset is resolved onto the root box at
+ * element-creation time.
+ */
+export function DiffView(props: DiffViewProps): Node {
+  return TernDiffView(resolveTheme(getTheme(), { ...props, component: "diff" }) as DiffViewProps);
+}
+
+/**
+ * Create a `select` scene node: the core `Select` factory materialized with
+ * `props` — a flex column of text leaves (a filter row, one option row per
+ * visible option, and in multi mode a selected-count summary row; the
+ * highlighted row is reversed, multi-mode rows `✓ `/`  `-prefixed). The
+ * `select` component preset is resolved onto the root box at
+ * element-creation time. Drive it with `selectKey` (the focused-element
+ * handler wired by `useFocus` + `subscribeInput`); a `floating` dropdown
+ * stamps the root box's `z_index` prop.
+ */
+export function Select(props: SelectProps): Node {
+  return TernSelect(resolveTheme(getTheme(), { ...props, component: "select" }) as SelectProps);
+}
+
+/**
+ * Create a `scroll_view` scene node: the core `ScrollView` factory
+ * materialized with `props` — a clip/scroll region box carrying the engine's
+ * `clip_x` / `clip_y` / `clip_width` / `clip_height` and `scroll_x` /
+ * `scroll_y` props, with the content nodes passed via the `children` prop
+ * (the core factory attaches them, mirroring how `Panels` attaches body
+ * nodes) and an optional track + thumb scrollbar leaf. The `scroll_view`
+ * component preset is resolved onto the box at element-creation time. Drive
+ * the offsets with `scrollTo` / `scrollBy` / `scrollTop`.
+ */
+export function ScrollView(props: ScrollViewProps = {}): Node {
+  return TernScrollView(resolveTheme(getTheme(), { ...props, component: "scroll_view" }) as ScrollViewProps);
 }
 
 /**
@@ -407,7 +577,11 @@ export function Panels(props: PanelsProps): Node {
  *
  * Consumes `stream` in the background, appending each span to `node` via
  * `Node.appendSpan` as it arrives. Spans appended while the node is detached
- * are recorded and flushed to the native handle on attach.
+ * are recorded and flushed to the native handle on attach. After each append
+ * the core auto-scroll is fed (`syncStreamTail`): a node created with
+ * `autoScroll` (the default) keeps its `scroll_y` pinned to the stream tail
+ * (`Node.contentSize()` height vs the `clip_height` viewport) until a manual
+ * scroll above the tail detaches it (`followTail` re-attaches).
  *
  * Returns a disposer that cancels the subscription. It marks the pump
  * stopped and calls `return()` on the active iterator, so generators
@@ -434,6 +608,10 @@ export function subscribeStream(
         const result = await iterator.next();
         if (result.done) break;
         node.appendSpan(result.value.text, result.value.style);
+        // Auto-scroll: keep the view pinned to the growing stream tail when
+        // following (a no-op while detached, when `autoScroll` is off, or
+        // after a manual scroll detached the follow).
+        syncStreamTail(node);
       }
     } catch {
       // A source error ends the subscription; nothing further to append.
@@ -497,4 +675,135 @@ export function subscribeInput(
     if (manager.routeKey(event)) return;
     handler(event);
   });
+}
+
+/**
+ * Subscribe `handler` to a renderer's terminal resize events — the
+ * Solid-flavored `useResize` equivalent. Solid has no React-style context, so
+ * the renderer is an explicit argument (the `@tern/react` `useResize` reads
+ * it from the tree context instead).
+ *
+ * Each resize event is delivered as `{ width, height }` (the core
+ * `ResizeHandler` payload); after the handler runs, `renderer.render()` is
+ * re-invoked so the compositor re-lays out the scene at the new terminal
+ * size. The handler is captured at subscribe time; Solid closures over signal
+ * getters stay live because the getters are read at dispatch time.
+ *
+ * Returns a disposer that unsubscribes.
+ */
+export function subscribeResize(
+  renderer: Renderer,
+  handler: ResizeHandler,
+): () => void {
+  return renderer.onResize((event) => {
+    handler(event);
+    // The compositor sizes the scene from the terminal; re-paint so the
+    // layout reflects the new width/height.
+    renderer.render();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Focus-aware wiring: terminal focus events + the focus-aware spinner driver
+// ---------------------------------------------------------------------------
+
+/**
+ * Subscribe `handler` to a renderer's terminal focus events — the
+ * Solid-flavored `onFocus` subscription helper (the focus counterpart of
+ * `subscribeInput` / `subscribeResize`). Solid has no React-style context, so
+ * the renderer is an explicit argument (the `@tern/react` `useResize`-style
+ * hooks read it from the tree context instead).
+ *
+ * Each focus event is delivered as `{ focus_gained }` — `true` when the
+ * terminal window gained focus, `false` when it lost it. Returns a disposer
+ * that unsubscribes.
+ */
+export function subscribeFocus(renderer: Renderer, handler: FocusHandler): () => void {
+  return renderer.onFocus(handler);
+}
+
+// ---------------------------------------------------------------------------
+// Panel drag-resize wiring
+// ---------------------------------------------------------------------------
+
+/**
+ * Subscribe a `panels` node to a renderer's mouse events, driving the core
+ * panel drag-resize helpers (roadmap Phase 2). Mouse routing (via
+ * `Renderer.hit_test`): a `down_left` press starts a drag only when the
+ * pressed cell is covered by a painted scene node — the gutter cells inside
+ * the panels element are (the element's background covers them), while dead
+ * cells outside any node are not. Once the drag starts, each `drag_left`
+ * moves the split by setting the adjacent pane's `flex_basis` (`dragPanels`,
+ * clamped to the pane's min size) and re-invokes `renderer.render()` so the
+ * compositor re-flows; drags continue even when the cursor leaves the stack
+ * (the clamp bounds the split). Any `up_*` event ends the drag
+ * (`endPanelDrag`). The optional `handler` receives each helper's result
+ * (`null` when the event did not apply).
+ *
+ * Returns a disposer that unsubscribes.
+ */
+export function subscribePanelDrag(
+  renderer: Renderer,
+  panels: Node,
+  handler?: (result: PanelDragHandle | PanelDragResult | null) => void,
+): () => void {
+  return renderer.onMouse((event) => {
+    if (event.kind === "down_left") {
+      // The press must land on a painted cell: `hit_test` returns the scene
+      // node ids covering the cell (empty off any node — the scene root is
+      // never reported, so a cell the panels element does not cover misses).
+      if (renderer.hit_test(event.column, event.row).length === 0) return;
+      handler?.(startPanelDrag(panels, event));
+    } else if (event.kind === "drag_left") {
+      const result = dragPanels(panels, event);
+      if (result !== null) renderer.render();
+      handler?.(result);
+    } else if (event.kind.startsWith("up_")) {
+      handler?.(endPanelDrag(panels));
+    }
+  });
+}
+
+/** Options for {@link startSpinner}. */
+export interface StartSpinnerOptions {
+  /** The tick interval in ms (default 100). */
+  interval?: number;
+}
+
+/**
+ * Start a focus-aware tick driver on a `spinner` scene node — the
+ * Solid-flavored equivalent of the `@tern/react` `<Spinner>` mount effect
+ * (roadmap Phase 2 "focus-aware redraw").
+ *
+ * While the terminal is focused, every `interval` ms the driver advances the
+ * node's frame via the core `tick` and repaints the scene with
+ * `renderer.render()`. When the terminal loses focus (an `onFocus` event with
+ * `focus_gained: false`) the timer keeps running but the tick and repaint are
+ * skipped — the frames are invisible anyway, so the redraw cost is wasted —
+ * and ticking resumes on focus regain (`focus_gained: true`).
+ *
+ * Returns a disposer that clears the interval and unsubscribes the focus
+ * subscription.
+ */
+export function startSpinner(
+  renderer: Renderer,
+  node: Node,
+  options: StartSpinnerOptions = {},
+): () => void {
+  const interval = options.interval ?? 100;
+  // The terminal starts focused; the focus subscription flips the flag on
+  // blur/regain so the interval skips tick()/render() while unfocused.
+  let focused = true;
+  const id = setInterval(() => {
+    if (!focused) return;
+    tick(node);
+    renderer.render();
+  }, interval);
+  const unsubscribeFocus = subscribeFocus(renderer, (event) => {
+    focused = event.focus_gained;
+  });
+  return () => {
+    clearInterval(id);
+    unsubscribeFocus();
+  };
 }
