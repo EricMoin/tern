@@ -11,13 +11,17 @@
  */
 
 import { act, createElement } from "react";
-import { Box as CoreBox, type KeyEvent, type Renderer, type Span } from "@tern/core";
+import { Box as CoreBox, FocusManager, type KeyEvent, type Node, type Renderer, type Span } from "@tern/core";
 
 // React 19 requires act() to be enabled explicitly in non-test-runner envs.
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 import {
   Box,
+  Input,
+  Panels,
+  Spinner,
+  StatusBar,
   StreamingText,
   Text,
   createRoot,
@@ -26,6 +30,7 @@ import {
   render,
   toNodeProps,
   useApp,
+  useFocus,
   useInput,
   version,
 } from "./index.ts";
@@ -81,7 +86,20 @@ Deno.test("react exports package metadata", () => {
 });
 
 Deno.test("public API surface is exported", () => {
-  for (const fn of [Box, Text, StreamingText, createRoot, render, useApp, useInput]) {
+  for (const fn of [
+    Box,
+    Text,
+    StreamingText,
+    Input,
+    Spinner,
+    StatusBar,
+    Panels,
+    useFocus,
+    createRoot,
+    render,
+    useApp,
+    useInput,
+  ]) {
     if (typeof fn !== "function") {
       throw new Error(`expected ${String(fn)} to be a function`);
     }
@@ -141,6 +159,46 @@ Deno.test("createInstance maps host types to tern node factories", () => {
   const stream = hc.createInstance("streaming_text", { text: "old" }, container, {}, null);
   if (stream.type !== "streaming_text") throw new Error(`streaming_text type = ${stream.type}`);
   if (stream.props.text !== "old") throw new Error(`streaming_text text = ${stream.props.text}`);
+});
+
+Deno.test("createInstance maps roadmap host types to the core factories", () => {
+  const container = { root: CoreBox(), renderer: mockRenderer().renderer };
+
+  const input = hc.createInstance("input", { value: "hi", caret: 1 }, container, {}, null);
+  if (input.type !== "input") throw new Error(`input type = ${input.type}`);
+  if (input.props.value !== "hi" || input.props.caret !== 1) {
+    throw new Error(`input props = ${JSON.stringify(input.props)}`);
+  }
+  const leaf = input.children[0];
+  if (leaf === undefined || leaf.type !== "text" || leaf.props.text !== "hi") {
+    throw new Error("input must compose a text leaf carrying the value");
+  }
+
+  const spinner = hc.createInstance("spinner", {}, container, {}, null);
+  if (spinner.type !== "spinner") throw new Error(`spinner type = ${spinner.type}`);
+  if (typeof spinner.props.text !== "string" || spinner.props.text === "") {
+    throw new Error("spinner must carry its rendered frame text");
+  }
+
+  const bar = hc.createInstance("status_bar", { left: "L", right: "R" }, container, {}, null);
+  if (bar.type !== "status_bar") throw new Error(`status_bar type = ${bar.type}`);
+  if (bar.children.length !== 2) throw new Error(`status_bar segments = ${bar.children.length}`);
+  if (bar.children[0]?.props.text !== "L" || bar.children[1]?.props.text !== "R") {
+    throw new Error("status_bar segment texts");
+  }
+
+  const panels = hc.createInstance(
+    "panels",
+    { panels: [{ header: "A", body: CoreBox() }] } as never,
+    container,
+    {},
+    null,
+  );
+  if (panels.type !== "panels") throw new Error(`panels type = ${panels.type}`);
+  if (panels.children.length !== 1) throw new Error(`panels = ${panels.children.length}`);
+  if (panels.children[0]?.children[0]?.props.text !== "A") {
+    throw new Error("panel header must be the first child");
+  }
 });
 
 Deno.test("createInstance strips React-only props before the factories", () => {
@@ -376,6 +434,33 @@ Deno.test("toNodeProps keeps tern props, drops children/key/ref/undefined", () =
   if ("children" in out || "key" in out || "ref" in out || "padding" in out) {
     throw new Error(`unexpected props: ${JSON.stringify(out)}`);
   }
+});
+
+Deno.test("toNodeProps strips component-level props for input and spinner", () => {
+  const inputOut = toNodeProps(
+    {
+      value: "v",
+      caret: 2,
+      width: 20,
+      focusId: "f",
+      focusManager: new FocusManager(),
+      onChange: () => {},
+      onSubmit: () => {},
+    } as unknown as TernProps,
+    "input",
+  );
+  if (inputOut.value !== "v" || inputOut.caret !== 2 || inputOut.width !== 20) {
+    throw new Error(`tern props lost: ${JSON.stringify(inputOut)}`);
+  }
+  for (const key of ["focusId", "focusManager", "onChange", "onSubmit"]) {
+    if (key in inputOut) throw new Error(`input component prop leaked: ${key}`);
+  }
+
+  const spinnerOut = toNodeProps({ frames: ["a"], interval: 50 } as unknown as TernProps, "spinner");
+  if (spinnerOut.frames === undefined || (spinnerOut.frames as string[]).length !== 1) {
+    throw new Error("spinner frame props must flow through");
+  }
+  if ("interval" in spinnerOut) throw new Error("spinner interval must be stripped");
 });
 
 // ---------------------------------------------------------------------------
@@ -687,4 +772,206 @@ Deno.test("StreamingText invokes render() after stream appends", async () => {
   await act(async () => {
     ternRoot.unmount();
   });
+});
+
+// ---------------------------------------------------------------------------
+// Roadmap host components
+// ---------------------------------------------------------------------------
+
+Deno.test("Input materializes with its text leaf and strips component props", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(async () => {
+    ternRoot.render(
+      createElement(Input, { value: "hi", caret: 1, placeholder: "type…", focusId: "f", onChange: () => {} }),
+    );
+  });
+
+  const input = root.children[0];
+  if (!input || input.type !== "input") throw new Error("expected an input node");
+  if (input.props.value !== "hi" || input.props.caret !== 1) {
+    throw new Error(`value/caret props = ${JSON.stringify(input.props)}`);
+  }
+  const leaf = input.children[0];
+  if (leaf === undefined || leaf.type !== "text") throw new Error("input must compose a text leaf");
+  if (leaf.props.text !== "hi" || leaf.props.caret !== 1) {
+    throw new Error(`leaf must carry value/caret: ${JSON.stringify(leaf.props)}`);
+  }
+  // Component-consumed props must never reach the scene node.
+  for (const key of ["focusId", "focusManager", "onChange", "onSubmit"]) {
+    if (key in input.props) throw new Error(`input component prop leaked: ${key}`);
+  }
+});
+
+Deno.test("StatusBar materializes left/center/right segments as text children", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(async () => {
+    ternRoot.render(createElement(StatusBar, { left: "L", center: "C", right: "R" }));
+  });
+
+  const bar = root.children[0];
+  if (!bar || bar.type !== "status_bar") throw new Error("expected a status_bar node");
+  const texts = bar.children.map((child) => child.props.text).join(",");
+  if (texts !== "L,C,R") throw new Error(`segments = ${texts}`);
+  if (bar.props.flex_direction !== "row" || bar.props.height !== 1) {
+    throw new Error(`strip props = ${JSON.stringify(bar.props)}`);
+  }
+  // Segment keys are lifted out of the strip props by the core factory.
+  for (const key of ["left", "center", "right"]) {
+    if (key in bar.props) throw new Error(`segment key leaked: ${key}`);
+  }
+});
+
+Deno.test("Panels materializes panel boxes with headers and honors collapsed", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const bodyA = CoreBox();
+  const bodyB = CoreBox();
+
+  await act(async () => {
+    ternRoot.render(
+      createElement(Panels, {
+        panels: [
+          { header: "A", body: bodyA },
+          { header: "B", body: bodyB, collapsed: true },
+        ],
+        active: 1,
+      }),
+    );
+  });
+
+  const panels = root.children[0];
+  if (!panels || panels.type !== "panels") throw new Error("expected a panels node");
+  if (panels.props.active !== 1) throw new Error(`active = ${panels.props.active}`);
+  if (panels.children.length !== 2) throw new Error(`panels = ${panels.children.length}`);
+  const panelA = panels.children[0]!;
+  const panelB = panels.children[1]!;
+  if (panelA.children[0]?.props.text !== "A") throw new Error("panel A header");
+  if (panelA.children[1] !== bodyA) throw new Error("panel A body must be the given node");
+  if (panelA.children.length !== 2) throw new Error("panel A must show header + body");
+  if (panelB.children.length !== 1) throw new Error("collapsed panel B must hide its body");
+  // The active panel's header is bold; the inactive one is not.
+  if (panelB.children[0]?.props.bold !== true) throw new Error("active header must be bold");
+  if (panelA.children[0]?.props.bold !== false) throw new Error("inactive header must not be bold");
+  // The spec list is JS bookkeeping, never scene props.
+  if ("panels" in panels.props) throw new Error("panels spec must not reach the scene props");
+});
+
+Deno.test("Spinner advances while mounted and clears its interval on unmount", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(async () => {
+    ternRoot.render(createElement(Spinner, { interval: 5 }));
+  });
+  const spinner = root.children[0];
+  if (!spinner || spinner.type !== "spinner") throw new Error("expected a spinner node");
+
+  const text = () => spinner.props.text as string;
+  const before = text();
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  const after = text();
+  if (after === before) throw new Error("spinner must advance while mounted");
+
+  await act(async () => {
+    ternRoot.unmount();
+  });
+  const frozen = text();
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  if (text() !== frozen) throw new Error("spinner interval must be cleared on unmount");
+});
+
+Deno.test("a focused Input receives routed keys and fires onChange/onSubmit", async () => {
+  const { renderer, root, keyHandlers } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const manager = new FocusManager();
+  const changes: Array<{ value: string; caret: number }> = [];
+  const submits: Array<{ value: string; caret: number }> = [];
+  // Length read through a function: TS narrows a const-typed empty array's
+  // `length` to 0 (the pushes happen inside closures it cannot see), which
+  // would flag the `!== 2` comparisons below as unintentional.
+  const changeCount = () => changes.length;
+  const submitCount = () => submits.length;
+
+  function App() {
+    // The tree-level key subscription routes each key through the manager
+    // before falling back to its own (no-op) handler.
+    useInput(() => {}, { focusManager: manager });
+    return createElement(Input, {
+      focusId: "main",
+      focusManager: manager,
+      onChange: (state) => changes.push(state),
+      onSubmit: (state) => submits.push(state),
+    });
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(App));
+  });
+
+  if (!manager.has("main")) throw new Error("input must register under focusId");
+  // Not focused: keys fall through to the tree handler (a no-op here).
+  for (const handler of keyHandlers) handler(keyEvent({ char: "a" }));
+  if (changeCount() !== 0) throw new Error("unfocused input must not receive keys");
+
+  if (!manager.focus("main")) throw new Error("focus(main) must succeed");
+  for (const handler of keyHandlers) handler(keyEvent({ char: "a" }));
+  for (const handler of keyHandlers) handler(keyEvent({ char: "b" }));
+  if (changeCount() !== 2) throw new Error(`onChange count = ${changeCount()}`);
+  if (changes[0]!.value !== "a" || changes[1]!.value !== "ab") {
+    throw new Error(`onChange values = ${changes.map((c) => c.value).join(",")}`);
+  }
+  if (changes[1]!.caret !== 2) throw new Error(`caret = ${changes[1]!.caret}`);
+
+  // The routed edits land on the scene node itself.
+  const input = root.children[0]!;
+  if (input.props.value !== "ab" || input.props.caret !== 2) {
+    throw new Error(`node edited = ${input.props.value}/${input.props.caret}`);
+  }
+
+  // Enter routes to onSubmit with the current value.
+  for (const handler of keyHandlers) handler(keyEvent({ name: "enter" }));
+  if (submitCount() !== 1 || submits[0]!.value !== "ab") {
+    throw new Error(`onSubmit = ${JSON.stringify(submits)}`);
+  }
+
+  await act(async () => {
+    ternRoot.unmount();
+  });
+  if (manager.has("main")) throw new Error("input must unregister on unmount");
+  if (manager.activeId !== null) throw new Error("active focus must clear on unregister");
+});
+
+Deno.test("useFocus registers a ref'd element and routes routed keys to it", async () => {
+  const { renderer, keyHandlers } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const manager = new FocusManager();
+  const hits: KeyEvent[] = [];
+  const nodeRef: { current: Node | null } = { current: null };
+
+  function App() {
+    useInput(() => {}, { focusManager: manager });
+    useFocus("probe", nodeRef, (event) => hits.push(event), { manager });
+    return createElement(Box, { ref: nodeRef });
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(App));
+  });
+
+  if (nodeRef.current === null) throw new Error("ref must receive the scene node");
+  if (!manager.has("probe")) throw new Error("useFocus must register the id");
+  if (!manager.focus("probe")) throw new Error("focus(probe) must succeed");
+  for (const handler of keyHandlers) handler(keyEvent({ char: "x" }));
+  if (hits.length !== 1 || hits[0]!.char !== "x") {
+    throw new Error(`routed hits = ${hits.length}`);
+  }
+
+  await act(async () => {
+    ternRoot.unmount();
+  });
+  if (manager.has("probe")) throw new Error("useFocus must dispose on unmount");
 });
