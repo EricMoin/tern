@@ -49,6 +49,24 @@ fn shared_scene() -> &'static Arc<Mutex<Scene>> {
     SCENE.get_or_init(|| Arc::new(Mutex::new(Scene::new())))
 }
 
+/// The last viewport the shared scene was laid out at — the terminal size the
+/// most recent [`TuiRenderer::render`] used. `NodeHandle::content_size` lays
+/// the scene out at this viewport so its geometry matches what is on screen;
+/// before any render it defaults to 80x24.
+fn shared_viewport_ref() -> &'static Mutex<(u32, u32)> {
+    static VIEWPORT: OnceLock<Mutex<(u32, u32)>> = OnceLock::new();
+    VIEWPORT.get_or_init(|| Mutex::new((80, 24)))
+}
+
+/// The laid-out content size of a scene node, in cells.
+#[napi(object)]
+pub struct ContentSize {
+    /// The content width in cells.
+    pub width: u32,
+    /// The content height in cells.
+    pub height: u32,
+}
+
 /// A key event surfaced to JS as a plain object: `{ name, char, ctrl, alt,
 /// shift }`. `char` is the printable character for `"char"`-named keys
 /// (single-character string), `undefined` for named keys.
@@ -312,6 +330,33 @@ impl TuiRenderer {
         Ok(out)
     }
 
+    /// The scene node ids covering the cell at (`col`, `row`), innermost
+    /// (topmost) first, then each ancestor that also covers the cell. The
+    /// scene root is never reported; a cell no node covers yields `[]`.
+    ///
+    /// Z-order and clip/scroll regions match what [`render`](Self::render)
+    /// paints at the current terminal size, so a click at a mouse event's
+    /// `column`/`row` routes to the node that is visually on top.
+    #[napi(js_name = "hit_test")]
+    pub fn hit_test(&self, col: u32, row: u32) -> Result<Vec<u64>> {
+        let mut inner = self.inner.lock().expect("renderer inner poisoned");
+        if inner.destroyed {
+            return Err(Error::from_reason("renderer is destroyed"));
+        }
+        let (w, h) = inner
+            .backend
+            .size()
+            .map_err(|e| Error::from_reason(format!("terminal size: {e}")))?;
+        let scene = inner.scene.clone();
+        let path = {
+            let scene_guard = scene.lock().expect("scene poisoned");
+            inner
+                .compositor
+                .hit_test(&scene_guard, col as i32, row as i32, Size::new(w, h))
+        };
+        Ok(path.into_iter().map(|id| id.0).collect())
+    }
+
     /// Paint the shared scene into a fresh buffer at the current terminal
     /// size and flush the minimal diff (vs the previous frame) to the
     /// terminal.
@@ -325,6 +370,11 @@ impl TuiRenderer {
             .backend
             .size()
             .map_err(|e| Error::from_reason(format!("terminal size: {e}")))?;
+        // Remember the viewport for `NodeHandle.content_size`, so its layout
+        // matches the geometry that was just painted.
+        *shared_viewport_ref()
+            .lock()
+            .expect("viewport poisoned") = (w as u32, h as u32);
         let viewport = Size::new(w, h);
         let scene = inner.scene.clone();
         let buffer = {
@@ -565,6 +615,35 @@ impl NodeHandle {
             return Err(Error::from_reason("node not found in scene"));
         }
         Ok(())
+    }
+
+    /// The laid-out content size of this node: `{ width, height }` in cells.
+    ///
+    /// For `text` / `streaming_text` nodes this is the wrapped content size
+    /// (the display width of the widest wrapped line and the wrapped line
+    /// count at the node's laid-out width); for containers it is the laid-out
+    /// rect size. The layout runs at the viewport of the most recent
+    /// [`TuiRenderer::render`], so the geometry matches what is on screen. A
+    /// node with no geometry (`display: none`) reports `(0, 0)`; a detached
+    /// handle errors.
+    #[napi(js_name = "content_size")]
+    pub fn content_size(&self) -> Result<ContentSize> {
+        let inner = self.inner.lock().expect("node inner poisoned");
+        let Some(id) = inner.id else {
+            return Err(Error::from_reason("node is not attached to a scene"));
+        };
+        let (w, h) = *shared_viewport_ref()
+            .lock()
+            .expect("viewport poisoned");
+        let mut compositor = Compositor::new();
+        let size = {
+            let scene = inner.scene.lock().expect("scene poisoned");
+            compositor.content_size(&scene, id, Size::new(w as u16, h as u16))
+        };
+        Ok(match size {
+            Some((width, height)) => ContentSize { width, height },
+            None => ContentSize { width: 0, height: 0 },
+        })
     }
 }
 
