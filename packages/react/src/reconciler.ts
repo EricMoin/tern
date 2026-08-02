@@ -11,7 +11,8 @@
  *
  * - `supportsMutation: true` — mutation mode (append/insert/remove ops).
  * - `createInstance(type, props)` -> tern node via `Box(props)` /
- *   `Text(props)` / `StreamingText(props)`.
+ *   `Text(props)` / `StreamingText(props)` / `Input(props)` / `Spinner(props)`
+ *   / `StatusBar(props)` / `Panels(props)`.
  * - `createTextInstance` throws — tern requires an explicit `<Text>` element,
  *   bare string children are rejected at render time.
  * - `appendChild` / `insertBefore` / `removeChild` -> tern tree ops. The core
@@ -47,11 +48,18 @@ import {
 } from "react";
 import {
   Box,
+  Input as CoreInput,
+  Panels as CorePanels,
+  Spinner as CoreSpinner,
+  StatusBar as CoreStatusBar,
   StreamingText,
   Text,
+  focusManager,
+  type FocusManager,
   type KeyEvent,
   type Node,
   type NodeProps,
+  type PanelsProps,
   type Renderer,
 } from "@tern/core";
 
@@ -114,6 +122,12 @@ export interface TernRoot {
 export interface UseInputOptions {
   /** When `false`, the handler is detached until reactivated (default `true`). */
   isActive?: boolean;
+  /**
+   * The `FocusManager` consulted before the tree-level handler: when it
+   * routes the key to a focused element (`FocusManager.routeKey`), the tree
+   * handler is skipped. Defaults to the core `focusManager`.
+   */
+  focusManager?: FocusManager;
 }
 
 /** The handler signature for `useInput`: a core key event. */
@@ -135,15 +149,29 @@ const REACT_RESERVED_PROPS = new Set(["children", "key", "ref"]);
 const STREAMING_TEXT_PROPS = new Set(["stream", "autoScroll", "wrap"]);
 
 /**
- * Strip the React-only props (and, for `streaming_text`, the component-level
- * `<StreamingText>` props), leaving the tern node props (style + layout keys)
- * that the core factories and `Node.setProps` understand.
+ * Component-consumed props of `<Input>` that must never reach a scene node:
+ * `onChange` / `onSubmit` are callbacks, `focusId` is focus bookkeeping, and
+ * `focusManager` is a non-scalar object (the binding drops objects). The
+ * value/caret/placeholder state props flow through to the core factory.
+ */
+const INPUT_PROPS = new Set(["onChange", "onSubmit", "focusId", "focusManager"]);
+
+/** Component-consumed props of `<Spinner>`: `interval` drives the timer, it
+ * is not a scene prop. */
+const SPINNER_PROPS = new Set(["interval"]);
+
+/**
+ * Strip the React-only props (and the component-level `<StreamingText>`,
+ * `<Input>` / `<Spinner>` props), leaving the tern node props (style + layout
+ * keys) that the core factories and `Node.setProps` understand.
  */
 export function toNodeProps(props: TernProps, type?: string): NodeProps {
   const out: NodeProps = {};
   for (const [key, value] of Object.entries(props)) {
     if (REACT_RESERVED_PROPS.has(key) || value === undefined) continue;
     if (type === "streaming_text" && STREAMING_TEXT_PROPS.has(key)) continue;
+    if (type === "input" && INPUT_PROPS.has(key)) continue;
+    if (type === "spinner" && SPINNER_PROPS.has(key)) continue;
     out[key] = value;
   }
   return out;
@@ -237,6 +265,16 @@ export const hostConfig: HostConfig = {
         return Text(nodeProps);
       case "streaming_text":
         return StreamingText(nodeProps);
+      case "input":
+        return CoreInput(nodeProps);
+      case "spinner":
+        return CoreSpinner(nodeProps);
+      case "status_bar":
+        return CoreStatusBar(nodeProps);
+      case "panels":
+        // The panel spec list is JS bookkeeping the core factory consumes;
+        // `PanelsProps` requires it while `NodeProps` is an open record.
+        return CorePanels(nodeProps as PanelsProps);
       default:
         throw new Error(`@tern/react: unknown host element type "${type}"`);
     }
@@ -562,20 +600,27 @@ export function useApp(): AppHandle {
 
 /**
  * Subscribe to keyboard input for the current tree. The handler receives the
- * core key event and always sees the latest closure. Returns nothing; the
- * subscription is torn down when the component unmounts or `isActive`
- * becomes `false`.
+ * core key event and always sees the latest closure. Each key is first routed
+ * through the focus manager (defaulting to the core `focusManager`): when a
+ * focused element handles it (`FocusManager.routeKey` returns `true`), the
+ * tree-level handler is skipped; otherwise the handler runs, preserving the
+ * pre-focus behavior. Returns nothing; the subscription is torn down when the
+ * component unmounts or `isActive` becomes `false`.
  */
 export function useInput(handler: UseInputHandler, options?: UseInputOptions): void {
   const { renderer } = useApp();
   const handlerRef = useRef(handler);
   handlerRef.current = handler;
+  const manager = options?.focusManager ?? focusManager;
   const isActive = options?.isActive ?? true;
 
   useEffect(() => {
     if (!isActive) return;
     return renderer.onKey((event) => {
+      // A focused element's key handler wins; otherwise fall back to the
+      // tree-level handler (the current behavior).
+      if (manager.routeKey(event)) return;
       handlerRef.current(event);
     });
-  }, [renderer, isActive]);
+  }, [renderer, isActive, manager]);
 }
