@@ -53,6 +53,18 @@ export declare class NodeHandle {
    * node.
    */
   append_span(text: string, style?: Record<string, any> | undefined | null): void
+  /**
+   * The laid-out content size of this node: `{ width, height }` in cells.
+   *
+   * For `text` / `streaming_text` nodes this is the wrapped content size
+   * (the display width of the widest wrapped line and the wrapped line
+   * count at the node's laid-out width); for containers it is the laid-out
+   * rect size. The layout runs at the viewport of the most recent
+   * [`TuiRenderer::render`], so the geometry matches what is on screen. A
+   * node with no geometry (`display: none`) reports `(0, 0)`; a detached
+   * handle errors.
+   */
+  content_size(): ContentSize
 }
 
 /**
@@ -83,6 +95,16 @@ export declare class TuiRenderer {
    */
   poll_events(timeoutMs: number): Array<TernEventJs>
   /**
+   * The scene node ids covering the cell at (`col`, `row`), innermost
+   * (topmost) first, then each ancestor that also covers the cell. The
+   * scene root is never reported; a cell no node covers yields `[]`.
+   *
+   * Z-order and clip/scroll regions match what [`render`](Self::render)
+   * paints at the current terminal size, so a click at a mouse event's
+   * `column`/`row` routes to the node that is visually on top.
+   */
+  hit_test(col: number, row: number): Array<bigint>
+  /**
    * Paint the shared scene into a fresh buffer at the current terminal
    * size and flush the minimal diff (vs the previous frame) to the
    * terminal.
@@ -99,6 +121,14 @@ export declare class TuiRenderer {
    * `exit_on_ctrl_c`).
    */
   get destroyed(): boolean
+}
+
+/** The laid-out content size of a scene node, in cells. */
+export interface ContentSize {
+  /** The content width in cells. */
+  width: number
+  /** The content height in cells. */
+  height: number
 }
 
 /**

@@ -16,13 +16,20 @@ import process from "node:process";
 // The generated napi declarations. Type-only import: erased at runtime, so
 // this also resolves under Node's type stripping.
 import type {
+  ContentSize,
   KeyEvent,
   NodeHandle as NativeNodeHandle,
   TuiRenderer as NativeTuiRenderer,
   TuiRendererOptions,
 } from "../../../src/bindings/tern-node/index.d.ts";
 
-export type { KeyEvent, NodeHandle, TuiRenderer, TuiRendererOptions } from "../../../src/bindings/tern-node/index.d.ts";
+export type {
+  ContentSize,
+  KeyEvent,
+  NodeHandle,
+  TuiRenderer,
+  TuiRendererOptions,
+} from "../../../src/bindings/tern-node/index.d.ts";
 
 /** The runtime surface of the loaded napi addon. */
 export interface TernAddon {
