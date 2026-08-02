@@ -16,14 +16,17 @@ component lives in two places:
   `src/core/tern-components` (the `Renderable` / `Text` / `Box` pattern).
 
 The MVP ships the core `Text` / `Box` renderables plus the compositor. A
-completeness pass has since landed the **Rust renderable half** of the
-[Input](#input), [Spinner](#spinner), [Panels / split layouts](#panels--split-layouts),
-and [StatusBar](#statusbar) components in `src/core/tern-components` (state,
-interaction, and paint are unit- and golden-tested), and the **JS elements and
-renderer wiring** now ship too: element factories in `@tern/core`, host
+completeness pass has since landed the full roadmap element set — **the Rust
+renderable half** of [Input](#input), [Spinner](#spinner),
+[Panels / split layouts](#panels--split-layouts), and [StatusBar](#statusbar)
+in `src/core/tern-components` (state, interaction, and paint are unit- and
+golden-tested), plus the **JS elements and renderer wiring** for every
+component below: element factories in `@tern/core`, host
 components/factories in `@tern/react` and `@tern/solid`, focus/key routing via
-the core `FocusManager`, and spinner timer redraw. The components below layer
-richer behavior on top of that foundation.
+the core `FocusManager`, spinner timer redraw, the theme system, soft wrap,
+and the Phase 2 event consumers (resize reflow, panel drag-resize,
+focus-aware redraw). The status table below is current — the shipped rows
+reflect what runs today.
 
 ## Event model
 
@@ -55,14 +58,17 @@ handler.
 
 | Component | Status | Needs |
 |-----------|--------|-------|
-| [StreamingText](#streamingtext) | 🔜 Soon | incremental span feed |
+| [StreamingText](#streamingtext) | ✅ Shipped | — |
 | [MarkdownView](#markdownview) | 🧭 Later | tree-sitter highlighting |
-| [DiffView](#diffview) | 🔜 Soon | — |
+| [DiffView](#diffview) | ✅ Shipped | — |
 | [Input](#input) | ✅ Shipped | — |
-| [Spinner](#spinner) | ✅ Shipped | focus-aware tick pause → [roadmap Phase 2](roadmap.md#phase-2--resize-focus--mouse-events) |
-| [Panels / split layouts](#panels--split-layouts) | ✅ Shipped | mouse drag-resize handles → [roadmap Phase 2](roadmap.md#phase-2--resize-focus--mouse-events) |
+| [Spinner](#spinner) | ✅ Shipped | — |
+| [Panels / split layouts](#panels--split-layouts) | ✅ Shipped | — |
 | [StatusBar](#statusbar) | ✅ Shipped | reserved viewport row |
-| [Select](#select) | 🧭 Later | — |
+| [Select](#select) | ✅ Shipped | — |
+| [ScrollView](#scrollview) | ✅ Shipped | — |
+| [Theme system](#theme-system--soft-wrap) | ✅ Shipped | — |
+| [Soft wrap (`wrap` prop)](#theme-system--soft-wrap) | ✅ Shipped | — |
 
 ---
 
@@ -104,6 +110,15 @@ whole viewport is noticeable jank.
 **Acceptance:** a 10k-token stream renders without dropping characters; typing
 backpressure keeps the event loop responsive; tail-follow + scroll-up detach
 works.
+
+**Shipped:** the `streaming_text` scene node ships end to end. `StreamingText`
+in `@tern/core` builds the node (fed via `Node.appendSpan`); `<StreamingText>`
+in `@tern/react` consumes the `stream` prop with an effect that appends each
+span, paints after every append, and feeds the auto-scroll; `StreamingText` +
+`subscribeStream` in `@tern/solid` do the same. Auto-scroll ships as the core
+`syncStreamTail` / `followTail` / `isStreamFollowing` / `setStreamAutoScroll`
+helpers, defaulting to tail-follow (`autoScroll: true`) — a manual scroll
+above the tail detaches the follow and `followTail` re-attaches.
 
 ---
 
@@ -176,6 +191,14 @@ narrow terminal and compose with side-by-side mode later.
 **Acceptance:** golden test for a 3-hunk diff: gutter alignment, kind colors,
 context dimming; side-by-side mode fills two panels without overflow.
 
+**Shipped:** `DiffView` in `@tern/core` renders the unified-diff rows — a
+dimmed gutter with right-aligned old/new line numbers, `+`/`-`/` ` markers,
+and per-kind colors (adds `#98c379`, dels `#e06c75`, context dimmed) — with
+`scroll_x` / `scroll_y` panning the whole region and the `wrap` prop passing
+through to each content leaf. `<DiffView>` in `@tern/react` and `DiffView` in
+`@tern/solid` materialize the same factory. Intra-line char-level highlight
+and side-by-side mode remain future work.
+
 ---
 
 ## Input
@@ -232,9 +255,11 @@ element (`Input` in `@tern/core`; `<Input>` in `@tern/react`, `Input` in
 determinate progress (tool execution, file upload, token budget).
 
 **Core problem:** animation needs a *periodic redraw* on top of a
-paint-on-demand pipeline. The JS side now provides it — `<Spinner>` in
+paint-on-demand pipeline. The JS side provides it — `<Spinner>` in
 `@tern/react` runs a tick interval while mounted (see the Rust renderable note
-below); pausing the tick while the terminal is unfocused is roadmap Phase 2.
+below), and the tick pauses while the terminal is unfocused (focus-aware
+redraw, [roadmap Phase 2](roadmap.md#phase-2--resize-focus--mouse-events--done) —
+shipped).
 
 **Design:**
 
@@ -304,8 +329,10 @@ keyboard resize sequence changes pane widths and a golden buffer matches.
 `expand` hide the body and an `active` index tracks focus. The JS element
 (`Panels` in `@tern/core`; `<Panels>` in `@tern/react`, `Panels` in
 `@tern/solid`) exposes `collapsePanel` / `expandPanel` / `togglePanel` /
-`focusPanel`. Mouse drag-resize handles are still tracked in
-[roadmap.md](roadmap.md) Phase 2.
+`focusPanel`. Mouse drag-resize ships as `startPanelDrag` / `dragPanels` /
+`endPanelDrag` in `@tern/core`, wired by `usePanelMouseDrag` (`@tern/react`)
+and `subscribePanelDrag` (`@tern/solid`); the flex-basis reflow of a drag into
+the layout engine is tracked in [roadmap.md](roadmap.md).
 
 ---
 
@@ -385,3 +412,70 @@ scrollable popup that must not disturb the layout it overlays or docks to.
 
 **Acceptance:** interaction test: filter narrows the list, enter returns the
 highlighted option; golden test for the checkmark/selection styles.
+
+**Shipped:** `Select` in `@tern/core` renders the filter row (dimmed
+`filter…` placeholder while empty), one option row per visible option (the
+highlighted row reversed, multi-mode rows `✓ `/`  `-prefixed), and in multi
+mode a selected-count summary row — driven by `selectKey` (`up` / `down` /
+`enter` / `escape`, typeahead filter, space toggles checkmarks).
+`<Select>` in `@tern/react` and `Select` in `@tern/solid` materialize it; a
+`focusId` (React) or `useFocus` (Solid) registers it with the `FocusManager`
+so routed keys drive it (`onChange` / `onConfirm` / `onDismiss` in React). A
+`floating` dropdown stamps the root box's `z_index` prop so it paints above
+in-flow content.
+
+---
+
+## ScrollView
+
+**Purpose:** a scrollable clip/scroll region — long output (agent transcripts,
+logs, file content) inside a bounded viewport, optionally with a track + thumb
+scrollbar.
+
+**Core problem:** scrolling must stay cheap: only the viewport is painted, the
+offsets are scene props, and the content is never re-laid-out per scroll step.
+
+**Design:**
+
+- **Clip/scroll region** over the engine's scene region props: `clip_x` /
+  `clip_y` / `clip_width` / `clip_height` and `scroll_x` / `scroll_y`.
+- **Driven scrolling:** the core `scrollTo` / `scrollBy` / `scrollTop` helpers
+  clamp offsets against `Node.contentSize()` (content vs viewport) and update
+  the scene props — the compositor paints the pan.
+- **Scrollbar:** an optional track (`░`) + thumb (`█`) text leaf, absolutely
+  positioned at the region's right edge (paint z-order 1, above in-flow
+  content).
+
+**API sketch (JS):**
+
+```tsx
+<ScrollView width={40} height={10} clip_height={10} showScrollbar>
+  <Text text={log} />
+</ScrollView>
+```
+
+**Acceptance:** scrollTo/scrollBy clamp to the content bounds; the scrollbar
+thumb tracks the scroll fraction; a streaming node auto-scrolls inside the
+region.
+
+**Shipped:** `ScrollView` in `@tern/core` (with `scrollTo` / `scrollBy` /
+`scrollTop` and the `SCROLLBAR_THUMB_CHAR` / `SCROLLBAR_TRACK_CHAR`
+constants), `<ScrollView>` in `@tern/react` (content is React children), and
+`ScrollView` in `@tern/solid` (content via the `children` prop). The
+`streaming_text` auto-scroll reuses the same clip/scroll machinery.
+
+---
+
+## Theme system & soft wrap
+
+**Theme system (shipped):** the core theme surface — `defaultTheme`,
+`mergeTheme(base, overrides)`, `resolveTheme(theme, props)` — resolves the
+semantic `role` / `component` hints on node props into plain `fg` / `bg` /
+`border_style` style keys at element-creation time (the hints are consumed and
+never reach the scene; explicit props always win). `@tern/react` provides
+`<ThemeProvider>` + `useTheme`; `@tern/solid` provides `setTheme` / `getTheme`
+(module-level, merged over `defaultTheme`).
+
+**Soft wrap (shipped):** the `wrap` prop passes through to each content leaf
+of `DiffView` and is accepted on `StreamingText` for API stability — the
+compositor soft-wraps at the node width.
