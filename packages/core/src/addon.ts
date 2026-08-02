@@ -37,6 +37,16 @@ const ADDON_PATH = "../../../src/bindings/tern-node/index.js";
 let cached: TernAddon | null = null;
 
 /**
+ * @internal — test seam for `packages/core/src/index_test.ts`. Injects a fake
+ * addon into the cache so `Renderer` dispatch can be exercised without the
+ * native `.node` binding (Deno ESM exports are immutable, so the cached slot
+ * is the seam). Pass `null` to reset back to lazy loading.
+ */
+export function setAddonForTesting(addon: TernAddon | null): void {
+  cached = addon;
+}
+
+/**
  * Load the tern-node addon (cached). Tries the napi-generated loader first
  * (`index.js`), then falls back to requiring the platform `.node` directly.
  *

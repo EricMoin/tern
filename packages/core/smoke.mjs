@@ -89,7 +89,9 @@ while (Date.now() < deadline && !quit) {
     break;
   }
   for (const ev of events) {
-    if (ev.name === "char" && ev.char === "q") {
+    // pollEvents returns tagged TernEventJs objects; the quit key is a
+    // "key"-tagged event carrying the KeyEvent payload.
+    if (ev.type === "key" && ev.key?.name === "char" && ev.key?.char === "q") {
       quit = true;
       break;
     }
