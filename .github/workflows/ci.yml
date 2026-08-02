@@ -47,3 +47,42 @@ jobs:
 
       - name: Tests (deno test)
         run: npm test
+
+  smoke:
+    # PTY smoke for the @tern/examples demos. The run-smoke.sh harness pipes
+    # 'q' into each demo inside a pseudo-TTY via the macOS `script` utility
+    # (the demos only exit 0 when their scene rendered AND the event loop quit
+    # on 'q'), so this job must run on macOS. The native tern-node addon is
+    # built here because the demos load it at runtime.
+    name: Smoke (PTY demos, macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # napi build compiles the binding via cargo, so the pinned Rust
+      # toolchain is required. rustflags is cleared to match a local build.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      # The demos run under deno (deno-first, constitution §3).
+      - uses: denoland/setup-deno@v2
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      # Build the tern-node napi addon (full script chain: napi build
+      # --platform && node fix-dts.mjs) so the demos can load it.
+      - name: Build tern-node addon
+        working-directory: src/bindings/tern-node
+        run: |
+          npm ci
+          npm run build
+
+      - name: PTY smoke (script harness)
+        run: bash packages/examples/run-smoke.sh
