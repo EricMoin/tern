@@ -17,27 +17,60 @@
 
 import {
   Box,
+  DIFF_ADD_FG,
+  DIFF_DEL_FG,
+  DiffView,
   FocusManager,
   Input,
   Node,
+  PANEL_DRAG_MIN_SIZE,
   Panels,
+  SCROLLBAR_THUMB_CHAR,
+  SCROLLBAR_TRACK_CHAR,
+  SELECT_FILTER_PLACEHOLDER,
+  ScrollView,
+  Select,
   Spinner,
   StatusBar,
   StreamingText,
   Text,
+  THEME_COMPONENTS,
+  THEME_ROLES,
   collapsePanel,
   createRenderer,
+  defaultTheme,
+  dragPanels,
   editKey,
+  endPanelDrag,
   expandPanel,
+  followTail,
   focusManager,
   focusPanel,
+  isStreamFollowing,
+  mergeTheme,
   name,
+  resolveTheme,
+  scrollBy,
+  scrollTo,
+  scrollTop,
+  selectKey,
+  startPanelDrag,
+  syncStreamTail,
   tick,
   togglePanel,
   useFocus,
   version,
+  visibleOptions,
 } from "./index.ts";
-import { setAddonForTesting } from "./addon.ts";
+import type {
+  SelectOption,
+  SelectProps,
+  SelectState,
+  Theme,
+  ThemeOverrides,
+  ThemeResolvableProps,
+} from "./index.ts";
+import { setAddonForTesting, loadAddon } from "./addon.ts";
 import type { TernAddon } from "./addon.ts";
 import type {
   KeyEvent,
@@ -56,6 +89,40 @@ import type {
 /** Events queued for the next fake `poll_events` call (consumed in order). */
 const pendingEvents: TernEventJs[] = [];
 
+/** The last `(col, row)` passed to the fake `hit_test`, or `null`. */
+let lastHitTest: [number, number] | null = null;
+
+/** The native node types materialized through the fake `create_node`. */
+const createdNodes: Array<{ type: string; props: Record<string, unknown> | null }> = [];
+
+/** Per-handle `content_size` overrides for the panel-drag geometry tests
+ * (keyed by the `FakeNodeHandle` instance backing the node). */
+const fakeContentSizes = new Map<object, { width: number; height: number }>();
+
+/**
+ * A fake native `NodeHandle` standing in for the real addon's scene handle.
+ * `content_size` returns the per-handle override set via `fakeContentSizes`
+ * (used by the panel-drag geometry tests) or a fixed size, so the geometry-
+ * query tests exercise the @tern/core plumbing without the native `.node`
+ * binary.
+ */
+class FakeNodeHandle {
+  content_size(): { width: number; height: number } {
+    return fakeContentSizes.get(this) ?? { width: 11, height: 2 };
+  }
+  add_child(child: unknown): unknown {
+    return child;
+  }
+  insert_before(child: unknown, _anchor: unknown): unknown {
+    return child;
+  }
+  set_props(_props: unknown): void {}
+  append_span(_text: string, _style?: unknown): void {}
+  remove(): boolean {
+    return true;
+  }
+}
+
 /** A fake native `TuiRenderer` standing in for the real addon. */
 class FakeTuiRenderer {
   destroyed = false;
@@ -63,10 +130,14 @@ class FakeTuiRenderer {
   root(): NodeHandle {
     // The `Renderer` constructor only stores this in `Node.wrapRoot`;
     // the dispatch tests never touch it.
-    return {} as NodeHandle;
+    return new FakeNodeHandle() as unknown as NodeHandle;
   }
   poll_events(_timeoutMs: number): TernEventJs[] {
     return pendingEvents.splice(0);
+  }
+  hit_test(col: number, row: number): bigint[] {
+    lastHitTest = [col, row];
+    return [7n, 3n];
   }
   render(): void {}
   destroy(): void {
@@ -77,15 +148,19 @@ class FakeTuiRenderer {
 /** The fake addon injected through `setAddonForTesting`. */
 const fakeAddon = {
   TuiRenderer: FakeTuiRenderer,
-  NodeHandle: class {},
-  create_node: () => {
-    throw new Error("create_node is not used by the dispatch tests");
+  NodeHandle: FakeNodeHandle,
+  create_node: (type: string, props?: Record<string, unknown> | null) => {
+    createdNodes.push({ type, props: props ?? null });
+    return new FakeNodeHandle();
   },
 } as unknown as TernAddon;
 
 /** Run `fn` with the fake addon installed, resetting the seam afterwards. */
 function withFakeAddon(fn: () => void): void {
   pendingEvents.length = 0;
+  lastHitTest = null;
+  createdNodes.length = 0;
+  fakeContentSizes.clear();
   setAddonForTesting(fakeAddon);
   try {
     fn();
@@ -556,6 +631,74 @@ Deno.test("pollEvents returns the tagged union verbatim", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Scene geometry queries (fake native addon)
+// ---------------------------------------------------------------------------
+
+Deno.test("Renderer.hit_test proxies (col, row) to the native addon", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const path = renderer.hit_test(3, 2);
+    if (lastHitTest === null || lastHitTest[0] !== 3 || lastHitTest[1] !== 2) {
+      throw new Error(`hit_test received ${JSON.stringify(lastHitTest)}`);
+    }
+    // The fake returns the topmost path [7, 3] verbatim (u64 ids as bigint).
+    if (path.length !== 2 || path[0] !== 7n || path[1] !== 3n) {
+      throw new Error(`hit_test path = ${JSON.stringify(path)}`);
+    }
+  });
+});
+
+Deno.test("Node.contentSize proxies to the native handle", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const stream = StreamingText({ width: 8 });
+    renderer.root.addChild(stream);
+    // Attaching materialized the node through the fake `create_node` with the
+    // streaming_text native type.
+    const created = createdNodes[0];
+    if (created === undefined || created.type !== "streaming_text") {
+      throw new Error(`created native type = ${created?.type}`);
+    }
+    if (created.props?.width !== 8) {
+      throw new Error(`created props = ${JSON.stringify(created.props)}`);
+    }
+    const size = stream.contentSize();
+    if (size.width !== 11 || size.height !== 2) {
+      throw new Error(`contentSize = ${JSON.stringify(size)}`);
+    }
+  });
+});
+
+Deno.test("Node.contentSize on a detached node throws", () => {
+  withFakeAddon(() => {
+    const node = Text({ text: "x" });
+    let threw = false;
+    try {
+      node.contentSize();
+    } catch {
+      threw = true;
+    }
+    if (!threw) throw new Error("contentSize on a detached node must throw");
+  });
+});
+
+Deno.test("the mocked addon exposes hit_test and content_size natively", () => {
+  withFakeAddon(() => {
+    const addon = loadAddon();
+    const renderer = new addon.TuiRenderer({ exit_on_ctrl_c: false });
+    const path = renderer.hit_test(1, 1);
+    if (path.length !== 2 || path[0] !== 7n || path[1] !== 3n) {
+      throw new Error(`native hit_test = ${JSON.stringify(path)}`);
+    }
+    const handle = addon.create_node("text", { text: "hi" });
+    const size = handle.content_size();
+    if (size.width !== 11 || size.height !== 2) {
+      throw new Error(`native content_size = ${JSON.stringify(size)}`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Roadmap elements: Input
 // ---------------------------------------------------------------------------
 
@@ -802,6 +945,541 @@ Deno.test("focusPanel moves the active index and restyles headers", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Panel drag-resize
+//
+// The drag helpers locate the 1-cell gutter between adjacent panels from the
+// laid-out extents (`Node.contentSize()` over the fake addon, keyed per
+// handle in `fakeContentSizes`) and map `down_left` -> `drag_left` -> `up_left`
+// to absolute `flex_basis` changes on the pane above/left of the gutter,
+// clamped to the pane's min size (and the neighbor's min as the upper bound).
+// ---------------------------------------------------------------------------
+
+/** Build a mouse event payload. */
+function mouse(kind: string, column: number, row: number): MouseEventJs {
+  return { kind, column, row, ctrl: false, alt: false, shift: false };
+}
+
+/**
+ * Build a 3-panel column stack attached under a fake-addon renderer root and
+ * record laid-out sizes: the stack is 9 rows tall (panel A rows 0-2, gutter
+ * row 3, panel B rows 4-5, gutter row 6, panel C rows 7-8). Panels are 60
+ * cells wide.
+ */
+function attachedPanels(): { renderer: ReturnType<typeof createRenderer>; panels: Node } {
+  const renderer = createRenderer();
+  const panels = Panels({
+    panels: [
+      { header: "A", body: Box() },
+      { header: "B", body: Box() },
+      { header: "C", body: Box() },
+    ],
+    direction: "column",
+  });
+  renderer.root.addChild(panels);
+  fakeContentSizes.set(panels.handle, { width: 60, height: 9 });
+  fakeContentSizes.set(panels.children[0]!.handle, { width: 60, height: 3 });
+  fakeContentSizes.set(panels.children[1]!.handle, { width: 60, height: 2 });
+  fakeContentSizes.set(panels.children[2]!.handle, { width: 60, height: 2 });
+  return { renderer, panels };
+}
+
+Deno.test("Panels defaults to a 1-cell gutter gap (an explicit gap wins)", () => {
+  const a = Panels({ panels: [{ header: "A", body: Box() }, { header: "B", body: Box() }] });
+  if (a.props.gap !== 1) throw new Error(`default gap = ${a.props.gap}`);
+  const b = Panels({ panels: [{ header: "A", body: Box() }, { header: "B", body: Box() }], gap: 0 });
+  if (b.props.gap !== 0) throw new Error(`explicit gap = ${b.props.gap}`);
+});
+
+Deno.test("startPanelDrag grabs a gutter on down_left and dragPanels mutates the adjacent pane's flex_basis", () => {
+  withFakeAddon(() => {
+    const { panels } = attachedPanels();
+
+    // Press on gutter 0 (row 3): between panel A (rows 0-2) and panel B.
+    const started = startPanelDrag(panels, mouse("down_left", 0, 3));
+    if (started === null || started.index !== 0 || started.direction !== "column") {
+      throw new Error(`started = ${JSON.stringify(started)}`);
+    }
+
+    // Drag down 1 cell: panel A's flex_basis grows 3 -> 4.
+    const r1 = dragPanels(panels, mouse("drag_left", 0, 4));
+    if (r1 === null || r1.flex_basis !== 4 || r1.index !== 0) {
+      throw new Error(`drag 1 = ${JSON.stringify(r1)}`);
+    }
+    if (panels.children[0]!.props.flex_basis !== 4) {
+      throw new Error(`flex_basis after drag = ${panels.children[0]!.props.flex_basis}`);
+    }
+
+    // Drag down 2 more: 4 -> 6.
+    const r2 = dragPanels(panels, mouse("drag_left", 0, 6));
+    if (r2 === null || r2.flex_basis !== 6) throw new Error(`drag 2 = ${JSON.stringify(r2)}`);
+
+    // A drag on a gutter further down targets its own pane (gutter 1 -> pane B).
+    const r3 = dragPanels(panels, mouse("drag_left", 0, 7));
+    if (r3 === null || r3.index !== 0) {
+      throw new Error(`drag 3 must stay on pane 0: ${JSON.stringify(r3)}`);
+    }
+
+    // up_left ends the drag; a later drag_left is inert.
+    const ended = endPanelDrag(panels);
+    if (ended === null || ended.index !== 0) throw new Error(`ended = ${JSON.stringify(ended)}`);
+    if (dragPanels(panels, mouse("drag_left", 0, 8)) !== null) {
+      throw new Error("a drag after up_left must be a no-op");
+    }
+  });
+});
+
+Deno.test("dragPanels clamps the pane's flex_basis to its min size", () => {
+  withFakeAddon(() => {
+    const { panels } = attachedPanels();
+    if (startPanelDrag(panels, mouse("down_left", 0, 3)) === null) {
+      throw new Error("down_left on gutter 0 must start a drag");
+    }
+    // Drag far above the split: 3 - 20 = -17 -> clamps to the default min (1).
+    const r = dragPanels(panels, mouse("drag_left", 0, -17));
+    if (r === null || r.flex_basis !== PANEL_DRAG_MIN_SIZE) {
+      throw new Error(`clamped basis = ${JSON.stringify(r)}`);
+    }
+    if (panels.children[0]!.props.flex_basis !== PANEL_DRAG_MIN_SIZE) {
+      throw new Error(`flex_basis = ${panels.children[0]!.props.flex_basis}`);
+    }
+  });
+});
+
+Deno.test("dragPanels clamps to the space the neighbor pane's min size leaves", () => {
+  withFakeAddon(() => {
+    const { panels } = attachedPanels();
+    // The stack is 9 tall with a 1-cell gutter: pane A can grow to
+    // 9 - 1 (gutter) - 1 (panel B's min) = 7.
+    if (startPanelDrag(panels, mouse("down_left", 0, 3)) === null) {
+      throw new Error("down_left on gutter 0 must start a drag");
+    }
+    const r = dragPanels(panels, mouse("drag_left", 0, 99));
+    if (r === null || r.flex_basis !== 7) {
+      throw new Error(`upper-clamped basis = ${JSON.stringify(r)}`);
+    }
+  });
+});
+
+Deno.test("a declared min_height prop raises the pane's drag floor", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const panels = Panels({
+      panels: [{ header: "A", body: Box(), min_height: 4 }, { header: "B", body: Box() }],
+      direction: "column",
+    });
+    renderer.root.addChild(panels);
+    fakeContentSizes.set(panels.handle, { width: 60, height: 7 });
+    fakeContentSizes.set(panels.children[0]!.handle, { width: 60, height: 4 });
+    fakeContentSizes.set(panels.children[1]!.handle, { width: 60, height: 2 });
+    // Gutter 0 = row 4 (panel A rows 0-3).
+    if (startPanelDrag(panels, mouse("down_left", 0, 4)) === null) {
+      throw new Error("down_left on gutter 0 must start a drag");
+    }
+    const r = dragPanels(panels, mouse("drag_left", 0, -50));
+    if (r === null || r.flex_basis !== 4) {
+      throw new Error(`min_height floor = ${JSON.stringify(r)}`);
+    }
+  });
+});
+
+Deno.test("row stacks resize by column and use min_width", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const panels = Panels({
+      panels: [
+        { header: "A", body: Box(), min_width: 2 },
+        { header: "B", body: Box() },
+      ],
+      direction: "row",
+    });
+    renderer.root.addChild(panels);
+    fakeContentSizes.set(panels.handle, { width: 7, height: 20 });
+    fakeContentSizes.set(panels.children[0]!.handle, { width: 3, height: 20 });
+    fakeContentSizes.set(panels.children[1]!.handle, { width: 2, height: 20 });
+    // Gutter 0 = column 3 (panel A columns 0-2); the drag axis is the column.
+    const started = startPanelDrag(panels, mouse("down_left", 3, 0));
+    if (started === null || started.direction !== "row" || started.index !== 0) {
+      throw new Error(`started = ${JSON.stringify(started)}`);
+    }
+    const r = dragPanels(panels, mouse("drag_left", 5, 0)); // +2 columns
+    if (r === null || r.flex_basis !== 5) throw new Error(`row drag = ${JSON.stringify(r)}`);
+    if (panels.children[0]!.props.flex_basis !== 5) {
+      throw new Error(`flex_basis = ${panels.children[0]!.props.flex_basis}`);
+    }
+    // Far left: 5 - 20 = -15 -> clamps to min_width 2.
+    const clamped = dragPanels(panels, mouse("drag_left", -15, 0));
+    if (clamped === null || clamped.flex_basis !== 2) {
+      throw new Error(`row min_width clamp = ${JSON.stringify(clamped)}`);
+    }
+  });
+});
+
+Deno.test("startPanelDrag ignores presses off the gutters and on detached trees", () => {
+  withFakeAddon(() => {
+    const { panels } = attachedPanels();
+    // Inside panel A (row 1), inside panel C (row 8), and outside the stack
+    // (row 20) are not gutters.
+    if (startPanelDrag(panels, mouse("down_left", 0, 1)) !== null) {
+      throw new Error("a press inside a panel must not start a drag");
+    }
+    if (startPanelDrag(panels, mouse("down_left", 0, 8)) !== null) {
+      throw new Error("a press inside the last panel must not start a drag");
+    }
+    if (startPanelDrag(panels, mouse("down_left", 0, 20)) !== null) {
+      throw new Error("a press beyond the stack must not start a drag");
+    }
+    // Non-down_left events never start a drag.
+    if (startPanelDrag(panels, mouse("drag_left", 0, 3)) !== null) {
+      throw new Error("drag_left must not start a drag");
+    }
+    // A detached tree has no geometry: contentSize throws, so no drag.
+    const detached = Panels({ panels: [{ header: "A", body: Box() }, { header: "B", body: Box() }] });
+    if (startPanelDrag(detached, mouse("down_left", 0, 1)) !== null) {
+      throw new Error("a detached tree must not start a drag");
+    }
+    // endPanelDrag without an active drag is a no-op.
+    if (endPanelDrag(panels) !== null) throw new Error("end without a drag must return null");
+  });
+});
+
+Deno.test("the gutter accounts for an explicit gap", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const panels = Panels({
+      panels: [{ header: "A", body: Box() }, { header: "B", body: Box() }],
+      direction: "column",
+      gap: 3,
+    });
+    renderer.root.addChild(panels);
+    fakeContentSizes.set(panels.children[0]!.handle, { width: 60, height: 2 });
+    fakeContentSizes.set(panels.children[1]!.handle, { width: 60, height: 2 });
+    // With gap 3 the gutter spans rows 2-4 (panel A rows 0-1).
+    for (const row of [2, 3, 4]) {
+      if (startPanelDrag(panels, mouse("down_left", 0, row)) === null) {
+        throw new Error(`row ${row} is inside the 3-cell gutter`);
+      }
+      endPanelDrag(panels);
+    }
+    if (startPanelDrag(panels, mouse("down_left", 0, 1)) !== null) {
+      throw new Error("row 1 is inside panel A, not the gutter");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Roadmap elements: DiffView
+// ---------------------------------------------------------------------------
+
+/**
+ * A 3-hunk diff: two context runs around an add/del pair each, with line
+ * numbers reaching two digits (so the gutter columns must right-align to
+ * width 2) and a multi-width (CJK) line in the third hunk.
+ */
+const diffHunks = [
+  { kind: "ctx", old_line: 1, new_line: 1, text: "  fn main() {" },
+  { kind: "del", old_line: 2, new_line: 0, text: "    let x = 1;" },
+  { kind: "add", old_line: 0, new_line: 2, text: "    let x = 2;" },
+  { kind: "ctx", old_line: 3, new_line: 3, text: "  }" },
+  { kind: "ctx", old_line: 10, new_line: 11, text: "  宽度对齐测试" },
+  { kind: "del", old_line: 11, new_line: 0, text: "    old line" },
+  { kind: "add", old_line: 0, new_line: 12, text: "    new line" },
+] as const;
+
+Deno.test("DiffView composes a column of gutter/marker/content rows per hunk line", () => {
+  const diff = DiffView({ hunks: [...diffHunks] });
+  if (diff.type !== "diff") throw new Error(`type = ${diff.type}`);
+  if (diff.props.flex_direction !== "column") {
+    throw new Error(`flex_direction = ${diff.props.flex_direction}`);
+  }
+  // The line model is JS bookkeeping, never a scene prop.
+  if ("hunks" in diff.props) throw new Error("hunks must not reach the scene props");
+  const rows = diff.children;
+  if (rows.length !== diffHunks.length) throw new Error(`rows = ${rows.length}`);
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (row === undefined || row.type !== "box" || row.props.flex_direction !== "row") {
+      throw new Error(`row ${i} must be a row box`);
+    }
+    const kids = row.children;
+    if (kids.length !== 3) throw new Error(`row ${i} must have 3 text leaves`);
+    const [gutter, marker, content] = kids;
+    if (gutter?.type !== "text" || marker?.type !== "text" || content?.type !== "text") {
+      throw new Error(`row ${i} leaves must be text`);
+    }
+  }
+});
+
+Deno.test("DiffView gutter right-aligns old/new line numbers and blanks absent sides", () => {
+  const diff = DiffView({ hunks: [...diffHunks] });
+  const rows = diff.children;
+  const gutter = (i: number): string => rows[i]?.children[0]?.props.text ?? "";
+  // Width-2 columns: old and new, right-aligned, joined by a space.
+  if (gutter(0) !== " 1  1") throw new Error(`gutter(0) = ${JSON.stringify(gutter(0))}`);
+  if (gutter(1) !== " 2   ") throw new Error(`gutter(1) = ${JSON.stringify(gutter(1))}`);
+  if (gutter(2) !== "    2") throw new Error(`gutter(2) = ${JSON.stringify(gutter(2))}`);
+  if (gutter(3) !== " 3  3") throw new Error(`gutter(3) = ${JSON.stringify(gutter(3))}`);
+  // Two-digit numbers widen neither column beyond the widest number.
+  if (gutter(4) !== "10 11") throw new Error(`gutter(4) = ${JSON.stringify(gutter(4))}`);
+  if (gutter(5) !== "11   ") throw new Error(`gutter(5) = ${JSON.stringify(gutter(5))}`);
+  if (gutter(6) !== "   12") throw new Error(`gutter(6) = ${JSON.stringify(gutter(6))}`);
+});
+
+Deno.test("DiffView styles markers and content per kind: add green, del red, ctx dim", () => {
+  const diff = DiffView({ hunks: [...diffHunks] });
+  const rows = diff.children;
+  const markerText = (i: number): string => rows[i]?.children[1]?.props.text ?? "";
+  const markerFg = (i: number): unknown => rows[i]?.children[1]?.props.fg;
+  const contentFg = (i: number): unknown => rows[i]?.children[2]?.props.fg;
+  const contentDim = (i: number): unknown => rows[i]?.children[2]?.props.dim;
+  // Markers: ctx is a space, del is '-', add is '+'.
+  if (markerText(0) !== " ") throw new Error(`ctx marker = ${JSON.stringify(markerText(0))}`);
+  if (markerText(1) !== "-") throw new Error(`del marker = ${JSON.stringify(markerText(1))}`);
+  if (markerText(2) !== "+") throw new Error(`add marker = ${JSON.stringify(markerText(2))}`);
+  // Marker + content carry the kind color; ctx is dimmed, no fg.
+  if (markerFg(1) !== DIFF_DEL_FG) throw new Error(`del marker fg = ${markerFg(1)}`);
+  if (contentFg(1) !== DIFF_DEL_FG) throw new Error(`del content fg = ${contentFg(1)}`);
+  if (markerFg(2) !== DIFF_ADD_FG) throw new Error(`add marker fg = ${markerFg(2)}`);
+  if (contentFg(2) !== DIFF_ADD_FG) throw new Error(`add content fg = ${contentFg(2)}`);
+  if (markerFg(0) !== undefined) throw new Error(`ctx marker must have no fg (${markerFg(0)})`);
+  if (contentDim(0) !== true) throw new Error(`ctx content must be dimmed (${contentDim(0)})`);
+  if (contentDim(2) !== undefined) throw new Error(`add content must not be dimmed`);
+  // The content leaf carries the line text verbatim (multi-width included).
+  if (rows[4]?.children[2]?.props.text !== "  宽度对齐测试") {
+    throw new Error(`multi-width content = ${JSON.stringify(rows[4]?.children[2]?.props.text)}`);
+  }
+});
+
+Deno.test("DiffView passes scroll_x/scroll_y to the root and wrap to the content leaves", () => {
+  const diff = DiffView({ hunks: [...diffHunks], scroll_x: 4, scroll_y: 7, wrap: false });
+  if (diff.props.scroll_x !== 4) throw new Error(`scroll_x = ${diff.props.scroll_x}`);
+  if (diff.props.scroll_y !== 7) throw new Error(`scroll_y = ${diff.props.scroll_y}`);
+  for (let i = 0; i < diff.children.length; i++) {
+    if (diff.children[i]?.children[2]?.props.wrap !== false) {
+      throw new Error(`row ${i} content must carry wrap=false`);
+    }
+  }
+  // Without `wrap`, the content leaves carry no wrap prop (engine default).
+  const unwrapped = DiffView({ hunks: [...diffHunks] });
+  for (let i = 0; i < unwrapped.children.length; i++) {
+    if ("wrap" in (unwrapped.children[i]?.children[2]?.props ?? {})) {
+      throw new Error(`row ${i} content must not carry wrap when unset`);
+    }
+  }
+});
+
+Deno.test("DiffView with no hunks yields an empty column", () => {
+  const diff = DiffView({ hunks: [] });
+  if (diff.type !== "diff") throw new Error(`type = ${diff.type}`);
+  if (diff.children.length !== 0) throw new Error(`rows = ${diff.children.length}`);
+  if ("hunks" in diff.props) throw new Error("hunks must not reach the scene props");
+});
+
+// ---------------------------------------------------------------------------
+// Roadmap elements: Select
+// ---------------------------------------------------------------------------
+
+const selectOptions: SelectOption[] = [
+  { value: "apple", label: "Apple" },
+  { value: "banana", label: "Banana" },
+  { value: "cherry", label: "Cherry" },
+];
+
+const keyBase = { ctrl: false, alt: false, shift: false } as const;
+
+Deno.test("Select composes a filter row and option rows (highlighted first)", () => {
+  const select = Select({ options: selectOptions });
+  if (select.type !== "select") throw new Error(`type = ${select.type}`);
+  if (select.props.multi !== false) throw new Error(`multi = ${select.props.multi}`);
+  if (select.props.value !== "") throw new Error(`value = ${select.props.value}`);
+  if (select.props.highlighted !== 0) throw new Error(`highlighted = ${select.props.highlighted}`);
+  if ("options" in select.props) throw new Error("options must not reach the scene props");
+  // Filter row + 3 option rows (no summary in single mode).
+  if (select.children.length !== 4) throw new Error(`children = ${select.children.length}`);
+  const filterRow = select.children[0];
+  if (filterRow === undefined || filterRow.type !== "text") {
+    throw new Error("filter row must be a text leaf");
+  }
+  if (filterRow.props.text !== SELECT_FILTER_PLACEHOLDER) {
+    throw new Error(`filter = ${filterRow.props.text}`);
+  }
+  if (filterRow.props.dim !== true) throw new Error(`filter dim = ${filterRow.props.dim}`);
+  const labels = select.children.slice(1).map((child) => child.props.text).join(",");
+  if (labels !== "Apple,Banana,Cherry") throw new Error(`rows = ${labels}`);
+  // The first option starts highlighted (reversed).
+  if (select.children[1]?.props.reversed !== true) {
+    throw new Error("first option must be highlighted");
+  }
+  if (select.children[2]?.props.reversed === true) {
+    throw new Error("only the highlighted option may be reversed");
+  }
+});
+
+Deno.test("Select multi mode shows checkmarks and a selected-count summary", () => {
+  const select = Select({
+    options: [
+      { value: "a", label: "A", selected: true },
+      { value: "b", label: "B" },
+      { value: "c", label: "C" },
+    ],
+    multi: true,
+  });
+  // Filter + 3 option rows + summary.
+  if (select.children.length !== 5) throw new Error(`children = ${select.children.length}`);
+  const rows = select.children.slice(1, 4).map((child) => child.props.text);
+  if (rows[0] !== "✓ A") throw new Error(`row 0 = ${rows[0]}`);
+  if (rows[1] !== "  B") throw new Error(`row 1 = ${rows[1]}`);
+  const summary = select.children[4];
+  if (summary === undefined || summary.props.text !== "1 selected") {
+    throw new Error(`summary = ${summary?.props.text}`);
+  }
+  // The initial selection comes from the `selected`-flagged options.
+  if (JSON.stringify(select.props.value) !== JSON.stringify(["a"])) {
+    throw new Error(`value = ${JSON.stringify(select.props.value)}`);
+  }
+});
+
+Deno.test("selectKey moves the highlight with up/down and clamps at the ends", () => {
+  const select = Select({ options: selectOptions });
+  const down = selectKey(select, { name: "down", ...keyBase });
+  if (down.highlighted !== 1) throw new Error(`down = ${down.highlighted}`);
+  const up = selectKey(select, { name: "up", ...keyBase });
+  if (up.highlighted !== 0) throw new Error(`up = ${up.highlighted}`);
+  // Clamp at the top.
+  const upClamped = selectKey(Select({ options: selectOptions }), { name: "up", ...keyBase });
+  if (upClamped.highlighted !== 0) throw new Error(`up clamp = ${upClamped.highlighted}`);
+  // Clamp at the bottom.
+  selectKey(select, { name: "down", ...keyBase });
+  selectKey(select, { name: "down", ...keyBase });
+  const bottom = selectKey(select, { name: "down", ...keyBase });
+  if (bottom.highlighted !== 2) throw new Error(`down clamp = ${bottom.highlighted}`);
+  // The composition reflects the moved highlight.
+  if (select.children[3]?.props.reversed !== true) {
+    throw new Error("highlighted row must be reversed");
+  }
+  // Unknown keys leave the state unchanged.
+  const tab = selectKey(select, { name: "tab", ...keyBase });
+  if (tab.highlighted !== 2) throw new Error(`tab must not move = ${tab.highlighted}`);
+});
+
+Deno.test("selectKey typeahead filter narrows the visible options", () => {
+  const select = Select({ options: selectOptions });
+  // Accessors: selectKey mutates the node in place, which TS's control flow
+  // cannot see — reading through functions defeats the stale narrowing.
+  const visibleText = () => select.children[1]?.props.text;
+  const childCount = () => select.children.length;
+  const b = selectKey(select, { name: "char", char: "b", ...keyBase });
+  if (b.filter !== "b") throw new Error(`filter = ${b.filter}`);
+  if (b.highlighted !== 0) throw new Error(`highlight resets to first match = ${b.highlighted}`);
+  // The composition narrows to the prefix matches (filter row + 1 row).
+  if (childCount() !== 2) throw new Error(`children = ${childCount()}`);
+  if (visibleText() !== "Banana") {
+    throw new Error(`visible = ${visibleText()}`);
+  }
+  // Case-insensitive prefix match.
+  selectKey(select, { name: "backspace", ...keyBase });
+  const cap = selectKey(select, { name: "char", char: "C", ...keyBase });
+  if (cap.filter !== "C") throw new Error(`filter = ${cap.filter}`);
+  if (visibleText() !== "Cherry") {
+    throw new Error(`visible = ${visibleText()}`);
+  }
+  // A non-matching char empties the list down to the filter row.
+  const z = selectKey(select, { name: "char", char: "z", ...keyBase });
+  if (z.filter !== "Cz") throw new Error(`filter = ${z.filter}`);
+  if (childCount() !== 1) throw new Error(`children = ${childCount()}`);
+  // Backspace restores the full list.
+  const back = selectKey(select, { name: "backspace", ...keyBase });
+  if (back.filter !== "C") throw new Error(`filter = ${back.filter}`);
+  if (childCount() !== 2) throw new Error(`children = ${childCount()}`);
+});
+
+Deno.test("visibleOptions reflects the filter and is label-normalized", () => {
+  const select = Select({ options: selectOptions });
+  const all = visibleOptions(select);
+  if (all.length !== 3) throw new Error(`all = ${all.length}`);
+  if (all[0]?.label !== "Apple") throw new Error(`label = ${all[0]?.label}`);
+  selectKey(select, { name: "char", char: "b", ...keyBase });
+  const visible = visibleOptions(select);
+  if (visible.length !== 1 || visible[0]?.value !== "banana" || visible[0]?.label !== "Banana") {
+    throw new Error(`visible = ${JSON.stringify(visible)}`);
+  }
+});
+
+Deno.test("selectKey enter confirms the highlighted option and dismisses", () => {
+  const select = Select({ options: selectOptions });
+  selectKey(select, { name: "down", ...keyBase });
+  const next = selectKey(select, { name: "enter", ...keyBase });
+  if (next.value !== "banana") throw new Error(`value = ${next.value}`);
+  if (next.open !== false) throw new Error(`open = ${next.open}`);
+  if (select.props.value !== "banana") throw new Error(`node value = ${select.props.value}`);
+  if (select.props.open !== false) throw new Error(`node open = ${select.props.open}`);
+  // Enter confirms the filtered highlight too (typeahead + enter).
+  const filtered = Select({ options: selectOptions });
+  selectKey(filtered, { name: "char", char: "c", ...keyBase });
+  const confirmed = selectKey(filtered, { name: "enter", ...keyBase });
+  if (confirmed.value !== "cherry") throw new Error(`filtered confirm = ${confirmed.value}`);
+});
+
+Deno.test("selectKey escape dismisses the dropdown", () => {
+  const select = Select({ options: selectOptions });
+  const next = selectKey(select, { name: "escape", ...keyBase });
+  if (next.open !== false) throw new Error(`open = ${next.open}`);
+  if (select.props.open !== false) throw new Error(`node open = ${select.props.open}`);
+  // Enter/escape on an empty list is a no-op (nothing to confirm/dismiss).
+  const empty = Select({ options: [] });
+  const dismissed = selectKey(empty, { name: "escape", ...keyBase });
+  if (dismissed.open !== false) throw new Error(`empty open = ${dismissed.open}`);
+});
+
+Deno.test("selectKey space toggles a checkmark in multi mode and updates the count", () => {
+  const select = Select({
+    options: [
+      { value: "a", label: "A" },
+      { value: "b", label: "B" },
+    ],
+    multi: true,
+  });
+  // Accessors: selectKey mutates the node in place, which TS's control flow
+  // cannot see — reading through functions defeats the stale narrowing.
+  const rowText = () => select.children[1]?.props.text;
+  const summaryText = () => select.children[3]?.props.text;
+  // Space on the highlighted (first) option checks it.
+  const toggled = selectKey(select, { name: "char", char: " ", ...keyBase });
+  if (JSON.stringify(toggled.value) !== JSON.stringify(["a"])) {
+    throw new Error(`value = ${JSON.stringify(toggled.value)}`);
+  }
+  if (rowText() !== "✓ A") {
+    throw new Error(`row = ${rowText()}`);
+  }
+  if (summaryText() !== "1 selected") {
+    throw new Error(`summary = ${summaryText()}`);
+  }
+  // Space again unchecks it.
+  const untoggled = selectKey(select, { name: "char", char: " ", ...keyBase });
+  if (JSON.stringify(untoggled.value) !== JSON.stringify([])) {
+    throw new Error(`value = ${JSON.stringify(untoggled.value)}`);
+  }
+  if (rowText() !== "  A") {
+    throw new Error(`row = ${rowText()}`);
+  }
+  if (summaryText() !== "0 selected") {
+    throw new Error(`summary = ${summaryText()}`);
+  }
+});
+
+Deno.test("Select floating mode sets a z_index prop", () => {
+  // Floating defaults the overlay to z-index 0.
+  const floating = Select({ options: selectOptions, floating: true });
+  if (floating.props.z_index !== 0) throw new Error(`z_index = ${floating.props.z_index}`);
+  if ("floating" in floating.props) throw new Error("floating must not reach the scene props");
+  // An explicit z_index is honored.
+  const layered = Select({ options: selectOptions, floating: true, z_index: 5 });
+  if (layered.props.z_index !== 5) throw new Error(`z_index = ${layered.props.z_index}`);
+  // Docked selects carry no z_index prop at all.
+  const docked = Select({ options: selectOptions });
+  if (docked.props.z_index !== undefined) throw new Error(`docked z_index = ${docked.props.z_index}`);
+});
+
+// ---------------------------------------------------------------------------
 // Focus manager
 // ---------------------------------------------------------------------------
 
@@ -871,4 +1549,537 @@ Deno.test("the default focus manager is a FocusManager instance", () => {
   if (!(focusManager instanceof FocusManager)) {
     throw new Error("default focus manager must be a FocusManager");
   }
+});
+
+// ---------------------------------------------------------------------------
+// Theme system
+// ---------------------------------------------------------------------------
+
+Deno.test("defaultTheme covers every palette role and component preset", () => {
+  for (const role of THEME_ROLES) {
+    const colors = defaultTheme.palette[role];
+    if (colors === undefined) throw new Error(`missing palette role ${role}`);
+    if (typeof colors.fg !== "string" || colors.fg === "") {
+      throw new Error(`role ${role} fg = ${JSON.stringify(colors.fg)}`);
+    }
+    if (typeof colors.bg !== "string" || colors.bg === "") {
+      throw new Error(`role ${role} bg = ${JSON.stringify(colors.bg)}`);
+    }
+  }
+  for (const kind of THEME_COMPONENTS) {
+    if (defaultTheme.components[kind] === undefined) {
+      throw new Error(`missing component preset ${kind}`);
+    }
+  }
+});
+
+Deno.test("resolveTheme stamps the role palette fg/bg and strips the hint", () => {
+  const out = resolveTheme(defaultTheme, { role: "danger" });
+  if (out.fg !== defaultTheme.palette.danger.fg) {
+    throw new Error(`fg = ${out.fg}`);
+  }
+  if (out.bg !== defaultTheme.palette.danger.bg) {
+    throw new Error(`bg = ${out.bg}`);
+  }
+  if ("role" in out) throw new Error(`role leaked: ${JSON.stringify(out)}`);
+  if ("component" in out) throw new Error(`component leaked: ${JSON.stringify(out)}`);
+});
+
+Deno.test("resolveTheme stamps a component preset fg/bg/border_style", () => {
+  const custom = mergeTheme(defaultTheme, {
+    components: { input: { fg: "#123456", border_style: "rounded" } },
+  });
+  const out = resolveTheme(custom, { component: "input" });
+  if (out.fg !== "#123456") throw new Error(`fg = ${out.fg}`);
+  if (out.border_style !== "rounded") throw new Error(`border_style = ${out.border_style}`);
+  if ("component" in out) throw new Error(`component leaked: ${JSON.stringify(out)}`);
+});
+
+Deno.test("resolveTheme precedence: explicit props > role palette > component preset", () => {
+  const custom = mergeTheme(defaultTheme, {
+    components: { status_bar: { fg: "#111111", bg: "#222222", border_style: "thick" } },
+  });
+  // No explicit style: the component preset fills fg/bg/border_style.
+  const presetOnly = resolveTheme(custom, { component: "status_bar" });
+  if (presetOnly.fg !== "#111111" || presetOnly.bg !== "#222222") {
+    throw new Error(`preset fill = ${JSON.stringify(presetOnly)}`);
+  }
+  if (presetOnly.border_style !== "thick") {
+    throw new Error(`preset border_style = ${presetOnly.border_style}`);
+  }
+  // Role added: the role palette overrides the preset's fg/bg (role is the
+  // more specific intent), the preset's border_style is kept.
+  const roleWins = resolveTheme(custom, { component: "status_bar", role: "danger" });
+  if (roleWins.fg !== custom.palette.danger.fg) {
+    throw new Error(`role must win over preset fg: ${roleWins.fg}`);
+  }
+  if (roleWins.bg !== custom.palette.danger.bg) {
+    throw new Error(`role must win over preset bg: ${roleWins.bg}`);
+  }
+  if (roleWins.border_style !== "thick") {
+    throw new Error(`preset border_style must survive: ${roleWins.border_style}`);
+  }
+  // Explicit props win over both.
+  const explicit = resolveTheme(custom, {
+    component: "status_bar",
+    role: "danger",
+    fg: "#ff0000",
+  });
+  if (explicit.fg !== "#ff0000") throw new Error(`explicit fg = ${explicit.fg}`);
+  if (explicit.bg !== custom.palette.danger.bg) {
+    throw new Error(`explicit fg must not suppress the role bg: ${explicit.bg}`);
+  }
+});
+
+Deno.test("resolveTheme without hints returns the props unchanged (plain node props)", () => {
+  const props: ThemeResolvableProps = { text: "hi", bold: true, width: 10 };
+  const out = resolveTheme(defaultTheme, props);
+  if (out.text !== "hi" || out.bold !== true || out.width !== 10) {
+    throw new Error(`props changed: ${JSON.stringify(out)}`);
+  }
+  if (Object.keys(out).length !== 3) {
+    throw new Error(`unexpected keys: ${JSON.stringify(out)}`);
+  }
+});
+
+Deno.test("resolveTheme output feeds the element factories as plain node props", () => {
+  const node = Text(resolveTheme(defaultTheme, { text: "err", role: "danger" }));
+  if (node.type !== "text") throw new Error(`type = ${node.type}`);
+  if (node.props.fg !== defaultTheme.palette.danger.fg) {
+    throw new Error(`stamped fg = ${node.props.fg}`);
+  }
+  if (node.props.bg !== defaultTheme.palette.danger.bg) {
+    throw new Error(`stamped bg = ${node.props.bg}`);
+  }
+  if ("role" in node.props || "component" in node.props) {
+    throw new Error(`semantic hints reached the node: ${JSON.stringify(node.props)}`);
+  }
+});
+
+Deno.test("mergeTheme merges partial roles and keeps base keys", () => {
+  const overrides: ThemeOverrides = { palette: { danger: { fg: "#ff0000" } } };
+  const merged = mergeTheme(defaultTheme, overrides);
+  // The overridden role keeps its base bg and gains the override fg.
+  if (merged.palette.danger.fg !== "#ff0000") throw new Error(`merged fg = ${merged.palette.danger.fg}`);
+  if (merged.palette.danger.bg !== defaultTheme.palette.danger.bg) {
+    throw new Error(`base bg must be kept: ${merged.palette.danger.bg}`);
+  }
+  // Untouched roles are copied through unchanged.
+  if (merged.palette.success.fg !== defaultTheme.palette.success.fg) {
+    throw new Error(`untouched role changed: ${merged.palette.success.fg}`);
+  }
+  // The base is not mutated.
+  if (defaultTheme.palette.danger.fg === "#ff0000") {
+    throw new Error("mergeTheme must not mutate the base theme");
+  }
+  if (merged === defaultTheme) throw new Error("mergeTheme must return a new theme");
+});
+
+Deno.test("mergeTheme merges component presets per key", () => {
+  const merged = mergeTheme(defaultTheme, {
+    components: { panels: { border_style: "double" } },
+  });
+  if (merged.components.panels.border_style !== "double") {
+    throw new Error(`preset border_style = ${merged.components.panels.border_style}`);
+  }
+  if ("fg" in merged.components.panels) {
+    throw new Error(`unset preset key must stay absent: ${JSON.stringify(merged.components.panels)}`);
+  }
+  // Other component presets are untouched.
+  if (merged.components.input !== defaultTheme.components.input) {
+    throw new Error("untouched preset must be copied through");
+  }
+});
+
+Deno.test("mergeTheme accepts a full Theme as overrides", () => {
+  const custom: Theme = mergeTheme(defaultTheme, {
+    palette: { primary: { fg: "#0000ff", bg: "#000000" } },
+  });
+  const merged = mergeTheme(defaultTheme, custom);
+  if (merged.palette.primary.fg !== "#0000ff" || merged.palette.primary.bg !== "#000000") {
+    throw new Error(`full-theme override = ${JSON.stringify(merged.palette.primary)}`);
+  }
+  if (merged.palette.muted.fg !== defaultTheme.palette.muted.fg) {
+    throw new Error(`unoverridden role changed: ${merged.palette.muted.fg}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ScrollView
+// ---------------------------------------------------------------------------
+
+/**
+ * A size-aware fake native node handle for the ScrollView tests:
+ * `content_size` returns the size derived at creation — text/streaming nodes
+ * measure their content (widest line width, line count), boxes use their
+ * `width`/`height` props or a default viewport of {11, 2}. This mirrors the
+ * real engine's `content_size` contract (text = wrapped content, containers =
+ * laid-out rect) so the scroll helpers' clamping is exercised against
+ * realistic geometry.
+ *
+ * A `streaming_text` handle accumulates spans appended through
+ * `append_span` and measures *them* (the real engine measures the stream, not
+ * a `text` prop — compositor.rs `content_size`), so the auto-scroll tests can
+ * grow the content by appending spans, exactly like the native path.
+ */
+class FakeScrollNodeHandle {
+  readonly kind: string;
+  readonly props: Record<string, unknown>;
+  streamText = "";
+  constructor(type: string, props: Record<string, unknown> | null | undefined) {
+    this.kind = type;
+    this.props = props ?? {};
+  }
+  content_size(): { width: number; height: number } {
+    if (this.kind === "text" || this.kind === "streaming_text") {
+      const text = this.kind === "streaming_text"
+        ? this.streamText
+        : (typeof this.props.text === "string" ? this.props.text : "");
+      const lines = text.split("\n");
+      let width = 0;
+      for (const line of lines) width = Math.max(width, line.length);
+      return { width, height: lines.length };
+    }
+    return {
+      width: typeof this.props.width === "number" ? this.props.width : 11,
+      height: typeof this.props.height === "number" ? this.props.height : 2,
+    };
+  }
+  add_child(child: unknown): unknown {
+    return child;
+  }
+  insert_before(child: unknown, _anchor: unknown): unknown {
+    return child;
+  }
+  set_props(_props: unknown): void {}
+  append_span(text: string, _style?: unknown): void {
+    this.streamText += text;
+  }
+  remove(): boolean {
+    return true;
+  }
+}
+
+/** The native node types materialized through the size-aware fake. */
+const scrollCreatedNodes: Array<{ type: string; props: Record<string, unknown> | null }> = [];
+
+/** A fake addon whose `content_size` reflects each node's content/layout. */
+const scrollFakeAddon = {
+  TuiRenderer: FakeTuiRenderer,
+  NodeHandle: FakeScrollNodeHandle,
+  create_node: (type: string, props?: Record<string, unknown> | null) => {
+    scrollCreatedNodes.push({ type, props: props ?? null });
+    return new FakeScrollNodeHandle(type, props);
+  },
+} as unknown as TernAddon;
+
+/** Run `fn` with the size-aware fake addon installed. */
+function withScrollFakeAddon(fn: () => void): void {
+  scrollCreatedNodes.length = 0;
+  setAddonForTesting(scrollFakeAddon);
+  try {
+    fn();
+  } finally {
+    setAddonForTesting(null);
+  }
+}
+
+Deno.test("ScrollView builds a scroll_view box with the clip/scroll region props", () => {
+  const view = ScrollView({
+    clip_x: 1,
+    clip_y: 2,
+    clip_width: 10,
+    clip_height: 4,
+    scroll_x: 0,
+    scroll_y: 3,
+  });
+  if (view.type !== "scroll_view") throw new Error(`type = ${view.type}`);
+  if (view.props.clip_x !== 1) throw new Error(`clip_x = ${view.props.clip_x}`);
+  if (view.props.clip_y !== 2) throw new Error(`clip_y = ${view.props.clip_y}`);
+  if (view.props.clip_width !== 10) throw new Error(`clip_width = ${view.props.clip_width}`);
+  if (view.props.clip_height !== 4) throw new Error(`clip_height = ${view.props.clip_height}`);
+  if (view.props.scroll_x !== 0) throw new Error(`scroll_x = ${view.props.scroll_x}`);
+  if (view.props.scroll_y !== 3) throw new Error(`scroll_y = ${view.props.scroll_y}`);
+});
+
+Deno.test("ScrollView attaches rest-arg and props children, consuming both keys", () => {
+  const a = Text({ text: "a" });
+  const b = Text({ text: "b" });
+  const viaProps = ScrollView({ children: [b] }, a);
+  const kids = viaProps.children;
+  if (kids.length !== 2) throw new Error(`children = ${kids.length}`);
+  if (kids[0] !== a || kids[1] !== b) throw new Error("content order must be rest args then props children");
+  // Both keys are consumed by the factory — never scene props.
+  if ("children" in viaProps.props || "showScrollbar" in viaProps.props) {
+    throw new Error(`consumed keys leaked: ${JSON.stringify(viaProps.props)}`);
+  }
+});
+
+Deno.test("showScrollbar appends a scrollbar text leaf to the composition", () => {
+  const withBar = ScrollView({ showScrollbar: true }, Text({ text: "x" }));
+  // Content + the scrollbar leaf (a text node pinned to the right edge).
+  if (withBar.children.length !== 2) throw new Error(`children = ${withBar.children.length}`);
+  const leaf = withBar.children[1];
+  if (leaf === undefined || leaf.type !== "text") {
+    throw new Error("scrollbar must be a text leaf");
+  }
+  if (leaf.props.position !== "absolute" || leaf.props.right !== 0 || leaf.props.width !== 1) {
+    throw new Error(`leaf props = ${JSON.stringify(leaf.props)}`);
+  }
+  // Without the flag no scrollbar leaf is composed.
+  const noBar = ScrollView({}, Text({ text: "x" }));
+  if (noBar.children.length !== 1) throw new Error(`no-bar children = ${noBar.children.length}`);
+});
+
+Deno.test("scrollTo sets scroll props and clamps to the content bounds", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    // Viewport {5, 2} (from the width/height props); the content text is
+    // 5 cells wide, 3 rows tall -> maxY = 1, maxX = 0.
+    const view = ScrollView({ width: 5, height: 2 }, Text({ text: "aaaa\nbbbbb\ncc" }));
+    renderer.root.addChild(view);
+    const applied = scrollTo(view, 0, 5);
+    if (applied.x !== 0 || applied.y !== 1) throw new Error(`applied = ${JSON.stringify(applied)}`);
+    if (view.props.scroll_x !== 0 || view.props.scroll_y !== 1) {
+      throw new Error(`props = ${JSON.stringify(view.props)}`);
+    }
+  });
+});
+
+Deno.test("scrollTo clamps horizontal overflow against the content width", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    // Viewport {3, 2}; the content text is 8 cells wide -> maxX = 5.
+    const view = ScrollView({ width: 3, height: 2 }, Text({ text: "abcdefgh" }));
+    renderer.root.addChild(view);
+    const applied = scrollTo(view, 10, 0);
+    if (applied.x !== 5 || applied.y !== 0) throw new Error(`applied = ${JSON.stringify(applied)}`);
+    if (view.props.scroll_x !== 5) throw new Error(`scroll_x = ${view.props.scroll_x}`);
+  });
+});
+
+Deno.test("scrollBy offsets from the current scroll and clamps both directions", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    const view = ScrollView({ width: 5, height: 2 }, Text({ text: "aaaa\nbbbbb\ncc" }));
+    renderer.root.addChild(view);
+    scrollTo(view, 0, 1); // at the max offset
+    const applied = scrollBy(view, 0, 3); // past the max -> clamped back
+    if (applied.y !== 1) throw new Error(`applied = ${JSON.stringify(applied)}`);
+    const back = scrollBy(view, 0, -1); // back up
+    if (back.y !== 0) throw new Error(`back = ${JSON.stringify(back)}`);
+    if (view.props.scroll_y !== 0) throw new Error(`scroll_y = ${view.props.scroll_y}`);
+  });
+});
+
+Deno.test("scrollTop resets the vertical offset and keeps the horizontal", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    const view = ScrollView({ width: 3, height: 2 }, Text({ text: "abcdefgh" }));
+    renderer.root.addChild(view);
+    scrollTo(view, 5, 0);
+    const applied = scrollTop(view);
+    if (applied.x !== 5 || applied.y !== 0) throw new Error(`applied = ${JSON.stringify(applied)}`);
+    if (view.props.scroll_x !== 5 || view.props.scroll_y !== 0) {
+      throw new Error(`props = ${JSON.stringify(view.props)}`);
+    }
+  });
+});
+
+Deno.test("scroll helpers refresh the scrollbar track and thumb from the clamped offset", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    // Viewport {5, 3}; content height 5 -> maxY = 2, thumb length 2
+    // (round(3*3/5) = 2) on a 1-row track range.
+    const view = ScrollView({ width: 5, height: 3, showScrollbar: true }, Text({ text: "aa\nbb\ncc\ndd\nee" }));
+    renderer.root.addChild(view);
+    const leaf = view.children[1]!;
+
+    // At the top: the thumb fills the first two rows of the track.
+    scrollTo(view, 0, 0);
+    if (leaf.props.height !== 3) throw new Error(`leaf height = ${leaf.props.height}`);
+    const topText = leaf.props.text;
+    if (topText !== `${SCROLLBAR_THUMB_CHAR}\n${SCROLLBAR_THUMB_CHAR}\n${SCROLLBAR_TRACK_CHAR}`) {
+      throw new Error(`top scrollbar = ${JSON.stringify(topText)}`);
+    }
+
+    // Scrolled to the bottom (maxY = 2): the thumb drops to the last two
+    // rows, and the `top` inset is scroll-compensated (thumbOffset 1 +
+    // scroll_y 2).
+    scrollTo(view, 0, 2);
+    const bottomText = leaf.props.text;
+    if (bottomText !== `${SCROLLBAR_TRACK_CHAR}\n${SCROLLBAR_THUMB_CHAR}\n${SCROLLBAR_THUMB_CHAR}`) {
+      throw new Error(`bottom scrollbar = ${JSON.stringify(bottomText)}`);
+    }
+    if (leaf.props.top !== 3) throw new Error(`leaf top = ${leaf.props.top}`);
+  });
+});
+
+Deno.test("scroll helpers on a detached view throw (contentSize requires the scene)", () => {
+  const view = ScrollView({ width: 5, height: 2 }, Text({ text: "x" }));
+  let threw = false;
+  try {
+    scrollTo(view, 0, 0);
+  } catch {
+    threw = true;
+  }
+  if (!threw) throw new Error("scrollTo on a detached view must throw");
+});
+
+Deno.test("removing a scroll view clears its scrollbar from the scene", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    const view = ScrollView({ width: 5, height: 2, showScrollbar: true }, Text({ text: "x" }));
+    renderer.root.addChild(view);
+    const leaf = view.children[1]!;
+    if (!view.attached || !leaf.attached) throw new Error("view and scrollbar must attach");
+    if (view.remove() !== true) throw new Error("remove must succeed");
+    // The whole subtree detaches with the view: the scrollbar leaf is
+    // cleared from the scene, and the view is spliced out of its parent.
+    if (view.attached || leaf.attached) throw new Error("scrollbar must detach with the view");
+    if (renderer.root.children.length !== 0) throw new Error("view must be spliced out of the scene");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// StreamingText auto-scroll
+//
+// A streaming node with `autoScroll` (the default) follows its content tail:
+// `syncStreamTail` pins `scroll_y` to the content height minus the clip
+// viewport height. A manual scroll above the tail (via `scrollTo` / `scrollBy`
+// / `scrollTop`) detaches the follow and pins the view; `followTail`
+// re-attaches and snaps back. The fake addon's `content_size` measures the
+// streamed spans verbatim (spans concatenate, one row per `\n`), so with
+// newline-terminated spans and a `clip_height: 2` viewport, N spans put the
+// content at N + 1 rows and the tail at N - 1.
+// ---------------------------------------------------------------------------
+
+Deno.test("StreamingText defaults to following the tail (scroll_y = content height - clip height)", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    const node = StreamingText({ clip_height: 2, width: 10 });
+    renderer.root.addChild(node);
+    if (!isStreamFollowing(node)) throw new Error("autoScroll must default to following");
+    // A fresh read per assertion — TS property-access narrowing would
+    // otherwise reject a later comparison against a different literal.
+    const y = (): number => node.props.scroll_y as number;
+    // 3 newline-terminated spans -> content 4 rows -> tail 4 - 2 = 2.
+    for (const t of ["a\n", "b\n", "c\n"]) {
+      node.appendSpan(t);
+      syncStreamTail(node);
+    }
+    if (y() !== 2) throw new Error(`tail scroll_y = ${y()}`);
+    if (node.props.scroll_x !== undefined) {
+      throw new Error(`scroll_x must stay unset, got ${node.props.scroll_x}`);
+    }
+    // The tail keeps moving as the stream grows (5 rows -> tail 3).
+    node.appendSpan("d\n");
+    syncStreamTail(node);
+    if (y() !== 3) throw new Error(`scroll_y after 4 spans = ${y()}`);
+    // The autoScroll key is consumed — never a scene prop.
+    if ("autoScroll" in node.props) {
+      throw new Error(`autoScroll leaked into props: ${JSON.stringify(node.props)}`);
+    }
+  });
+});
+
+Deno.test("StreamingText with autoScroll: false never follows the tail", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    const node = StreamingText({ autoScroll: false, clip_height: 2, width: 10 });
+    if ("autoScroll" in node.props) {
+      throw new Error(`autoScroll leaked into props: ${JSON.stringify(node.props)}`);
+    }
+    renderer.root.addChild(node);
+    for (const t of ["a\n", "b\n", "c\n"]) {
+      node.appendSpan(t);
+      syncStreamTail(node);
+    }
+    if (isStreamFollowing(node)) throw new Error("autoScroll: false must not follow");
+    if (node.props.scroll_y !== undefined) {
+      throw new Error(`scroll_y must stay unset, got ${node.props.scroll_y}`);
+    }
+  });
+});
+
+Deno.test("a manual scroll above the tail detaches the follow and pins the view", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    const node = StreamingText({ clip_height: 2, width: 10 });
+    renderer.root.addChild(node);
+    // A fresh read per assertion (see the tail-follow test).
+    const y = (): number => node.props.scroll_y as number;
+    for (const t of ["a\n", "b\n", "c\n"]) {
+      node.appendSpan(t);
+      syncStreamTail(node);
+    }
+    if (y() !== 2) throw new Error(`tail scroll_y = ${y()}`);
+
+    // Scroll up above the tail: the follow detaches and the view pins.
+    const applied = scrollTo(node, 0, 0);
+    if (applied.x !== 0 || applied.y !== 0) throw new Error(`applied = ${JSON.stringify(applied)}`);
+    if (isStreamFollowing(node)) throw new Error("a scroll above the tail must detach the follow");
+
+    // The stream keeps growing, but the view stays pinned at row 0.
+    node.appendSpan("d\n");
+    syncStreamTail(node);
+    if (y() !== 0) throw new Error(`pinned scroll_y = ${y()}`);
+
+    // scrollBy / scrollTop funnel through scrollTo and detach the same way.
+    const by = scrollBy(node, 0, 1);
+    if (by.y !== 1) throw new Error(`scrollBy applied = ${JSON.stringify(by)}`);
+    const top = scrollTop(node);
+    if (top.y !== 0) throw new Error(`scrollTop applied = ${JSON.stringify(top)}`);
+    if (isStreamFollowing(node)) throw new Error("scrollBy/scrollTop above the tail must detach");
+  });
+});
+
+Deno.test("followTail re-attaches and snaps back to the growing tail", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    const node = StreamingText({ clip_height: 2, width: 10 });
+    renderer.root.addChild(node);
+    const y = (): number => node.props.scroll_y as number;
+    for (const t of ["a\n", "b\n", "c\n"]) {
+      node.appendSpan(t);
+      syncStreamTail(node);
+    }
+    scrollTo(node, 0, 0); // detach (pinned at row 0)
+    node.appendSpan("d\n"); // 5 rows now; sync is a no-op while detached
+
+    // Re-attach: followTail snaps straight to the current tail (5 - 2 = 3).
+    followTail(node);
+    if (!isStreamFollowing(node)) throw new Error("followTail must re-attach the follow");
+    if (y() !== 3) throw new Error(`snap scroll_y = ${y()}`);
+
+    // And follows subsequent growth again (6 rows -> tail 4).
+    node.appendSpan("e\n");
+    syncStreamTail(node);
+    if (y() !== 4) throw new Error(`follow scroll_y = ${y()}`);
+
+    // A scroll to the tail keeps the follow attached (no detach).
+    scrollTo(node, 0, 4);
+    if (!isStreamFollowing(node)) throw new Error("scrolling to the tail must keep the follow");
+  });
+});
+
+Deno.test("followTail on a plain streaming node enables auto-scroll from scratch", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    // Built through the raw Node factory — no follow state registered.
+    const node = Node.create("streaming_text", { clip_height: 2, width: 10 });
+    renderer.root.addChild(node);
+    node.appendSpan("a\n");
+    node.appendSpan("b\n");
+    node.appendSpan("c\n");
+    syncStreamTail(node);
+    if (isStreamFollowing(node)) throw new Error("a raw node must not follow by default");
+    if (node.props.scroll_y !== undefined) {
+      throw new Error(`raw node scroll_y must stay unset, got ${node.props.scroll_y}`);
+    }
+    followTail(node);
+    if (!isStreamFollowing(node)) throw new Error("followTail must enable a raw node's follow");
+    // 4 rows - clip 2 = tail 2.
+    if (node.props.scroll_y !== 2) throw new Error(`raw snap scroll_y = ${node.props.scroll_y}`);
+  });
 });
