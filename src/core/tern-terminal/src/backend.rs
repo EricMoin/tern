@@ -9,10 +9,17 @@
 //! Every cell is written with an unconditional SGR reset (`\x1b[0m`) followed
 //! by the cell's exact style, so style state can never leak from one cell to
 //! the next — correctness over escape-sequence economy in the MVP.
+//!
+//! Frame flush also carries the caret: [`flush_diff_with_cursor_to`] moves
+//! the terminal cursor to the frame's [`Cursor`] position and shows or hides
+//! it per its visibility, so the hardware caret tracks the model.
 
 use std::io::{self, Write};
 
 use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::event::{
+    DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+};
 use crossterm::style::{
     Attribute, Color as CrosstermColor, Print, ResetColor, SetAttribute, SetBackgroundColor,
     SetForegroundColor,
@@ -23,6 +30,7 @@ use crossterm::terminal::{
 use crossterm::{ExecutableCommand, QueueableCommand};
 use tern_core::cell::CellUpdate;
 use tern_core::color::Color as TernColor;
+use tern_core::cursor::Cursor;
 use tern_core::style::Modifiers;
 
 /// The terminal backend.
@@ -63,6 +71,23 @@ impl Backend {
         out.flush()
     }
 
+    /// Tell the terminal to report mouse and focus-change events so
+    /// [`poll_events`](crate::event::poll_events) can surface them.
+    ///
+    /// crossterm only emits these events once the terminal has been told to
+    /// track them; without this, mouse and focus events never reach the
+    /// event loop. Pair with [`disable_event_listening`](Backend::disable_event_listening).
+    pub fn enable_event_listening(&self) -> io::Result<()> {
+        let mut out = io::stdout();
+        enable_event_listening_to(&mut out)
+    }
+
+    /// Tell the terminal to stop reporting mouse and focus-change events.
+    pub fn disable_event_listening(&self) -> io::Result<()> {
+        let mut out = io::stdout();
+        disable_event_listening_to(&mut out)
+    }
+
     /// The terminal size as `(columns, rows)`.
     pub fn size(&self) -> io::Result<(u16, u16)> {
         terminal::size()
@@ -92,7 +117,9 @@ impl Backend {
     /// Flush a diff of [`CellUpdate`]s to stdout, then park the cursor at
     /// `cursor_pos` (column, row).
     ///
-    /// See [`flush_diff_to`] for the queueing semantics.
+    /// See [`flush_diff_to`] for the queueing semantics. This legacy variant
+    /// parks the caret without touching its visibility; the caret-aware frame
+    /// flush is [`flush_diff_with_cursor`](Backend::flush_diff_with_cursor).
     pub fn flush_diff(
         &self,
         updates: &[CellUpdate],
@@ -101,6 +128,50 @@ impl Backend {
         let mut out = io::stdout();
         flush_diff_to(&mut out, updates, cursor_pos)
     }
+
+    /// Flush a diff of [`CellUpdate`]s to stdout, then position the terminal
+    /// caret at the cursor's (`x`, `y`) and show or hide it per
+    /// [`Cursor::visible`].
+    ///
+    /// See [`flush_diff_with_cursor_to`] for the queueing semantics.
+    pub fn flush_diff_with_cursor(
+        &self,
+        updates: &[CellUpdate],
+        cursor: Cursor,
+    ) -> io::Result<()> {
+        let mut out = io::stdout();
+        flush_diff_with_cursor_to(&mut out, updates, cursor)
+    }
+
+    /// Position the terminal caret at the cursor's (`x`, `y`) and show or
+    /// hide it per [`Cursor::visible`], without writing any cells.
+    pub fn flush_cursor(&self, cursor: Cursor) -> io::Result<()> {
+        let mut out = io::stdout();
+        flush_cursor_to(&mut out, cursor)
+    }
+}
+
+/// Enable mouse and focus-change event reporting on any `Write` target.
+///
+/// Emits the crossterm enable sequences: mouse capture (normal, button-event,
+/// any-event, rxvt, and SGR tracking modes) followed by focus-change
+/// reporting. Without these, crossterm never surfaces mouse or focus events
+/// to [`poll_events`](crate::event::poll_events). Pair with
+/// [`disable_event_listening_to`] at shutdown.
+pub fn enable_event_listening_to<W: Write>(w: &mut W) -> io::Result<()> {
+    w.queue(EnableMouseCapture)?;
+    w.queue(EnableFocusChange)?;
+    w.flush()
+}
+
+/// Disable mouse and focus-change event reporting on any `Write` target.
+///
+/// Emits the inverse of [`enable_event_listening_to`]: focus-change
+/// reporting off, then the mouse capture modes off in reverse order.
+pub fn disable_event_listening_to<W: Write>(w: &mut W) -> io::Result<()> {
+    w.queue(DisableMouseCapture)?;
+    w.queue(DisableFocusChange)?;
+    w.flush()
 }
 
 /// Flush a diff of [`CellUpdate`]s to any `Write` target, then park the
@@ -125,6 +196,48 @@ pub fn flush_diff_to<W: Write>(
     w.queue(ResetColor)?;
     w.queue(SetAttribute(Attribute::Reset))?;
     w.flush()
+}
+
+/// Flush a diff of [`CellUpdate`]s to any `Write` target, then position the
+/// terminal caret at the cursor's (`x`, `y`) and show or hide it per
+/// [`Cursor::visible`], leaving the terminal's style state reset.
+///
+/// The cell queueing matches [`flush_diff_to`]; the trailing caret control
+/// replaces the unconditional park: [`MoveTo`] to the cursor position, then
+/// [`Show`] or [`Hide`] per visibility.
+pub fn flush_diff_with_cursor_to<W: Write>(
+    w: &mut W,
+    updates: &[CellUpdate],
+    cursor: Cursor,
+) -> io::Result<()> {
+    for update in updates {
+        queue_cell(w, update)?;
+    }
+    queue_cursor(w, cursor)?;
+    w.flush()
+}
+
+/// Position the terminal caret at the cursor's (`x`, `y`) on any `Write`
+/// target, showing or hiding it per [`Cursor::visible`], and leave the
+/// terminal's style state reset.
+pub fn flush_cursor_to<W: Write>(w: &mut W, cursor: Cursor) -> io::Result<()> {
+    queue_cursor(w, cursor)?;
+    w.flush()
+}
+
+/// Queue the caret state: move to the cursor's position, then show or hide it
+/// per visibility, then reset the terminal's style state.
+fn queue_cursor<W: Write>(w: &mut W, cursor: Cursor) -> io::Result<()> {
+    w.queue(MoveTo(cursor.x, cursor.y))?;
+    if cursor.visible {
+        w.queue(Show)?;
+    } else {
+        w.queue(Hide)?;
+    }
+    // Leave the terminal's style state clean for whatever prints next.
+    w.queue(ResetColor)?;
+    w.queue(SetAttribute(Attribute::Reset))?;
+    Ok(())
 }
 
 /// Queue the ANSI commands for a single cell update.
@@ -216,6 +329,34 @@ mod tests {
     }
 
     #[test]
+    fn enable_event_listening_emits_mouse_and_focus_enable_sequences() {
+        let mut out = Vec::new();
+        enable_event_listening_to(&mut out).expect("enable should succeed");
+        let s = String::from_utf8(out).unwrap();
+        // Mouse capture: normal (?1000h), button-event (?1002h), any-event
+        // (?1003h), rxvt (?1015h), sgr (?1006h); then focus change (?1004h).
+        assert_eq!(
+            s,
+            "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h\x1b[?1004h",
+            "got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn disable_event_listening_emits_mouse_and_focus_disable_sequences() {
+        let mut out = Vec::new();
+        disable_event_listening_to(&mut out).expect("disable should succeed");
+        let s = String::from_utf8(out).unwrap();
+        // The inverse of enable, in reverse order; focus change (?1004l)
+        // last, then the mouse modes back off.
+        assert_eq!(
+            s,
+            "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1004l",
+            "got: {s:?}"
+        );
+    }
+
+    #[test]
     fn flush_diff_moves_writes_and_parks_cursor() {
         let out = flush(&[update(2, 1, 'x', Style::new(), 1, false)], (0, 0));
         let s = String::from_utf8(out).unwrap();
@@ -272,5 +413,57 @@ mod tests {
         assert!(s.contains("\x1b[1;1H\x1b[0m "), "got: {s:?}");
         // ...and the wide glyph at (1,0) prints raw.
         assert!(s.contains('コ'), "got: {s:?}");
+    }
+
+    /// Flush the caret state against an in-memory buffer and return the bytes.
+    fn flush_caret(cursor: Cursor) -> Vec<u8> {
+        let mut out = Vec::new();
+        flush_cursor_to(&mut out, cursor).expect("flush should succeed");
+        out
+    }
+
+    #[test]
+    fn flush_caret_moves_to_position_and_hides() {
+        let out = flush_caret(Cursor::new(3, 2).hide());
+        let s = String::from_utf8(out).unwrap();
+        // MoveTo(3, 2) is 1-based -> row 3, column 4.
+        assert!(s.starts_with("\x1b[3;4H"), "got: {s:?}");
+        // Hide is DECTCEM off; the trailing resets leave the style clean.
+        assert!(s.contains("\x1b[?25l"), "got: {s:?}");
+        assert!(s.ends_with("\x1b[0m\x1b[0m"), "got: {s:?}");
+    }
+
+    #[test]
+    fn flush_caret_moves_to_position_and_shows() {
+        let out = flush_caret(Cursor::new(0, 0).show());
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.starts_with("\x1b[1;1H"), "got: {s:?}");
+        assert!(s.contains("\x1b[?25h"), "got: {s:?}");
+        assert!(!s.contains("\x1b[?25l"), "got: {s:?}");
+    }
+
+    #[test]
+    fn flush_diff_with_caret_emits_cells_then_caret_state() {
+        let mut out = Vec::new();
+        let updates = [update(0, 0, 'x', Style::new(), 1, false)];
+        let caret = Cursor::new(5, 4).styled(Style::new().add_modifier(Modifiers::REVERSED));
+        flush_diff_with_cursor_to(&mut out, &updates, caret).expect("flush should succeed");
+        let s = String::from_utf8(out).unwrap();
+        // Cells are queued first (MoveTo + reset + char)...
+        assert!(s.contains("\x1b[1;1H\x1b[0mx"), "got: {s:?}");
+        // ...then the caret: MoveTo(5, 4) -> row 5, column 6, then Show.
+        assert!(s.ends_with("\x1b[5;6H\x1b[?25h\x1b[0m\x1b[0m"), "got: {s:?}");
+    }
+
+    #[test]
+    fn flush_diff_with_caret_hides_a_hidden_caret() {
+        let mut out = Vec::new();
+        let updates = [update(1, 0, 'y', Style::new(), 1, false)];
+        let caret = Cursor::hidden().at(2, 2);
+        flush_diff_with_cursor_to(&mut out, &updates, caret).expect("flush should succeed");
+        let s = String::from_utf8(out).unwrap();
+        // The hidden caret still moves (MoveTo(2, 2) -> row 3, column 3),
+        // then hides instead of showing.
+        assert!(s.ends_with("\x1b[3;3H\x1b[?25l\x1b[0m\x1b[0m"), "got: {s:?}");
     }
 }
