@@ -9,12 +9,17 @@
 //!   engine (children land inside `rect + border + padding`).
 //! * **Text** — paints its `text` prop content starting at the rect origin,
 //!   clipped to the rect (multi-width aware: a wide character never gets
-//!   truncated mid-glyph at the right edge). A `caret` Int prop (a display
-//!   column) paints the block caret over the cell under the cursor, using the
-//!   node's style reversed.
+//!   truncated mid-glyph at the right edge). Text leaves are inherently
+//!   single-row: the line is trimmed at the right edge, so both `wrap: true`
+//!   (default) and `wrap: false` paint it the same way. A `caret` Int prop (a
+//!   display column) paints the block caret over the cell under the cursor,
+//!   using the node's style reversed.
 //! * **StreamingText** — paints its accumulated stream spans starting at the
 //!   rect origin, one row per wrapped soft line, honoring each span's style
-//!   (fg/bg/modifiers), clipping to the rect bottom and right.
+//!   (fg/bg/modifiers), clipping to the rect bottom and right. A `wrap: false`
+//!   Bool prop paints the whole stream as one single-row line instead,
+//!   trimmed at the right edge (multi-width aware, never mid-glyph); `wrap:
+//!   true` (or unset) keeps the word-boundary soft-wrap.
 //! * **Root** — a plain container; paints nothing itself.
 //!
 //! The roadmap components ([`Input`](crate::Input), [`Spinner`](crate::Spinner),
@@ -58,7 +63,7 @@ use tern_core::color::Color;
 use tern_core::cursor::Cursor;
 use tern_core::layout::LayoutEngine;
 use tern_core::rect::{Rect, Size};
-use tern_core::scene::{NodeId, NodeKind, PropValue, Scene, SceneNode};
+use tern_core::scene::{NodeId, NodeKind, PropValue, Scene, SceneNode, Span};
 use tern_core::style::{BorderStyle, Modifiers, Style};
 use tern_layout::TaffyLayoutEngine;
 
@@ -176,6 +181,140 @@ impl Compositor {
         }
         buffer
     }
+
+    /// The ids of the nodes covering the cell at (`col`, `row`), ordered
+    /// innermost (topmost) first, then each ancestor that also covers the
+    /// cell — the "topmost z-ordered path" of hits. The scene root is never
+    /// reported (it fills the viewport and would make every on-viewport cell
+    /// a hit); a cell no node covers yields an empty path.
+    ///
+    /// A node covers a cell when the cell maps into its laid-out rect
+    /// through the node's effective region (clip + scroll), matching exactly
+    /// what [`paint_scene`](Compositor::paint_scene) draws: the topmost
+    /// painted node at a cell is the one painted last in the z-ordered paint
+    /// order, so a click at a mouse event's `column`/`row` routes to the node
+    /// that is visually on top. A node's own frame (background/border) is
+    /// tested through its inherited region; its content also through its own
+    /// clip and scroll, so a scrollable pane's border stays hittable while
+    /// scrolled-out content is not.
+    pub fn hit_test(&mut self, scene: &Scene, col: i32, row: i32, viewport: Size) -> Vec<NodeId> {
+        let raw = self.layout.compute(scene, viewport);
+        let rects = scene_absolute_rects(scene, raw);
+        let mut order: Vec<NodeId> = Vec::new();
+        collect_paint_order(scene, scene.root_id(), &rects, &mut order);
+        order.sort_by(|&a, &b| z_index(scene, a).cmp(&z_index(scene, b)));
+        let root = scene.root_id();
+        // Walk the paint order backwards: the first node covering the cell is
+        // the one painted last, i.e. the topmost.
+        for &id in order.iter().rev() {
+            if id == root {
+                continue;
+            }
+            let Some(&rect) = rects.get(&id) else {
+                continue;
+            };
+            if node_covers(scene, id, rect, col, row, viewport) {
+                // The path: the hit node, then each ancestor that also covers
+                // the cell (an overflowing child's cells are owned by the
+                // child alone), stopping before the root.
+                let mut path = vec![id];
+                let mut cur = scene.node(id).and_then(|n| n.parent);
+                while let Some(pid) = cur {
+                    if pid == root {
+                        break;
+                    }
+                    if let (Some(&prect), Some(_)) = (rects.get(&pid), scene.node(pid)) {
+                        if node_covers(scene, pid, prect, col, row, viewport) {
+                            path.push(pid);
+                        }
+                    }
+                    cur = scene.node(pid).and_then(|n| n.parent);
+                }
+                return path;
+            }
+        }
+        Vec::new()
+    }
+
+    /// The laid-out content size of `id`: `(width, height)` in cells.
+    ///
+    /// For `Text` and `StreamingText` leaves the size is the *wrapped content*
+    /// size: the display width of the widest wrapped line and the wrapped line
+    /// count at the node's laid-out width (the same token-aware wrapping the
+    /// paint pass uses, so a streaming node's height is how many rows its
+    /// content would occupy when displayed). A leaf declaring `wrap: false`
+    /// paints a single row trimmed at the rect's right edge, so its content
+    /// size is the rect width by one row. For every other node kind the size
+    /// is the laid-out rect size from the layout engine.
+    ///
+    /// Returns `None` when the node is missing or has no geometry (`display:
+    /// none`).
+    pub fn content_size(
+        &mut self,
+        scene: &Scene,
+        id: NodeId,
+        viewport: Size,
+    ) -> Option<(u32, u32)> {
+        let raw = self.layout.compute(scene, viewport);
+        let rects = scene_absolute_rects(scene, raw);
+        let node = scene.node(id)?;
+        let rect = *rects.get(&id)?;
+        match node.kind {
+            NodeKind::Text => {
+                if !wrap_enabled(node) {
+                    return Some((rect.width, 1));
+                }
+                let content = match node.props.get("text") {
+                    Some(PropValue::Str(s)) => s.as_str(),
+                    _ => "",
+                };
+                Some(measure_wrapped(content, rect.width))
+            }
+            NodeKind::StreamingText => {
+                if !wrap_enabled(node) {
+                    return Some((rect.width, 1));
+                }
+                let content: String = scene
+                    .stream(id)
+                    .map(|spans| spans.iter().map(|span| span.text.as_str()).collect())
+                    .unwrap_or_default();
+                Some(measure_wrapped(&content, rect.width))
+            }
+            _ => Some((rect.width, rect.height)),
+        }
+    }
+}
+
+/// Whether `id` (with laid-out rect `rect`) covers the cell (`col`, `row`)
+/// under the given viewport: the cell maps into the rect through the node's
+/// effective region, and the mapped position lands inside the region's clip.
+///
+/// Both the frame region (own clip/scroll excluded — the box's background and
+/// border) and the content region (own clip/scroll included — its text, stream
+/// and children) are tested, so a scrollable pane's frame stays hittable where
+/// its own clip would reject content, while scrolled-out content is not.
+fn node_covers(scene: &Scene, id: NodeId, rect: Rect, col: i32, row: i32, viewport: Size) -> bool {
+    hits_region(scene, id, rect, col, row, viewport, false)
+        || hits_region(scene, id, rect, col, row, viewport, true)
+}
+
+/// The half of [`node_covers`] that tests one effective region variant. A
+/// content cell at scene origin (`col + scroll`, `row + scroll`) maps to
+/// buffer cell (`col`, `row`); the node covers the buffer cell iff that origin
+/// lies in the rect and the mapped cell lies in the region's clip.
+fn hits_region(
+    scene: &Scene,
+    id: NodeId,
+    rect: Rect,
+    col: i32,
+    row: i32,
+    viewport: Size,
+    include_own: bool,
+) -> bool {
+    let region = effective_region(scene, id, viewport, include_own);
+    let ox = col + region.scroll_x;
+    let oy = row + region.scroll_y;
+    rect.contains(ox, oy) && region.contains(ox, oy)
 }
 
 /// Convert taffy's parent-relative layout rects into scene-absolute rects by
@@ -413,6 +552,13 @@ struct WrapCursor {
     col: i32,
 }
 
+/// Whether a text/streaming node soft-wraps its content: false only when the
+/// node explicitly declares `wrap: false`. Absent or `wrap: true` keeps the
+/// word-boundary soft-wrap (the default behavior).
+fn wrap_enabled(node: &SceneNode) -> bool {
+    !matches!(node.props.get("wrap"), Some(PropValue::Bool(false)))
+}
+
 /// Paint a `StreamingText` leaf: its accumulated stream spans are
 /// concatenated in order and painted into the rect starting at its origin,
 /// one row per wrapped soft line, through `region` (shifted by the region's
@@ -426,12 +572,19 @@ struct WrapCursor {
 /// right edge — or that is wider than the row itself — is dropped, never split
 /// mid-glyph. Painting stops at the rect's bottom edge; both edges are clipped
 /// to the region and the buffer.
+///
+/// A node with `wrap: false` instead paints its whole stream as one
+/// single-row line, trimmed at the right edge (see
+/// [`paint_streaming_text_single_row`]).
 fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) {
     let Some(stream) = node.stream.as_deref() else {
         return;
     };
     if stream.is_empty() {
         return;
+    }
+    if !wrap_enabled(node) {
+        return paint_streaming_text_single_row(stream, rect, region, buffer);
     }
     let right = rect
         .right()
@@ -524,6 +677,52 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &m
     }
 }
 
+/// Paint a `wrap: false` stream as a single row at the rect's origin: the
+/// concatenated spans paint left-to-right on `rect.y`, and the line is
+/// trimmed at the right edge (`right`), dropping any glyph that would straddle
+/// it — never split mid-glyph, multi-width aware. A hard `\n` ends the line
+/// (there is no next row in single-row mode). Each span paints with its own
+/// style; the row is drawn through `region` like any other cell.
+fn paint_streaming_text_single_row(
+    stream: &[Span],
+    rect: Rect,
+    region: Region,
+    buffer: &mut Buffer,
+) {
+    let right = rect
+        .right()
+        .min(region.clip.right() + region.scroll_x);
+    if right <= rect.x {
+        return;
+    }
+    // The single row must land inside the clip (mirrors paint_text's guard).
+    if region.map_y(rect.y) < region.clip.y
+        || region.map_y(rect.y) >= region.clip.bottom()
+        || region.clip.bottom() <= region.clip.y
+    {
+        return;
+    }
+    let mut cx = rect.x;
+    for span in stream {
+        for ch in span.text.chars() {
+            if ch == '\n' {
+                return; // single-row: the line ends here
+            }
+            let w = char_width(ch);
+            if w == 0 {
+                continue;
+            }
+            // Trim: a glyph that would straddle the right edge is dropped
+            // whole (never mid-glyph); nothing after it fits either.
+            if cx + w as i32 > right {
+                return;
+            }
+            buffer.set_char_region(cx, rect.y, ch, span.style, region);
+            cx += w as i32;
+        }
+    }
+}
+
 /// Whether a content row at scene row `row` is visible inside the node's own
 /// frame after the region's scroll: its mapped position must land within the
 /// frame's vertical extent `[rect.y, rect.bottom())`. Rows that pan above or
@@ -532,6 +731,93 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &m
 fn row_inside_frame(rect: Rect, region: Region, row: i32) -> bool {
     let mapped = region.map_y(row);
     mapped >= rect.y && mapped < rect.bottom()
+}
+
+/// The display width of a string in terminal cells (multi-width aware).
+fn display_width(content: &str) -> u32 {
+    content.chars().map(|c| char_width(c) as u32).sum()
+}
+
+/// The wrapped content size of `content` laid out at `width` cells: the
+/// display width of the widest wrapped line and the wrapped line count.
+///
+/// Wrapping mirrors the streaming-text paint pass (`paint_word`): a token (a
+/// whitespace-free run) that does not fit on the current row wraps whole to
+/// the next row when it fits a fresh row; a token wider than the whole row is
+/// hard-broken across rows; a `\n` forces a break; a trailing space at a row's
+/// end is dropped. The reported width can therefore be narrower than the
+/// content's total display width (wrapped rows), and an empty content reports
+/// `(0, 0)` — no content, no size.
+fn measure_wrapped(content: &str, width: u32) -> (u32, u32) {
+    if content.is_empty() {
+        return (0, 0);
+    }
+    let width = width.max(1);
+    let mut lines: u32 = 1;
+    let mut max_col: u32 = 0;
+    let mut col: u32 = 0;
+    let mut word = String::new();
+    for ch in content.chars() {
+        match ch {
+            '\n' => {
+                flush_word(&word, width, &mut col, &mut lines, &mut max_col);
+                word.clear();
+                lines += 1;
+                col = 0;
+            }
+            ' ' => {
+                flush_word(&word, width, &mut col, &mut lines, &mut max_col);
+                word.clear();
+                // A trailing space at a row's end is dropped (the wrap would
+                // collapse it anyway), mirroring paint_streaming_text.
+                if col < width {
+                    col += 1;
+                    max_col = max_col.max(col);
+                }
+            }
+            _ => word.push(ch),
+        }
+    }
+    flush_word(&word, width, &mut col, &mut lines, &mut max_col);
+    (max_col, lines)
+}
+
+/// Place one pending token onto the wrapped measurement, applying the same
+/// wrap rule as [`paint_word`]: whole-token wrap when it does not fit the
+/// current row but fits a fresh one, hard char-by-char break when the token is
+/// wider than the whole row.
+fn flush_word(
+    word: &str,
+    width: u32,
+    col: &mut u32,
+    lines: &mut u32,
+    max_col: &mut u32,
+) {
+    if word.is_empty() {
+        return;
+    }
+    let tw = display_width(word);
+    if tw <= width {
+        if *col > 0 && *col + tw > width {
+            *lines += 1;
+            *col = 0;
+        }
+        *col += tw;
+        *max_col = (*max_col).max(*col);
+        return;
+    }
+    for ch in word.chars() {
+        let w = char_width(ch) as u32;
+        if w == 0 {
+            continue;
+        }
+        if *col + w > width {
+            *lines += 1;
+            *col = 0;
+        }
+        *col += w;
+        *max_col = (*max_col).max(*col);
+    }
 }
 
 /// Paint one whitespace-free token with `style` at the cursor, soft-wrapping
@@ -1025,6 +1311,132 @@ mod tests {
         assert_eq!(buffer2.cell(0, 0).unwrap(), &Cell::default());
     }
 
+    #[test]
+    fn golden_streaming_text_wrap_true_wraps_at_word_boundaries() {
+        // An explicit `wrap: true` on a 4x2 StreamingText rect holding the
+        // span 'ab cd': the token 'cd' does not fit on the row after 'ab '
+        // (col 3 + 2 > 4), so it wraps whole to row 1 — the current
+        // word-boundary soft-wrap.
+        let mut scene = streaming_scene(4, 2);
+        let root = scene.root_id();
+        let s = scene.children(root).unwrap()[0];
+        scene.set_prop(s, "wrap", PropValue::Bool(true));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "ab cd".to_string(),
+                style: Style::new(),
+            }
+        ));
+
+        let buffer = Compositor::new().paint_scene(&scene, Size::new(4, 2));
+
+        // Expected cell grid:
+        //   ab
+        //   cd
+        let mut expected = Buffer::new(4, 2);
+        for (x, ch) in "ab ".chars().enumerate() {
+            expected.set_char(x as u16, 0, ch, Style::new());
+        }
+        for (x, ch) in "cd".chars().enumerate() {
+            expected.set_char(x as u16, 1, ch, Style::new());
+        }
+
+        assert_eq!(buffer, expected);
+        let rows = render_scene_rows(&scene, Size::new(4, 2));
+        assert_eq!(rows, ["ab  ", "cd  "]);
+    }
+
+    #[test]
+    fn golden_streaming_text_wrap_false_paints_single_row_trimmed() {
+        // `wrap: false` on a 4x2 StreamingText rect holding 'abcdefgh': the
+        // whole stream paints as ONE single-row line, trimmed at the right
+        // edge ('abcd'), and the second row stays blank — no wrapping.
+        let mut scene = streaming_scene(4, 2);
+        let root = scene.root_id();
+        let s = scene.children(root).unwrap()[0];
+        scene.set_prop(s, "wrap", PropValue::Bool(false));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "abcdefgh".to_string(),
+                style: Style::new(),
+            }
+        ));
+
+        let buffer = Compositor::new().paint_scene(&scene, Size::new(4, 2));
+
+        // Expected cell grid:
+        //   abcd
+        //   (blank row)
+        let mut expected = Buffer::new(4, 2);
+        for (x, ch) in "abcd".chars().enumerate() {
+            expected.set_char(x as u16, 0, ch, Style::new());
+        }
+
+        assert_eq!(buffer, expected);
+        let rows = render_scene_rows(&scene, Size::new(4, 2));
+        assert_eq!(rows, ["abcd", "    "]);
+    }
+
+    #[test]
+    fn golden_streaming_text_wrap_false_drops_wide_char_at_right_edge() {
+        // `wrap: false` with a wide char (コ) that would straddle the right
+        // edge of the 3-wide rect: the glyph is dropped whole, never truncated
+        // mid-glyph — column 2 stays blank (no masked continuation cell).
+        let mut scene = streaming_scene(3, 1);
+        let root = scene.root_id();
+        let s = scene.children(root).unwrap()[0];
+        scene.set_prop(s, "wrap", PropValue::Bool(false));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "abコ".to_string(),
+                style: Style::new(),
+            }
+        ));
+
+        let buffer = Compositor::new().paint_scene(&scene, Size::new(3, 1));
+
+        // Expected cell grid:
+        //   ab
+        let mut expected = Buffer::new(3, 1);
+        for (x, ch) in "ab".chars().enumerate() {
+            expected.set_char(x as u16, 0, ch, Style::new());
+        }
+
+        assert_eq!(buffer, expected);
+        assert_eq!(buffer.cell(2, 0).unwrap(), &Cell::default());
+        assert_eq!(render_scene_rows(&scene, Size::new(3, 1)), ["ab "]);
+    }
+
+    #[test]
+    fn golden_text_wrap_false_trims_at_right_edge() {
+        // A bare Text node with `wrap: false` paints its content as a single
+        // row trimmed at the rect right edge (Text leaves are inherently
+        // single-row, so wrap:false matches their natural painting).
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let t = scene
+            .add_child(root, NodeKind::Text, Style::new())
+            .expect("add text");
+        scene.set_prop(t, "text", PropValue::Str("abcdef".to_string()));
+        scene.set_prop(t, "wrap", PropValue::Bool(false));
+        scene.set_prop(t, "width", PropValue::Int(4));
+        scene.set_prop(t, "height", PropValue::Int(1));
+
+        let buffer = Compositor::new().paint_scene(&scene, Size::new(4, 1));
+
+        // Expected cell grid:
+        //   abcd
+        let mut expected = Buffer::new(4, 1);
+        for (x, ch) in "abcd".chars().enumerate() {
+            expected.set_char(x as u16, 0, ch, Style::new());
+        }
+
+        assert_eq!(buffer, expected);
+    }
+
     /// A scene with an in-flow `5x5` bg box at the origin and an absolute
     /// overlay box (with `top`/`left`/`size` props) placed on top of it.
     ///
@@ -1254,5 +1666,208 @@ mod tests {
         assert_eq!(rows[0], "+---+");
         assert_eq!(rows[1], "|cd |");
         assert_eq!(rows[2], "+---+");
+    }
+
+    // --- Scene geometry queries (hit_test / content_size) ----------------
+
+    #[test]
+    fn hit_test_returns_topmost_z_ordered_path() {
+        // A 5x5 in-flow box with a text label, plus an absolutely positioned
+        // overlay (z_index 2) covering the box's top-left corner: at an
+        // overlap cell the overlay is topmost; elsewhere the label (and its
+        // ancestor box) win; the root is never reported.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let flow = scene
+            .add_child(root, NodeKind::Box, Style::new())
+            .expect("flow box");
+        scene.set_prop(flow, "width", PropValue::Int(5));
+        scene.set_prop(flow, "height", PropValue::Int(5));
+        scene.set_prop(flow, "align_items", PropValue::Str("flex-start".into()));
+        let label = scene.add_text(flow, "hi", Style::new()).expect("label");
+
+        let overlay = scene
+            .add_child(root, NodeKind::Box, Style::new())
+            .expect("overlay");
+        scene.set_prop(overlay, "position", PropValue::Str("absolute".into()));
+        scene.set_prop(overlay, "top", PropValue::Int(1));
+        scene.set_prop(overlay, "left", PropValue::Int(1));
+        scene.set_prop(overlay, "width", PropValue::Int(3));
+        scene.set_prop(overlay, "height", PropValue::Int(3));
+        scene.set_prop(overlay, "z_index", PropValue::Int(2));
+
+        let mut comp = Compositor::new();
+        let viewport = Size::new(20, 12);
+        // Overlap cell: the higher-z overlay wins (painted last).
+        assert_eq!(comp.hit_test(&scene, 2, 2, viewport), vec![overlay]);
+        // The label is topmost over the flow box, and the box (an ancestor
+        // that also covers the cell) follows in the path.
+        assert_eq!(comp.hit_test(&scene, 1, 0, viewport), vec![label, flow]);
+        // A flow-only cell (inside the box, outside the label and overlay).
+        assert_eq!(comp.hit_test(&scene, 3, 0, viewport), vec![flow]);
+    }
+
+    #[test]
+    fn hit_test_empty_miss_returns_empty() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let b = scene
+            .add_child(root, NodeKind::Box, Style::new())
+            .expect("box");
+        scene.set_prop(b, "width", PropValue::Int(4));
+        scene.set_prop(b, "height", PropValue::Int(4));
+
+        let mut comp = Compositor::new();
+        let viewport = Size::new(20, 12);
+        // Inside the viewport but outside every node.
+        assert!(comp.hit_test(&scene, 6, 6, viewport).is_empty());
+        // Outside the viewport entirely.
+        assert!(comp.hit_test(&scene, 50, 50, viewport).is_empty());
+    }
+
+    #[test]
+    fn hit_test_respects_clip_and_scroll_regions() {
+        // A bordered 5x3 pane whose clip (1,1,3,1) + scroll_y=1 pan a
+        // streaming child: the pane's frame (border) stays hittable where the
+        // clip rejects content, the scrolled-out row is not claimed by the
+        // stream, and the panned content row is topmost inside the pane.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let b = scene
+            .add_child(root, NodeKind::Box, Style::new())
+            .expect("box");
+        scene.set_prop(b, "width", PropValue::Int(5));
+        scene.set_prop(b, "height", PropValue::Int(3));
+        scene.set_prop(b, "border", PropValue::Int(1));
+        scene.set_clip_rect(b, Rect::new(1, 1, 3, 1));
+        scene.set_scroll_offset(b, 0, 1);
+        let s = scene
+            .add_child(b, NodeKind::StreamingText, Style::new())
+            .expect("stream");
+        scene.set_prop(s, "width", PropValue::Int(3));
+        scene.set_prop(s, "height", PropValue::Int(2));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "ab\ncd".to_string(),
+                style: Style::new(),
+            }
+        ));
+
+        let mut comp = Compositor::new();
+        let viewport = Size::new(5, 3);
+        // 'cd' pans to buffer row 1: the stream is topmost there.
+        assert_eq!(comp.hit_test(&scene, 1, 1, viewport), vec![s, b]);
+        // The pane's border (buffer col 0, row 1) belongs to the pane.
+        assert_eq!(comp.hit_test(&scene, 0, 1, viewport), vec![b]);
+        // 'ab' is scrolled out of the clip (buffer row 0 shows the top
+        // border): the stream must not claim it, the pane's frame still does.
+        assert_eq!(comp.hit_test(&scene, 1, 0, viewport), vec![b]);
+    }
+
+    #[test]
+    fn content_size_wrapped_streaming_height() {
+        // 'abcdef' wraps onto two rows at a 4-cell width: (4, 2).
+        let mut scene = streaming_scene(4, 2);
+        let root = scene.root_id();
+        let s = scene.children(root).unwrap()[0];
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "abcdef".to_string(),
+                style: Style::new(),
+            }
+        ));
+        let mut comp = Compositor::new();
+        assert_eq!(
+            comp.content_size(&scene, s, Size::new(4, 2)),
+            Some((4, 2))
+        );
+
+        // Multi-width: 'コ' (2 cells) + 'abc' wraps to 'コa' / 'bc' at a
+        // 3-cell width: width stays 3, height 2.
+        let mut scene2 = streaming_scene(3, 2);
+        let root2 = scene2.root_id();
+        let s2 = scene2.children(root2).unwrap()[0];
+        assert!(scene2.append_span(
+            s2,
+            Span {
+                text: "コabc".to_string(),
+                style: Style::new(),
+            }
+        ));
+        assert_eq!(
+            comp.content_size(&scene2, s2, Size::new(3, 2)),
+            Some((3, 2))
+        );
+
+        // Hard newlines break rows; empty content reports (0, 0).
+        let mut scene3 = streaming_scene(10, 4);
+        let root3 = scene3.root_id();
+        let s3 = scene3.children(root3).unwrap()[0];
+        assert!(scene3.append_span(
+            s3,
+            Span {
+                text: "ab\ncd".to_string(),
+                style: Style::new(),
+            }
+        ));
+        assert_eq!(
+            comp.content_size(&scene3, s3, Size::new(10, 4)),
+            Some((2, 2))
+        );
+        let scene4 = streaming_scene(10, 1);
+        let root4 = scene4.root_id();
+        let s4 = scene4.children(root4).unwrap()[0];
+        assert_eq!(
+            comp.content_size(&scene4, s4, Size::new(10, 1)),
+            Some((0, 0))
+        );
+
+        // A `wrap: false` leaf paints one trimmed row: content size collapses
+        // to the rect width by one row, regardless of content length.
+        let mut scene5 = streaming_scene(4, 2);
+        let root5 = scene5.root_id();
+        let s5 = scene5.children(root5).unwrap()[0];
+        scene5.set_prop(s5, "wrap", PropValue::Bool(false));
+        assert!(scene5.append_span(
+            s5,
+            Span {
+                text: "abcdef".to_string(),
+                style: Style::new(),
+            }
+        ));
+        assert_eq!(
+            comp.content_size(&scene5, s5, Size::new(4, 2)),
+            Some((4, 1))
+        );
+    }
+
+    #[test]
+    fn content_size_uses_layout_size_for_boxes_and_text() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let b = scene
+            .add_child(root, NodeKind::Box, Style::new())
+            .expect("box");
+        scene.set_prop(b, "width", PropValue::Int(7));
+        scene.set_prop(b, "height", PropValue::Int(3));
+        let t = scene.add_text(b, "hi", Style::new()).expect("text");
+
+        let mut comp = Compositor::new();
+        // A box reports its laid-out rect size; a text leaf its wrapped
+        // content size (single line here).
+        assert_eq!(
+            comp.content_size(&scene, b, Size::new(20, 12)),
+            Some((7, 3))
+        );
+        assert_eq!(
+            comp.content_size(&scene, t, Size::new(20, 12)),
+            Some((2, 1))
+        );
+        // Missing and display:none nodes have no geometry.
+        assert_eq!(comp.content_size(&scene, NodeId(999), Size::new(20, 12)), None);
+        scene.set_prop(b, "display", PropValue::Str("none".into()));
+        assert_eq!(comp.content_size(&scene, b, Size::new(20, 12)), None);
     }
 }
