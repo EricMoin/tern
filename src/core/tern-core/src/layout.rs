@@ -1,4 +1,34 @@
 //! The layout engine contract implemented by tern-layout.
+//!
+//! # Layout prop vocabulary
+//!
+//! The engine reads layout keywords from each scene node's `props` map. The
+//! full vocabulary an engine must understand:
+//!
+//! | prop | values | default |
+//! |------|--------|---------|
+//! | `display` | `"flex"` \| `"none"` | `"flex"` |
+//! | `flex_direction` | `"row"` \| `"column"` \| `"row-reverse"` \| `"column-reverse"` | `"row"` |
+//! | `justify_content` | `"flex-start"` \| `"flex-end"` \| `"center"` \| `"space-between"` \| `"space-around"` \| `"space-evenly"` | unset |
+//! | `align_items` | `"flex-start"` \| `"flex-end"` \| `"center"` \| `"stretch"` \| `"baseline"` | unset (stretch) |
+//! | `align_content` | `"flex-start"` \| `"flex-end"` \| `"center"` \| `"stretch"` \| `"space-between"` \| `"space-around"` \| `"space-evenly"` | unset (stretch) |
+//! | `gap` | cells, uniform on both axes | 0 |
+//! | `row_gap` / `column_gap` | cells; per-axis override of `gap` | `gap` / 0 |
+//! | `padding` | cells (uniform) | 0 |
+//! | `border` | cells (uniform) | 0 |
+//! | `width` / `height` | cells | auto |
+//! | `min_width` / `min_height` | cells | auto |
+//! | `max_width` / `max_height` | cells | auto |
+//! | `position` | `"relative"` \| `"absolute"` | `"relative"` |
+//! | `top` / `right` / `bottom` / `left` | cells (inset edges; meaningful for `position: absolute`) | auto |
+//! | `text` | string content of a `Text` leaf | — |
+//! | `z_index` | integer paint order — consumed by the **compositor** (paint order), not by the engine (geometry only) | 0 |
+//!
+//! `position: absolute` removes the node from flex flow (it occupies no space
+//! and does not push siblings); its `top`/`right`/`bottom`/`left` insets
+//! resolve against the node's direct parent's padding box. `z_index` does not
+//! affect geometry: the engine's output is a plain list of rects, and paint
+//! stacking is the compositor's job.
 
 use crate::rect::{Rect, Size};
 use crate::scene::{NodeId, Scene};
