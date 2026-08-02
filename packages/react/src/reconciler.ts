@@ -48,19 +48,25 @@ import {
 } from "react";
 import {
   Box,
+  DiffView as CoreDiffView,
   Input as CoreInput,
   Panels as CorePanels,
+  ScrollView as CoreScrollView,
+  Select as CoreSelect,
   Spinner as CoreSpinner,
   StatusBar as CoreStatusBar,
   StreamingText,
   Text,
   focusManager,
+  type DiffViewProps,
   type FocusManager,
   type KeyEvent,
   type Node,
   type NodeProps,
   type PanelsProps,
   type Renderer,
+  type ScrollViewProps,
+  type SelectProps,
 } from "@tern/core";
 
 // ---------------------------------------------------------------------------
@@ -141,6 +147,14 @@ export type UseInputHandler = (event: KeyEvent) => void;
 const REACT_RESERVED_PROPS = new Set(["children", "key", "ref"]);
 
 /**
+ * Semantic theme hints consumed by the host components at render time (via
+ * `resolveTheme`). They are never scene props — this strip guarantees a
+ * `role` / `component` prop cannot leak onto a node even if a host component
+ * forgets to resolve (constitution: theme output is plain node props).
+ */
+const THEME_PROPS = new Set(["role", "component"]);
+
+/**
  * Component-consumed props of `<StreamingText>` that must never reach a scene
  * node: `stream` is a non-scalar async iterable (the binding drops objects)
  * and `autoScroll` / `wrap` are component behavior flags, not tern node
@@ -161,17 +175,28 @@ const INPUT_PROPS = new Set(["onChange", "onSubmit", "focusId", "focusManager"])
 const SPINNER_PROPS = new Set(["interval"]);
 
 /**
+ * Component-consumed props of `<Select>` that must never reach a scene node:
+ * the callbacks and the focus wiring. The `options` list and the
+ * `floating`/`multi`/state props flow through to the core factory, which
+ * consumes the bookkeeping keys itself (the option list is JS bookkeeping,
+ * `floating` maps to the root box's `z_index`).
+ */
+const SELECT_PROPS = new Set(["onChange", "onConfirm", "onDismiss", "focusId", "focusManager"]);
+
+/**
  * Strip the React-only props (and the component-level `<StreamingText>`,
- * `<Input>` / `<Spinner>` props), leaving the tern node props (style + layout
- * keys) that the core factories and `Node.setProps` understand.
+ * `<Input>` / `<Spinner>` / `<Select>` props), leaving the tern node props
+ * (style + layout keys) that the core factories and `Node.setProps`
+ * understand.
  */
 export function toNodeProps(props: TernProps, type?: string): NodeProps {
   const out: NodeProps = {};
   for (const [key, value] of Object.entries(props)) {
-    if (REACT_RESERVED_PROPS.has(key) || value === undefined) continue;
+    if (REACT_RESERVED_PROPS.has(key) || THEME_PROPS.has(key) || value === undefined) continue;
     if (type === "streaming_text" && STREAMING_TEXT_PROPS.has(key)) continue;
     if (type === "input" && INPUT_PROPS.has(key)) continue;
     if (type === "spinner" && SPINNER_PROPS.has(key)) continue;
+    if (type === "select" && SELECT_PROPS.has(key)) continue;
     out[key] = value;
   }
   return out;
@@ -275,6 +300,19 @@ export const hostConfig: HostConfig = {
         // The panel spec list is JS bookkeeping the core factory consumes;
         // `PanelsProps` requires it while `NodeProps` is an open record.
         return CorePanels(nodeProps as PanelsProps);
+      case "diff":
+        // The hunks model is JS bookkeeping the core factory consumes;
+        // `DiffViewProps` requires it while `NodeProps` is an open record.
+        return CoreDiffView(nodeProps as DiffViewProps);
+      case "select":
+        // The options list is JS bookkeeping the core factory consumes;
+        // `SelectProps` requires it while `NodeProps` is an open record.
+        return CoreSelect(nodeProps as SelectProps);
+      case "scroll_view":
+        // The clip/scroll region props and the scrollbar flag flow to the
+        // core factory; React children are appended after the (absolutely
+        // positioned) scrollbar leaf by the reconciler's tree ops.
+        return CoreScrollView(nodeProps as ScrollViewProps);
       default:
         throw new Error(`@tern/react: unknown host element type "${type}"`);
     }
