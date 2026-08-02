@@ -27,6 +27,7 @@
 //! | `z_index`         | `Int` — paint order; consumed by the compositor, not the engine      | 0      |
 //! | `clip_x` / `clip_y` / `clip_width` / `clip_height` | `Int` (cells) — a clip rect restricting the node's subtree drawing to a bounded region; consumed by the compositor | unset (no clip) |
 //! | `scroll_x` / `scroll_y` | `Int` (cells) — per-region scroll offset shifting content inside the clip rect; consumed by the compositor | 0 |
+//! | `wrap`               | `Bool` — text/streaming leaf wrapping; `false` keeps the line single-row (intrinsic width, no flex shrink) and the compositor trims overflow at the right edge; `true`/unset soft-wraps at word boundaries | `true` |
 //!
 //! ## Clip and scroll regions
 //!
@@ -166,6 +167,17 @@ fn build_node(
     }
 
     let mut style = props_to_style(&node.props);
+
+    // A `wrap: false` text/streaming leaf is a single intrinsic-width line —
+    // it must never be re-flowed by layout, so it is exempt from flex
+    // shrinking (the compositor trims overflow at paint time instead).
+    // Wrapping leaves (wrap unset or `true`) may be constrained; the
+    // compositor soft-wraps them at word boundaries.
+    if matches!(node.kind, NodeKind::Text | NodeKind::StreamingText)
+        && prop_bool(&node.props, "wrap") == Some(false)
+    {
+        style.flex_shrink = 0.0;
+    }
 
     // The scene root fills the viewport unless it declares its own size.
     if is_root && !node.props.contains_key("width") && !node.props.contains_key("height") {
@@ -353,6 +365,14 @@ fn prop_number(props: &PropMap, key: &str) -> Option<f32> {
     }
 }
 
+/// Read a boolean property.
+fn prop_bool(props: &PropMap, key: &str) -> Option<bool> {
+    match props.get(key) {
+        Some(PropValue::Bool(b)) => Some(*b),
+        _ => None,
+    }
+}
+
 /// Display width of a string in terminal cells (multi-width aware).
 fn display_width(content: &str) -> usize {
     UnicodeWidthStr::width(content)
@@ -527,6 +547,30 @@ mod tests {
 
         let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 10));
         assert_eq!(rect_of(&out, s), Rect::new(0, 0, 3, 1));
+    }
+
+    #[test]
+    fn wrap_false_leaf_keeps_intrinsic_width_in_fixed_container() {
+        // A `wrap: false` text/streaming leaf is a single intrinsic-width
+        // line: layout must never re-flow it. Inside a fixed-width container
+        // it keeps its full content width (overflowing the container), so the
+        // compositor trims at paint time (against the clip/viewport edge)
+        // instead of the layout engine squeezing the line.
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        set_prop(&mut scene, root, "width", PropValue::Int(5));
+        set_prop(&mut scene, root, "height", PropValue::Int(2));
+        set_prop(&mut scene, root, "align_items", PropValue::Str("flex-start".into()));
+        let s = scene
+            .add_child(root, NodeKind::StreamingText, CellStyle::new())
+            .expect("add streaming text");
+        set_prop(&mut scene, s, "wrap", PropValue::Bool(false));
+        assert!(scene.append_span(s, Span { text: "abc def".into(), style: CellStyle::new() }));
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 50));
+        // 7-cell content width ('abc def') in a 5-wide container: the leaf
+        // keeps its intrinsic width and overflows; height stays 1 (single row).
+        assert_eq!(rect_of(&out, s), Rect::new(0, 0, 7, 1));
     }
 
     #[test]

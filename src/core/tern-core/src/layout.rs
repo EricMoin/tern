@@ -22,6 +22,7 @@
 //! | `position` | `"relative"` \| `"absolute"` | `"relative"` |
 //! | `top` / `right` / `bottom` / `left` | cells (inset edges; meaningful for `position: absolute`) | auto |
 //! | `text` | string content of a `Text` leaf | — |
+//! | `wrap` | `Bool` — text/streaming leaf wrapping; `false` keeps the line single-row (the compositor trims overflow at the right edge), `true`/unset soft-wraps at word boundaries | `true` |
 //! | `z_index` | integer paint order — consumed by the **compositor** (paint order), not by the engine (geometry only) | 0 |
 //!
 //! `position: absolute` removes the node from flex flow (it occupies no space
