@@ -2,6 +2,8 @@
 name = "tern-terminal"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "tern terminal: diff-flushes painted buffers to the terminal"
 
 [dependencies]
