@@ -5,8 +5,24 @@ import {
   Text,
   StreamingText,
   subscribeStream,
+  Input,
+  Spinner,
+  StatusBar,
+  Panels,
+  subscribeInput,
+  editKey,
+  tick,
+  useFocus,
+  FocusManager,
+  focusManager,
+  collapsePanel,
+  expandPanel,
+  togglePanel,
+  focusPanel,
   type Span,
   type Node,
+  type KeyEvent,
+  type Renderer,
   renderer,
   rendererOptions,
   replaceNode,
@@ -23,6 +39,14 @@ import {
   createComponent,
   use,
 } from "./index.ts";
+import {
+  Box as CoreBox,
+  Text as CoreText,
+  Input as CoreInput,
+  Spinner as CoreSpinner,
+  StatusBar as CoreStatusBar,
+  Panels as CorePanels,
+} from "@tern/core";
 
 // @deno-types="../../../node_modules/solid-js/types/index.d.ts"
 import { createSignal } from "solid-js";
@@ -171,9 +195,8 @@ Deno.test("replaceNode swaps a node for its recorded in-parent sibling", () => {
     throw new Error("replaced node's parent registry entry must be cleared");
   }
   // `c` is inserted immediately before `a` (the anchor), so it lands at
-  // `a`'s former index. The replaced node's own children entry is left
-  // behind by @tern/core `Node.remove()` (the core children list is never
-  // spliced on removal — a documented core limitation).
+  // `a`'s former index; `a` is then spliced out by `Node.remove()`, leaving
+  // `c` in exactly `a`'s old slot.
   const children = parent.children;
   if (children.indexOf(c) !== aIndex) {
     throw new Error("replacement must land at the replaced node's index");
@@ -561,9 +584,17 @@ Deno.test("reactive signal drives targeted text and conditional-box scene update
   if (condRemoves !== 1) {
     throw new Error(`expected exactly one remove() call on the conditional, got ${condRemoves}`);
   }
-  // Note: @tern/core `Node.remove()` never splices the parent's children list
-  // (a documented core limitation), so treeRoot.children still lists the box;
-  // the authoritative removal evidence is the registry + remove() above.
+  // @tern/core `Node.remove()` splices the node out of its parent's children
+  // list, so the JS tree mirrors the removal: the conditional is gone from
+  // treeRoot.children and only [staticLabel, textNode] remain.
+  if (treeRoot.children.length !== 2) {
+    throw new Error(
+      `expected [staticLabel, textNode] after removal, got ${treeRoot.children.length} children`,
+    );
+  }
+  if (treeRoot.children.includes(condBoxRef)) {
+    throw new Error("removed conditional must be spliced out of treeRoot.children");
+  }
   if (treeRoot.children[0] !== staticLabel || staticLabel.props.text !== "static") {
     throw new Error("static label must remain untouched after removal");
   }
@@ -572,4 +603,421 @@ Deno.test("reactive signal drives targeted text and conditional-box scene update
   }
 
   dispose();
+});
+
+// ---------------------------------------------------------------------------
+// Roadmap element factories (feature parity with @tern/react)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read a node's child count through a function so the type checker cannot
+ * narrow it across the mutating element calls below (toggle/expand/collapse/
+ * remove mutate the nodes in place; a narrowed literal would make the
+ * follow-up comparisons look "unintentional").
+ */
+const childCount = (node: Node): number => node.children.length;
+
+/** The bold flag of a panel box's header (its first child `text` node). */
+const headerBold = (node: Node): boolean | undefined => node.children[0]?.props.bold;
+
+Deno.test("Input/Spinner/StatusBar/Panels factories materialize the core elements", () => {
+  // Input: a framed box with a text leaf carrying the value/caret (and a dim
+  // placeholder when empty).
+  const input = Input({ value: "hi", caret: 1, placeholder: "type…" });
+  if (input.type !== "input") throw new Error(`input type = ${input.type}`);
+  if (input.props.value !== "hi" || input.props.caret !== 1) {
+    throw new Error(`input props = ${JSON.stringify(input.props)}`);
+  }
+  const leaf = input.children[0];
+  if (leaf === undefined || leaf.type !== "text") {
+    throw new Error("input must compose a text leaf");
+  }
+  if (leaf.props.text !== "hi" || leaf.props.caret !== 1) {
+    throw new Error(`leaf must carry value/caret: ${JSON.stringify(leaf.props)}`);
+  }
+  // Empty input with a placeholder: the leaf shows the dimmed placeholder.
+  const empty = Input({ placeholder: "ask…" });
+  if (empty.children[0]?.props.text !== "ask…" || empty.children[0]?.props.dim !== true) {
+    throw new Error("empty input must show the dimmed placeholder");
+  }
+
+  // Spinner: determinate bar derives its text from value/max/width.
+  const spinner = Spinner({ value: 5, max: 10, width: 8 });
+  if (spinner.type !== "spinner") throw new Error(`spinner type = ${spinner.type}`);
+  if (spinner.props.text !== "▓▓▓▓░░░░") {
+    throw new Error(`determinate bar = ${JSON.stringify(spinner.props.text)}`);
+  }
+  // Indeterminate: the frame glyph at `frame`, advancing via tick().
+  const frames = ["⠋", "⠙"];
+  const indet = Spinner({ frames, frame: 1 });
+  if (indet.props.text !== "⠙") throw new Error(`frame glyph = ${JSON.stringify(indet.props.text)}`);
+  const advanced = tick(indet);
+  if (advanced !== "⠋") throw new Error(`tick must wrap frames, got ${JSON.stringify(advanced)}`);
+
+  // StatusBar: a row strip whose children are the segment Text nodes; the
+  // segment keys are lifted out of the strip props.
+  const bar = StatusBar({ left: "L", center: "C", right: "R" });
+  if (bar.type !== "status_bar") throw new Error(`status_bar type = ${bar.type}`);
+  const texts = bar.children.map((child) => child.props.text).join(",");
+  if (texts !== "L,C,R") throw new Error(`segments = ${texts}`);
+  if (bar.props.flex_direction !== "row" || bar.props.height !== 1) {
+    throw new Error(`strip props = ${JSON.stringify(bar.props)}`);
+  }
+  for (const key of ["left", "center", "right"]) {
+    if (key in bar.props) throw new Error(`segment key leaked into strip props: ${key}`);
+  }
+
+  // Panels: a flex stack of panel boxes; the active panel's header is bold,
+  // a collapsed panel hides its body.
+  const bodyA = Box();
+  const bodyB = Box();
+  const panels = Panels({
+    panels: [
+      { header: "A", body: bodyA },
+      { header: "B", body: bodyB, collapsed: true },
+    ],
+    active: 1,
+  });
+  if (panels.type !== "panels") throw new Error(`panels type = ${panels.type}`);
+  if (panels.props.active !== 1 || panels.props.flex_direction !== "column") {
+    throw new Error(`panels props = ${JSON.stringify(panels.props)}`);
+  }
+  if ("panels" in panels.props || "direction" in panels.props) {
+    throw new Error("panel spec keys must not reach the scene props");
+  }
+  if (childCount(panels) !== 2) throw new Error(`panels = ${childCount(panels)}`);
+  const panelA = panels.children[0]!;
+  const panelB = panels.children[1]!;
+  if (panelA.children[0]?.props.text !== "A" || panelA.children[1] !== bodyA) {
+    throw new Error("panel A must show header + body");
+  }
+  if (childCount(panelB) !== 1 || panelB.children[0]?.props.text !== "B") {
+    throw new Error("collapsed panel B must hide its body");
+  }
+  if (headerBold(panelB) !== true || headerBold(panelA) !== false) {
+    throw new Error("only the active panel's header is bold");
+  }
+  // Panels are manageable: collapse/expand/toggle round-trip.
+  togglePanel(panels, 0);
+  if (childCount(panelA) !== 1) throw new Error("toggle must collapse panel A");
+  expandPanel(panels, 0);
+  if (childCount(panelA) !== 2) throw new Error("expand must restore the body");
+  collapsePanel(panels, 0);
+  if (childCount(panelA) !== 1) throw new Error("collapse must detach the body");
+  focusPanel(panels, 0);
+  if (headerBold(panelA) !== true || headerBold(panelB) !== false) {
+    throw new Error("focusPanel must restyle the headers");
+  }
+
+  // The renderer surface also maps the roadmap tags (as empty elements).
+  if (createElement("input").type !== "input") throw new Error("createElement(input) mapping");
+  if (createElement("spinner").type !== "spinner") throw new Error("createElement(spinner) mapping");
+  if (createElement("status_bar").type !== "status_bar") {
+    throw new Error("createElement(status_bar) mapping");
+  }
+  if (createElement("panels").type !== "panels") throw new Error("createElement(panels) mapping");
+});
+
+// ---------------------------------------------------------------------------
+// Parity: Solid renders the same element set as React
+// ---------------------------------------------------------------------------
+
+/**
+ * A canonical, order-independent snapshot of a scene node tree: `type`, the
+ * sorted `props`, and the serialized children. Two snapshots are equal iff the
+ * scene structures are identical.
+ */
+interface SceneSnapshot {
+  type: string;
+  props: Record<string, unknown>;
+  children: SceneSnapshot[];
+}
+
+function snapshot(node: Node): SceneSnapshot {
+  const props: Record<string, unknown> = {};
+  for (const key of Object.keys(node.props).sort()) props[key] = node.props[key];
+  return {
+    type: node.type,
+    props,
+    children: node.children.map((child) => snapshot(child)),
+  };
+}
+
+function snapshotsEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== "object" || a === null || typeof b !== "object" || b === null) return false;
+  const aKeys = Object.keys(a as Record<string, unknown>);
+  const bKeys = Object.keys(b as Record<string, unknown>);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    const av = (a as Record<string, unknown>)[key];
+    const bv = (b as Record<string, unknown>)[key];
+    if (!(key in (b as Record<string, unknown>)) || !snapshotsEqual(av, bv)) return false;
+  }
+  return true;
+}
+
+/**
+ * Parity: for identical props, the Solid factories produce the same scene
+ * node structure the React host components do.
+ *
+ * The React side materializes its host elements through
+ * `hostConfig.createInstance(type, props)` -> `toNodeProps(props, type)` ->
+ * the @tern/core factory of the same name (packages/react/src/reconciler.ts).
+ * `toNodeProps` strips the React-only keys (`children`/`key`/`ref` and the
+ * component-consumed keys), so for a props object carrying only tern node
+ * props the React-rendered node is exactly the core factory output. Asserting
+ * Solid.factory(props) === Core.factory(props) for the whole element set
+ * therefore proves Solid renders the same element set as React. (React itself
+ * is not imported here — importing it requires `--allow-env=NODE_ENV`, which
+ * would break the plain `deno test packages/solid/src` invocation.)
+ */
+Deno.test("parity: solid renders the same scene structure as react's materialization baseline", () => {
+  const panelsSpec = [
+    { header: "A", body: CoreBox() },
+    { header: "B", body: CoreBox(), collapsed: true },
+  ];
+
+  // The React baseline: the @tern/core factories (what React's hostConfig
+  // materializes) built into the same tree shape.
+  const coreRoot = CoreBox();
+  coreRoot.addChild(
+    CoreBox(
+      { border_style: "rounded" },
+      CoreText({ text: "hello", bold: true }),
+      CoreInput({ value: "hi", caret: 1, placeholder: "type…" }),
+      CoreSpinner({ value: 5, max: 10, width: 8 }),
+      CoreStatusBar({ left: "L", right: "R" }),
+      CorePanels({ panels: panelsSpec, active: 1 }),
+    ),
+  );
+
+  // The Solid tree: the same element set, same props, mounted through the
+  // universal renderer onto a detached root.
+  const solidHost = Box();
+  const dispose = render(
+    () =>
+      Box({
+        border_style: "rounded",
+        children: [
+          Text({ text: "hello", bold: true }),
+          Input({ value: "hi", caret: 1, placeholder: "type…" }),
+          Spinner({ value: 5, max: 10, width: 8 }),
+          StatusBar({ left: "L", right: "R" }),
+          Panels({ panels: panelsSpec, active: 1 }),
+        ],
+      }),
+    solidHost,
+  );
+
+  const coreScene = snapshot(coreRoot.children[0]!);
+  const solidScene = snapshot(solidHost.children[0]!);
+  if (!snapshotsEqual(solidScene, coreScene)) {
+    throw new Error(
+      `parity mismatch — solid scene differs from react's materialization baseline:\n` +
+        `solid: ${JSON.stringify(solidScene)}\n` +
+        `react baseline: ${JSON.stringify(coreScene)}`,
+    );
+  }
+  dispose();
+});
+
+// ---------------------------------------------------------------------------
+// Focus routing: subscribeInput + useFocus + editKey
+// ---------------------------------------------------------------------------
+
+/** A fake core Renderer over a detached root: no native calls. */
+function mockRenderer(): {
+  renderer: Renderer;
+  root: Node;
+  renderCalls: number[];
+  keyHandlers: Set<(event: KeyEvent) => void>;
+} {
+  const renderCalls: number[] = [];
+  const keyHandlers = new Set<(event: KeyEvent) => void>();
+  const root = Box();
+  const renderer = {
+    root,
+    render: () => {
+      renderCalls.push(renderCalls.length);
+    },
+    onKey: (handler: (event: KeyEvent) => void) => {
+      keyHandlers.add(handler);
+      return () => keyHandlers.delete(handler);
+    },
+    destroy: () => {},
+  } as unknown as Renderer;
+  return { renderer, root, renderCalls, keyHandlers };
+}
+
+function keyEvent(over: Partial<KeyEvent> = {}): KeyEvent {
+  return { name: "char", char: "q", ctrl: false, alt: false, shift: false, ...over };
+}
+
+Deno.test("subscribeInput routes keys through the FocusManager to a focused input", () => {
+  const { renderer, keyHandlers } = mockRenderer();
+  const manager = new FocusManager();
+  const input = Input({ value: "", caret: 0 });
+  const changes: Array<{ value: string; caret: number }> = [];
+  const submits: Array<{ value: string; caret: number }> = [];
+  // Length read through a function: TS narrows a const-typed empty array's
+  // `length` to 0 (the pushes happen inside closures it cannot see).
+  const changeCount = () => changes.length;
+  const submitCount = () => submits.length;
+
+  // Register the input node with the manager: routed keys edit it via the
+  // core `editKey`, firing onChange/onSubmit like React's <Input focusId>.
+  const focusHandle = useFocus("main", input, (event) => {
+    const before = input.props;
+    const next = editKey(input, event);
+    if (event.name === "enter") {
+      submits.push({ value: next.value, caret: next.caret });
+    } else if (next.value !== before.value || next.caret !== before.caret) {
+      changes.push({ value: next.value, caret: next.caret });
+    }
+  }, manager);
+
+  // The tree-level key subscription: each key routes through the manager
+  // before falling back to its own (no-op) handler.
+  const dispose = subscribeInput(renderer, () => {}, { focusManager: manager });
+
+  if (keyHandlers.size !== 1) throw new Error(`expected 1 key handler, got ${keyHandlers.size}`);
+  if (!manager.has("main")) throw new Error("useFocus must register the id");
+
+  // Not focused: keys fall through to the tree handler (a no-op here).
+  for (const handler of keyHandlers) handler(keyEvent({ char: "a" }));
+  if (changeCount() !== 0) throw new Error("unfocused input must not receive keys");
+
+  // Focused: keys route to the input's handler and edit the node.
+  if (!manager.focus("main")) throw new Error("focus(main) must succeed");
+  for (const handler of keyHandlers) handler(keyEvent({ char: "a" }));
+  for (const handler of keyHandlers) handler(keyEvent({ char: "b" }));
+  if (changeCount() !== 2) throw new Error(`onChange count = ${changeCount()}`);
+  if (changes[0]!.value !== "a" || changes[1]!.value !== "ab") {
+    throw new Error(`onChange values = ${changes.map((c) => c.value).join(",")}`);
+  }
+  if (changes[1]!.caret !== 2) throw new Error(`caret = ${changes[1]!.caret}`);
+  // The routed edits land on the scene node itself.
+  if (input.props.value !== "ab" || input.props.caret !== 2) {
+    throw new Error(`node edited = ${input.props.value}/${input.props.caret}`);
+  }
+
+  // Enter routes to the submit path with the current value.
+  for (const handler of keyHandlers) handler(keyEvent({ name: "enter" }));
+  if (submitCount() !== 1 || submits[0]!.value !== "ab") {
+    throw new Error(`onSubmit = ${JSON.stringify(submits)}`);
+  }
+
+  dispose();
+  if (keyHandlers.size >= 1) throw new Error("key handler must be detached on dispose");
+  focusHandle.dispose();
+  if (manager.has("main")) throw new Error("input must unregister on dispose");
+  if (manager.activeId !== null) throw new Error("active focus must clear on unregister");
+});
+
+Deno.test("subscribeInput defaults to the shared focusManager and skips routing when focused", () => {
+  const { renderer, keyHandlers } = mockRenderer();
+  const input = Input({ value: "" });
+  const handled: KeyEvent[] = [];
+
+  // No explicit manager: the core `focusManager` singleton is used.
+  const focusHandle = useFocus("shared", input, (event) => handled.push(event));
+  const dispose = subscribeInput(renderer, () => {
+    throw new Error("tree handler must not run while a focused element handles keys");
+  });
+
+  if (keyHandlers.size !== 1) throw new Error(`expected 1 key handler, got ${keyHandlers.size}`);
+  // Unfocused: the tree handler runs (would throw — so expect it not to).
+  // Focus the element: the routed key must reach the element, not the handler.
+  if (!focusManager.focus("shared")) throw new Error("focus(shared) must succeed");
+  for (const handler of keyHandlers) handler(keyEvent({ char: "x" }));
+  if (handled.length !== 1 || handled[0]!.char !== "x") {
+    throw new Error(`routed hits = ${handled.length}`);
+  }
+
+  dispose();
+  focusHandle.dispose();
+  focusManager.blur();
+});
+
+Deno.test("subscribeInput with isActive: false stays detached", () => {
+  const { renderer, keyHandlers } = mockRenderer();
+  const dispose = subscribeInput(renderer, () => {}, { isActive: false });
+  if (keyHandlers.size !== 0) throw new Error("inactive subscription must not register a handler");
+  dispose();
+});
+
+// ---------------------------------------------------------------------------
+// removeNode bookkeeping: getNextSibling/getFirstChild stay correct
+// ---------------------------------------------------------------------------
+
+Deno.test("removeNode keeps getFirstChild/getNextSibling correct after removals", () => {
+  const parent = createElement("box");
+  const a = createTextNode("a");
+  const b = createTextNode("b");
+  const c = createTextNode("c");
+  rendererOptions.insertNode(parent, a);
+  rendererOptions.insertNode(parent, b);
+  rendererOptions.insertNode(parent, c);
+
+  // Remove the middle sibling: traversal must skip it entirely.
+  rendererOptions.removeNode(parent, b);
+  if (rendererOptions.getFirstChild(parent) !== a) {
+    throw new Error("getFirstChild must still be a");
+  }
+  if (rendererOptions.getNextSibling(a) !== c) {
+    throw new Error("a's next sibling must be c once b is removed");
+  }
+  if (rendererOptions.getParentNode(b) !== undefined) {
+    throw new Error("removed node's parent registry entry must be cleared");
+  }
+  if (rendererOptions.getNextSibling(b) !== undefined) {
+    throw new Error("removed node must not resolve a sibling");
+  }
+  if (parent.children.length !== 2 || parent.children.includes(b)) {
+    throw new Error("parent.children must mirror the removal");
+  }
+
+  // Remove the first: getFirstChild advances.
+  rendererOptions.removeNode(parent, a);
+  if (rendererOptions.getFirstChild(parent) !== c) {
+    throw new Error("getFirstChild must advance to c");
+  }
+  if (rendererOptions.getNextSibling(c) !== undefined) {
+    throw new Error("c must be the last sibling");
+  }
+
+  // Remove the last: the parent is empty.
+  rendererOptions.removeNode(parent, c);
+  if (rendererOptions.getFirstChild(parent) !== undefined) {
+    throw new Error("an emptied parent must have no first child");
+  }
+  if (parent.children.length >= 1) throw new Error("parent children must be empty");
+});
+
+Deno.test("replaceNode is fully reflected in parent.children (no stale entry)", () => {
+  const parent = createElement("box");
+  const a = createTextNode("a");
+  const b = createTextNode("b");
+  rendererOptions.insertNode(parent, a);
+  rendererOptions.insertNode(parent, b);
+
+  const x = createTextNode("x");
+  replaceNode(x, a);
+
+  // `x` takes `a`'s slot and `a` is spliced out: [x, b], and the traversal
+  // callbacks agree.
+  const children = parent.children;
+  if (children.length !== 2 || children[0] !== x || children[1] !== b) {
+    throw new Error(`children after replace = ${children.map((n) => n.props.text).join(",")}`);
+  }
+  if (rendererOptions.getFirstChild(parent) !== x) {
+    throw new Error("getFirstChild must be the replacement");
+  }
+  if (rendererOptions.getNextSibling(x) !== b) {
+    throw new Error("replacement's next sibling must be b");
+  }
+  if (rendererOptions.getParentNode(a) !== undefined) {
+    throw new Error("replaced node's registry entry must be cleared");
+  }
 });
