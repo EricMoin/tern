@@ -61,25 +61,27 @@ export declare class NodeHandle {
  */
 export declare class TuiRenderer {
   /**
-   * Enter raw mode + the alternate screen, ready to render.
+   * Enter raw mode + the alternate screen, ready to render. Mouse and
+   * focus-change event delivery is enabled so `poll_events` can surface
+   * them.
    *
-   * If either terminal transition fails the other is rolled back before
-   * the error is returned, so a failed constructor never leaves the
-   * terminal in raw mode.
+   * If any terminal transition fails the already-entered states are rolled
+   * back before the error is returned, so a failed constructor never leaves
+   * the terminal in raw mode.
    */
   constructor(options: TuiRendererOptions)
   /** A handle to the scene root, to attach content under. */
   root(): NodeHandle
   /**
-   * Block up to `timeout_ms` for input, returning every key event that
-   * arrived in that window (a burst of keys comes back as one batch).
+   * Block up to `timeout_ms` for input, returning every event that arrived
+   * in that window (a burst of events comes back as one batch).
    *
-   * Resize and focus events are dropped in the MVP binding (spec: key
-   * events only). With `exit_on_ctrl_c` enabled, a Ctrl+C press tears the
-   * renderer down instead of being returned; subsequent calls error until
-   * a new renderer is constructed.
+   * Key, resize, focus, and mouse events are all surfaced (mouse and focus
+   * delivery is enabled in the constructor). With `exit_on_ctrl_c` enabled,
+   * a Ctrl+C press tears the renderer down instead of being returned;
+   * subsequent calls error until a new renderer is constructed.
    */
-  poll_events(timeoutMs: number): Array<KeyEvent>
+  poll_events(timeoutMs: number): Array<TernEventJs>
   /**
    * Paint the shared scene into a fresh buffer at the current terminal
    * size and flush the minimal diff (vs the previous frame) to the
@@ -87,8 +89,9 @@ export declare class TuiRenderer {
    */
   render(): void
   /**
-   * Leave the alternate screen and raw mode, restoring the terminal. Safe
-   * to call more than once; a destroyed renderer cannot render or poll.
+   * Leave the alternate screen and raw mode and stop event listening,
+   * restoring the terminal. Safe to call more than once; a destroyed
+   * renderer cannot render or poll.
    */
   destroy(): void
   /**
@@ -126,6 +129,58 @@ export interface KeyEvent {
   alt: boolean
   /** Whether Shift was held. */
   shift: boolean
+}
+
+/**
+ * A mouse event surfaced to JS as a plain object.
+ *
+ * `kind` encodes both the action and — where relevant — the button, so no
+ * button information is lost: `"down_left"`, `"up_right"`,
+ * `"drag_middle"`, `"moved"`, `"scroll_up"`, `"scroll_down"`,
+ * `"scroll_left"`, `"scroll_right"`. `column` / `row` are the cell the
+ * event occurred on (0-based); `ctrl` / `alt` / `shift` are the held
+ * modifiers.
+ */
+export interface MouseEventJs {
+  /**
+   * The action + button, e.g. `"down_left"`, `"up_right"`,
+   * `"drag_middle"`, `"moved"`, `"scroll_up"`.
+   */
+  kind: string
+  /** The column the event occurred on (0-based). */
+  column: number
+  /** The row the event occurred on (0-based). */
+  row: number
+  /** Whether Control was held. */
+  ctrl: boolean
+  /** Whether Alt (Option) was held. */
+  alt: boolean
+  /** Whether Shift was held. */
+  shift: boolean
+}
+
+/**
+ * A terminal event surfaced to JS as a tagged-union plain object: `type`
+ * discriminates (`"key"`, `"resize"`, `"focus"`, `"mouse"`) and exactly one
+ * of `key` / `width`+`height` / `focus_gained` / `mouse` is set. For
+ * `"focus"`, `focus_gained` is `true` on gained and `false` on lost.
+ */
+export interface TernEventJs {
+  /** The event kind: `"key"`, `"resize"`, `"focus"`, or `"mouse"`. */
+  type: string
+  /** The key event, when `type` is `"key"`. */
+  key?: KeyEvent
+  /** The new width in columns, when `type` is `"resize"`. */
+  width?: number
+  /** The new height in rows, when `type` is `"resize"`. */
+  height?: number
+  /**
+   * Whether focus was gained (`true`) or lost (`false`), when `type` is
+   * `"focus"`.
+   */
+  focus_gained?: boolean
+  /** The mouse event, when `type` is `"mouse"`. */
+  mouse?: MouseEventJs
 }
 
 /** Constructor options for [`TuiRenderer`]. */

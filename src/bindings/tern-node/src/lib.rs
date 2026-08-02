@@ -6,8 +6,9 @@
 //! * **`TuiRenderer`** — owns the terminal lifecycle (raw mode + alternate
 //!   screen via tern-terminal), the scene, and the render loop: `root()`
 //!   returns a handle to the scene root, `poll_events(timeout_ms)` returns
-//!   the keys pressed since the last poll, `render()` paints the scene to the
-//!   terminal, and `destroy()` tears the terminal state back down.
+//!   the events since the last poll (keys, resizes, focus changes, and
+//!   mouse), `render()` paints the scene to the terminal, and `destroy()`
+//!   tears the terminal state back down.
 //! * **Scene construction** — `create_node(type, props)` builds a node
 //!   handle (backed by the tern-components node model), and `NodeHandle`
 //!   methods (`add_child` / `remove` / `set_props`) mutate the shared scene
@@ -39,7 +40,7 @@ use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene, Span};
 use tern_core::style::{BorderStyle, Modifiers, Style};
 use tern_core::{Color, Size};
 use tern_terminal::backend::Backend;
-use tern_terminal::event::{self, KeyName, TernEvent, TernKey};
+use tern_terminal::event::{self, KeyName, MouseButton, MouseEventKind, TernEvent, TernKey, TernMouse};
 
 /// The one module-global scene tree. Both node construction and rendering
 /// operate on it (see module docs for the ownership rationale).
@@ -79,6 +80,133 @@ impl KeyEvent {
     }
 }
 
+/// A mouse event surfaced to JS as a plain object.
+///
+/// `kind` encodes both the action and — where relevant — the button, so no
+/// button information is lost: `"down_left"`, `"up_right"`,
+/// `"drag_middle"`, `"moved"`, `"scroll_up"`, `"scroll_down"`,
+/// `"scroll_left"`, `"scroll_right"`. `column` / `row` are the cell the
+/// event occurred on (0-based); `ctrl` / `alt` / `shift` are the held
+/// modifiers.
+#[napi(object)]
+pub struct MouseEventJs {
+    /// The action + button, e.g. `"down_left"`, `"up_right"`,
+    /// `"drag_middle"`, `"moved"`, `"scroll_up"`.
+    pub kind: String,
+    /// The column the event occurred on (0-based).
+    pub column: u16,
+    /// The row the event occurred on (0-based).
+    pub row: u16,
+    /// Whether Control was held.
+    pub ctrl: bool,
+    /// Whether Alt (Option) was held.
+    pub alt: bool,
+    /// Whether Shift was held.
+    pub shift: bool,
+}
+
+impl MouseEventJs {
+    fn from_tern(mouse: TernMouse) -> Self {
+        let kind = match mouse.kind {
+            MouseEventKind::Down(button) => format!("down_{}", mouse_button_str(button)),
+            MouseEventKind::Up(button) => format!("up_{}", mouse_button_str(button)),
+            MouseEventKind::Drag(button) => format!("drag_{}", mouse_button_str(button)),
+            MouseEventKind::Moved => "moved".to_string(),
+            MouseEventKind::ScrollDown => "scroll_down".to_string(),
+            MouseEventKind::ScrollUp => "scroll_up".to_string(),
+            MouseEventKind::ScrollLeft => "scroll_left".to_string(),
+            MouseEventKind::ScrollRight => "scroll_right".to_string(),
+        };
+        Self {
+            kind,
+            column: mouse.column,
+            row: mouse.row,
+            ctrl: mouse.ctrl,
+            alt: mouse.alt,
+            shift: mouse.shift,
+        }
+    }
+}
+
+/// The JS-facing name of a mouse button.
+fn mouse_button_str(button: MouseButton) -> &'static str {
+    match button {
+        MouseButton::Left => "left",
+        MouseButton::Right => "right",
+        MouseButton::Middle => "middle",
+    }
+}
+
+/// A terminal event surfaced to JS as a tagged-union plain object: `type`
+/// discriminates (`"key"`, `"resize"`, `"focus"`, `"mouse"`) and exactly one
+/// of `key` / `width`+`height` / `focus_gained` / `mouse` is set. For
+/// `"focus"`, `focus_gained` is `true` on gained and `false` on lost.
+#[napi(object)]
+pub struct TernEventJs {
+    /// The event kind: `"key"`, `"resize"`, `"focus"`, or `"mouse"`.
+    #[napi(js_name = "type")]
+    pub r#type: String,
+    /// The key event, when `type` is `"key"`.
+    pub key: Option<KeyEvent>,
+    /// The new width in columns, when `type` is `"resize"`.
+    pub width: Option<u16>,
+    /// The new height in rows, when `type` is `"resize"`.
+    pub height: Option<u16>,
+    /// Whether focus was gained (`true`) or lost (`false`), when `type` is
+    /// `"focus"`.
+    #[napi(js_name = "focus_gained")]
+    pub focus_gained: Option<bool>,
+    /// The mouse event, when `type` is `"mouse"`.
+    pub mouse: Option<MouseEventJs>,
+}
+
+impl TernEventJs {
+    fn from_tern(ev: TernEvent) -> Self {
+        match ev {
+            TernEvent::Key(key) => Self {
+                r#type: "key".to_string(),
+                key: Some(KeyEvent::from_tern(key)),
+                width: None,
+                height: None,
+                focus_gained: None,
+                mouse: None,
+            },
+            TernEvent::Resize { w, h } => Self {
+                r#type: "resize".to_string(),
+                key: None,
+                width: Some(w),
+                height: Some(h),
+                focus_gained: None,
+                mouse: None,
+            },
+            TernEvent::FocusGained => Self {
+                r#type: "focus".to_string(),
+                key: None,
+                width: None,
+                height: None,
+                focus_gained: Some(true),
+                mouse: None,
+            },
+            TernEvent::FocusLost => Self {
+                r#type: "focus".to_string(),
+                key: None,
+                width: None,
+                height: None,
+                focus_gained: Some(false),
+                mouse: None,
+            },
+            TernEvent::Mouse(mouse) => Self {
+                r#type: "mouse".to_string(),
+                key: None,
+                width: None,
+                height: None,
+                focus_gained: None,
+                mouse: Some(MouseEventJs::from_tern(mouse)),
+            },
+        }
+    }
+}
+
 /// Constructor options for [`TuiRenderer`].
 #[napi(object)]
 pub struct TuiRendererOptions {
@@ -107,11 +235,13 @@ struct RendererInner {
 
 #[napi]
 impl TuiRenderer {
-    /// Enter raw mode + the alternate screen, ready to render.
+    /// Enter raw mode + the alternate screen, ready to render. Mouse and
+    /// focus-change event delivery is enabled so `poll_events` can surface
+    /// them.
     ///
-    /// If either terminal transition fails the other is rolled back before
-    /// the error is returned, so a failed constructor never leaves the
-    /// terminal in raw mode.
+    /// If any terminal transition fails the already-entered states are rolled
+    /// back before the error is returned, so a failed constructor never leaves
+    /// the terminal in raw mode.
     #[napi(constructor, js_name = "TuiRenderer")]
     pub fn new(options: TuiRendererOptions) -> Result<Self> {
         let backend = Backend::new();
@@ -122,6 +252,13 @@ impl TuiRenderer {
             let _ = backend.exit_raw_mode();
             return Err(Error::from_reason(format!(
                 "enter alternate screen: {e}"
+            )));
+        }
+        if let Err(e) = backend.enable_event_listening() {
+            let _ = backend.exit_alt_screen();
+            let _ = backend.exit_raw_mode();
+            return Err(Error::from_reason(format!(
+                "enable event listening: {e}"
             )));
         }
         Ok(Self {
@@ -145,15 +282,15 @@ impl TuiRenderer {
         NodeHandle::materialized(scene, id, NodeKind::Root, Style::new(), PropMap::new())
     }
 
-    /// Block up to `timeout_ms` for input, returning every key event that
-    /// arrived in that window (a burst of keys comes back as one batch).
+    /// Block up to `timeout_ms` for input, returning every event that arrived
+    /// in that window (a burst of events comes back as one batch).
     ///
-    /// Resize and focus events are dropped in the MVP binding (spec: key
-    /// events only). With `exit_on_ctrl_c` enabled, a Ctrl+C press tears the
-    /// renderer down instead of being returned; subsequent calls error until
-    /// a new renderer is constructed.
+    /// Key, resize, focus, and mouse events are all surfaced (mouse and focus
+    /// delivery is enabled in the constructor). With `exit_on_ctrl_c` enabled,
+    /// a Ctrl+C press tears the renderer down instead of being returned;
+    /// subsequent calls error until a new renderer is constructed.
     #[napi(js_name = "poll_events")]
-    pub fn poll_events(&self, timeout_ms: u32) -> Result<Vec<KeyEvent>> {
+    pub fn poll_events(&self, timeout_ms: u32) -> Result<Vec<TernEventJs>> {
         let mut inner = self.inner.lock().expect("renderer inner poisoned");
         if inner.destroyed {
             return Err(Error::from_reason("renderer is destroyed"));
@@ -162,19 +299,15 @@ impl TuiRenderer {
             .map_err(|e| Error::from_reason(format!("poll events: {e}")))?;
         let mut out = Vec::new();
         for ev in events {
-            // Resize / focus events are dropped in the MVP binding (spec:
-            // `poll_events` returns key events only).
-            let TernEvent::Key(key) = ev else {
-                continue;
-            };
-            let ctrl_c = key.ctrl && key.char == Some('c');
+            let ctrl_c = matches!(&ev, TernEvent::Key(key) if key.ctrl && key.char == Some('c'));
             if inner.exit_on_ctrl_c && ctrl_c {
+                let _ = inner.backend.disable_event_listening();
                 let _ = inner.backend.exit_alt_screen();
                 let _ = inner.backend.exit_raw_mode();
                 inner.destroyed = true;
                 return Ok(out);
             }
-            out.push(KeyEvent::from_tern(key));
+            out.push(TernEventJs::from_tern(ev));
         }
         Ok(out)
     }
@@ -210,14 +343,16 @@ impl TuiRenderer {
         Ok(())
     }
 
-    /// Leave the alternate screen and raw mode, restoring the terminal. Safe
-    /// to call more than once; a destroyed renderer cannot render or poll.
+    /// Leave the alternate screen and raw mode and stop event listening,
+    /// restoring the terminal. Safe to call more than once; a destroyed
+    /// renderer cannot render or poll.
     #[napi(js_name = "destroy")]
     pub fn destroy(&self) -> Result<()> {
         let mut inner = self.inner.lock().expect("renderer inner poisoned");
         if inner.destroyed {
             return Ok(());
         }
+        let _ = inner.backend.disable_event_listening();
         let _ = inner.backend.exit_alt_screen();
         let _ = inner.backend.exit_raw_mode();
         inner.destroyed = true;
@@ -633,6 +768,122 @@ mod tests {
         let enter = KeyEvent::from_tern(TernKey::new(KeyName::Enter, None, false, false, false));
         assert_eq!(enter.name, "enter");
         assert!(enter.char.is_none());
+    }
+
+    #[test]
+    fn tern_event_js_resize_maps() {
+        let ev = TernEventJs::from_tern(TernEvent::Resize { w: 120, h: 40 });
+        assert_eq!(ev.r#type, "resize");
+        assert_eq!(ev.width, Some(120));
+        assert_eq!(ev.height, Some(40));
+        assert!(ev.key.is_none());
+        assert!(ev.focus_gained.is_none());
+        assert!(ev.mouse.is_none());
+    }
+
+    #[test]
+    fn tern_event_js_focus_maps() {
+        let gained = TernEventJs::from_tern(TernEvent::FocusGained);
+        assert_eq!(gained.r#type, "focus");
+        assert_eq!(gained.focus_gained, Some(true));
+        assert!(gained.key.is_none());
+        assert!(gained.width.is_none());
+        assert!(gained.height.is_none());
+        assert!(gained.mouse.is_none());
+
+        let lost = TernEventJs::from_tern(TernEvent::FocusLost);
+        assert_eq!(lost.r#type, "focus");
+        assert_eq!(lost.focus_gained, Some(false));
+    }
+
+    #[test]
+    fn tern_event_js_mouse_maps_with_modifiers() {
+        let mouse = TernMouse {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row: 4,
+            ctrl: true,
+            alt: false,
+            shift: true,
+        };
+        let ev = TernEventJs::from_tern(TernEvent::Mouse(mouse));
+        assert_eq!(ev.r#type, "mouse");
+        let js = ev.mouse.expect("mouse payload present");
+        assert_eq!(js.kind, "down_left");
+        assert_eq!(js.column, 3);
+        assert_eq!(js.row, 4);
+        assert!(js.ctrl);
+        assert!(!js.alt);
+        assert!(js.shift);
+        assert!(ev.key.is_none());
+        assert!(ev.width.is_none());
+        assert!(ev.height.is_none());
+        assert!(ev.focus_gained.is_none());
+    }
+
+    #[test]
+    fn mouse_kind_encoding_is_lossless() {
+        // Every tern mouse kind must map to a distinct, button-preserving
+        // `kind` string.
+        let encode = |kind: MouseEventKind| {
+            MouseEventJs::from_tern(TernMouse {
+                kind,
+                column: 0,
+                row: 0,
+                ctrl: false,
+                alt: false,
+                shift: false,
+            })
+            .kind
+        };
+        assert_eq!(encode(MouseEventKind::Down(MouseButton::Left)), "down_left");
+        assert_eq!(
+            encode(MouseEventKind::Down(MouseButton::Right)),
+            "down_right"
+        );
+        assert_eq!(
+            encode(MouseEventKind::Down(MouseButton::Middle)),
+            "down_middle"
+        );
+        assert_eq!(encode(MouseEventKind::Up(MouseButton::Left)), "up_left");
+        assert_eq!(encode(MouseEventKind::Up(MouseButton::Right)), "up_right");
+        assert_eq!(
+            encode(MouseEventKind::Up(MouseButton::Middle)),
+            "up_middle"
+        );
+        assert_eq!(
+            encode(MouseEventKind::Drag(MouseButton::Left)),
+            "drag_left"
+        );
+        assert_eq!(
+            encode(MouseEventKind::Drag(MouseButton::Right)),
+            "drag_right"
+        );
+        assert_eq!(
+            encode(MouseEventKind::Drag(MouseButton::Middle)),
+            "drag_middle"
+        );
+        assert_eq!(encode(MouseEventKind::Moved), "moved");
+        assert_eq!(encode(MouseEventKind::ScrollUp), "scroll_up");
+        assert_eq!(encode(MouseEventKind::ScrollDown), "scroll_down");
+        assert_eq!(encode(MouseEventKind::ScrollLeft), "scroll_left");
+        assert_eq!(encode(MouseEventKind::ScrollRight), "scroll_right");
+    }
+
+    #[test]
+    fn tern_event_js_key_maps() {
+        let key = TernKey::new(KeyName::Char, Some('q'), true, false, true);
+        let ev = TernEventJs::from_tern(TernEvent::Key(key));
+        assert_eq!(ev.r#type, "key");
+        let js = ev.key.expect("key payload present");
+        assert_eq!(js.name, "char");
+        assert_eq!(js.char.as_deref(), Some("q"));
+        assert!(js.ctrl);
+        assert!(js.shift);
+        assert!(ev.width.is_none());
+        assert!(ev.height.is_none());
+        assert!(ev.focus_gained.is_none());
+        assert!(ev.mouse.is_none());
     }
 
     #[test]
