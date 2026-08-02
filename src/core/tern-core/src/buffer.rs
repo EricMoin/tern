@@ -1,6 +1,10 @@
-//! The compositor's 2D cell grid, plus multi-width-aware minimal diff.
+//! The compositor's 2D cell grid, plus multi-width-aware minimal diff and
+//! region-aware drawing (clip rects and scroll offsets).
 
 use crate::cell::{char_width, Cell, CellUpdate};
+use crate::color::Color;
+use crate::cursor::Cursor;
+use crate::rect::Rect;
 use crate::style::Style;
 
 /// A fixed-size 2D grid of cells, indexed by (`x`, `y`) with the origin at
@@ -15,6 +19,60 @@ pub struct Buffer {
     /// Height in cells.
     pub height: u16,
     cells: Vec<Cell>,
+}
+
+/// A bounded drawing region: a clip rectangle plus a scroll offset.
+///
+/// Drawing "through" a region maps content coordinates (the coordinates used
+/// when painting, e.g. a laid-out node's rect) into buffer coordinates by
+/// subtracting the scroll offset, then rejects any cell that lands outside
+/// the clip rect. The clip rect therefore restricts drawing to a bounded
+/// region of the buffer, and the scroll offset shifts the content *inside*
+/// that region: with `scroll_y = 2`, content at row 2 renders at buffer row
+/// 0, and content rows 0-1 are clipped away (scrolled out of view).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Region {
+    /// The rectangle (in buffer coordinates) that drawing is restricted to.
+    pub clip: Rect,
+    /// Horizontal scroll offset in cells (content shifts left as it grows).
+    pub scroll_x: i32,
+    /// Vertical scroll offset in cells (content shifts up as it grows).
+    pub scroll_y: i32,
+}
+
+impl Region {
+    /// A region that clips to `clip` without scrolling.
+    pub const fn clip_only(clip: Rect) -> Self {
+        Self {
+            clip,
+            scroll_x: 0,
+            scroll_y: 0,
+        }
+    }
+
+    /// A region with a clip rect and a scroll offset.
+    pub const fn new(clip: Rect, scroll_x: i32, scroll_y: i32) -> Self {
+        Self {
+            clip,
+            scroll_x,
+            scroll_y,
+        }
+    }
+
+    /// The buffer column a content column maps to (before clipping).
+    pub const fn map_x(&self, x: i32) -> i32 {
+        x - self.scroll_x
+    }
+
+    /// The buffer row a content row maps to (before clipping).
+    pub const fn map_y(&self, y: i32) -> i32 {
+        y - self.scroll_y
+    }
+
+    /// Whether a content cell at (`x`, `y`) lands inside the clip rect.
+    pub const fn contains(&self, x: i32, y: i32) -> bool {
+        self.clip.contains(self.map_x(x), self.map_y(y))
+    }
 }
 
 impl Buffer {
@@ -112,6 +170,129 @@ impl Buffer {
             self.set_char(cx, y, ch, style);
             cx += w as u16;
         }
+    }
+
+    /// Write a single character at content position (`x`, `y`) through
+    /// `region`: the position is shifted by the region's scroll offset and
+    /// must land inside its clip rect (and the buffer). A wide character is
+    /// written only when both of its columns land inside the clip; otherwise
+    /// it is dropped whole (never truncated mid-glyph). Returns `false` when
+    /// nothing was written.
+    pub fn set_char_region(
+        &mut self,
+        x: i32,
+        y: i32,
+        ch: char,
+        style: Style,
+        region: Region,
+    ) -> bool {
+        let w = char_width(ch);
+        if w == 2 {
+            let bx = region.map_x(x);
+            let by = region.map_y(y);
+            // Both columns must land inside the clip and the buffer.
+            if bx < 0 || by < 0 || bx + 1 >= self.width as i32 || by >= self.height as i32 {
+                return false;
+            }
+            if !region.clip.contains(bx, by) || !region.clip.contains(bx + 1, by) {
+                return false;
+            }
+            let i = by as usize * self.width as usize + bx as usize;
+            self.cells[i] = Cell {
+                ch,
+                style,
+                width: 2,
+            };
+            self.cells[i + 1] = Cell::mask(style);
+            return true;
+        }
+        if w == 0 {
+            return false;
+        }
+        let bx = region.map_x(x);
+        let by = region.map_y(y);
+        if bx < 0 || by < 0 || bx >= self.width as i32 || by >= self.height as i32 {
+            return false;
+        }
+        if !region.clip.contains(bx, by) {
+            return false;
+        }
+        let i = by as usize * self.width as usize + bx as usize;
+        self.cells[i] = Cell {
+            ch,
+            style,
+            width: w,
+        };
+        true
+    }
+
+    /// Write a string through `region` starting at content position (`x`,
+    /// `y`), advancing the cursor by each character's display width. Writing
+    /// stops at the clip rect's right edge (in buffer coordinates) so no wide
+    /// character is ever truncated mid-glyph; combining marks (width 0) are
+    /// skipped, as in [`set_string`](Self::set_string).
+    pub fn set_string_region(
+        &mut self,
+        x: i32,
+        y: i32,
+        text: &str,
+        style: Style,
+        region: Region,
+    ) {
+        let mut cx = x;
+        for ch in text.chars() {
+            let w = char_width(ch);
+            if w == 0 {
+                continue;
+            }
+            // Stop when this glyph would cross the clip's right edge (buffer
+            // coordinates) — mirrors set_string's right-edge behaviour.
+            let bx = region.map_x(cx);
+            if bx + w as i32 > region.clip.right() {
+                break;
+            }
+            self.set_char_region(cx, y, ch, style, region);
+            cx += w as i32;
+        }
+    }
+
+    /// Paint a block caret into the buffer at the cursor's position.
+    ///
+    /// A no-op when the cursor is hidden or sits outside the buffer (returns
+    /// `false` in both cases). When visible, the cell under the cursor has
+    /// the caret's style merged over it: explicit foreground/background
+    /// colors from the caret replace the cell's, and the caret's modifiers
+    /// (typically [`Modifiers::REVERSED`]) are added to the cell's own, so
+    /// the diff emits the caret as part of the frame.
+    ///
+    /// The caret is never painted over a masked continuation cell (the
+    /// zero-width right half of a wide character): painting there would break
+    /// the wide glyph, so the call returns `false` instead.
+    pub fn render_caret(&mut self, cursor: Cursor) -> bool {
+        if !cursor.visible {
+            return false;
+        }
+        let Some(i) = self.index(cursor.x, cursor.y) else {
+            return false;
+        };
+        let cell = &mut self.cells[i];
+        if cell.is_masked() {
+            return false;
+        }
+        let fg = if cursor.style.fg == Color::Default {
+            cell.style.fg
+        } else {
+            cursor.style.fg
+        };
+        let bg = if cursor.style.bg == Color::Default {
+            cell.style.bg
+        } else {
+            cursor.style.bg
+        };
+        // Colors override when the caret sets them; the caret's modifiers are
+        // added on top of the cell's own (e.g. REVERSED on a bold title).
+        cell.style = cell.style.fg(fg).bg(bg).add_modifier(cursor.style.modifiers);
+        true
     }
 
     /// Resize the buffer to `width` x `height` cells. Content in the
@@ -235,6 +416,7 @@ pub fn diff(prev: &Buffer, next: &Buffer) -> Vec<CellUpdate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::style::Modifiers;
 
     /// A one-row buffer sized to the display width of `text`.
     fn string_row(text: &str) -> Buffer {
@@ -465,5 +647,245 @@ mod tests {
         for x in 0..3 {
             assert_eq!(b.cell(x, 0), Some(&Cell::default()));
         }
+    }
+
+    #[test]
+    fn render_caret_styles_the_cell_under_the_cursor() {
+        let mut b = Buffer::new(5, 1);
+        b.set_string(0, 0, "abc", Style::new());
+        let caret = Cursor::new(1, 0).styled(Style::new().add_modifier(Modifiers::REVERSED));
+        assert!(b.render_caret(caret));
+        // The character is untouched; the caret's modifier is added.
+        assert_eq!(b.cell(1, 0).unwrap().ch, 'b');
+        assert!(b.cell(1, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        // Neighboring cells are unaffected.
+        assert!(!b.cell(0, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        assert!(!b.cell(2, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn render_caret_adds_modifiers_to_the_cell_own() {
+        // A block caret over a bold cell stays bold: the caret's modifiers
+        // (REVERSED) are added on top of the cell's own (BOLD).
+        let mut b = Buffer::new(3, 1);
+        b.set_string(0, 0, "abc", Style::new().add_modifier(Modifiers::BOLD));
+        let caret = Cursor::new(0, 0).styled(Style::new().add_modifier(Modifiers::REVERSED));
+        assert!(b.render_caret(caret));
+        let m = b.cell(0, 0).unwrap().style.modifiers;
+        assert!(m.contains(Modifiers::BOLD));
+        assert!(m.contains(Modifiers::REVERSED));
+        // Neighboring cells keep exactly their own modifiers.
+        assert!(b.cell(1, 0).unwrap().style.modifiers.contains(Modifiers::BOLD));
+        assert!(!b.cell(1, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn render_caret_merges_explicit_colors_and_preserves_defaults() {
+        let mut b = Buffer::new(3, 1);
+        b.set_string(0, 0, "abc", Style::new().fg(Color::Indexed(7)));
+        // A caret with an explicit background and a modifier keeps the cell's
+        // foreground (Default means "leave it").
+        let caret = Cursor::new(0, 0).styled(
+            Style::new()
+                .bg(Color::Indexed(1))
+                .add_modifier(Modifiers::BOLD),
+        );
+        assert!(b.render_caret(caret));
+        let c = b.cell(0, 0).unwrap();
+        assert_eq!(c.style.fg, Color::Indexed(7)); // preserved
+        assert_eq!(c.style.bg, Color::Indexed(1)); // caret's bg applied
+        assert!(c.style.modifiers.contains(Modifiers::BOLD));
+
+        // An explicit caret foreground replaces the cell's.
+        let mut b2 = Buffer::new(1, 1);
+        b2.set_char(0, 0, 'x', Style::new().fg(Color::Rgb(1, 2, 3)));
+        let caret2 = Cursor::new(0, 0).styled(Style::new().fg(Color::Rgb(9, 9, 9)));
+        assert!(b2.render_caret(caret2));
+        assert_eq!(b2.cell(0, 0).unwrap().style.fg, Color::Rgb(9, 9, 9));
+        assert_eq!(b2.cell(0, 0).unwrap().style.bg, Color::Default);
+    }
+
+    #[test]
+    fn render_caret_hidden_and_out_of_bounds_are_noops() {
+        let mut b = Buffer::new(3, 1);
+        b.set_string(0, 0, "abc", Style::new());
+        let before = b.clone();
+
+        // A hidden caret paints nothing.
+        let hidden = Cursor::new(1, 0).hide().styled(Style::new().add_modifier(Modifiers::REVERSED));
+        assert!(!b.render_caret(hidden));
+        assert_eq!(b, before);
+
+        // Positions outside the buffer paint nothing.
+        assert!(!b.render_caret(Cursor::new(3, 0))); // x == width
+        assert!(!b.render_caret(Cursor::new(0, 1))); // y == height
+        assert_eq!(b, before);
+    }
+
+    #[test]
+    fn render_caret_skips_masked_continuation_cells() {
+        // The right half of a wide character is a masked cell; painting the
+        // caret there would corrupt the glyph, so it is refused.
+        let mut b = Buffer::new(4, 1);
+        b.set_string(0, 0, "コa", Style::new()); // コ at 0-1 (mask at 1), 'a' at 2
+        let caret = Cursor::new(1, 0).styled(Style::new().add_modifier(Modifiers::REVERSED));
+        assert!(!b.render_caret(caret));
+        assert!(b.cell(1, 0).unwrap().is_masked());
+        assert!(!b.cell(1, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+
+        // The caret still paints on real cells either side of the mask.
+        assert!(b.render_caret(Cursor::new(2, 0).styled(Style::new().add_modifier(Modifiers::REVERSED))));
+        assert!(b.cell(2, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn render_caret_then_diff_emits_the_caret_cell() {
+        let mut prev = Buffer::new(3, 1);
+        prev.set_string(0, 0, "abc", Style::new());
+        let mut next = prev.clone();
+        assert!(next.render_caret(Cursor::new(1, 0).styled(Style::new().add_modifier(Modifiers::REVERSED))));
+
+        let u = diff(&prev, &next);
+        // Only the caret cell changed: 'b' gains the REVERSED modifier.
+        assert_eq!(u.len(), 1);
+        assert_eq!((u[0].x, u[0].y), (1, 0));
+        assert_eq!(u[0].ch, 'b');
+        assert!(u[0].style.modifiers.contains(Modifiers::REVERSED));
+        assert!(!u[0].masked);
+
+        // A second render of the same caret produces no further updates.
+        let mut same = next.clone();
+        assert!(same.render_caret(Cursor::new(1, 0).styled(Style::new().add_modifier(Modifiers::REVERSED))));
+        assert!(diff(&next, &same).is_empty());
+    }
+
+    #[test]
+    fn region_clip_restricts_drawing_to_bounded_area() {
+        // A clip rect covering (1,1)-(3,2) inside a 5x4 buffer. Content at
+        // (2,1) renders at buffer (2,1); content outside the clip is dropped.
+        let region = Region::clip_only(Rect::new(1, 1, 2, 1));
+        let mut b = Buffer::new(5, 4);
+        assert!(b.set_char_region(2, 1, 'x', Style::new(), region));
+        assert_eq!(b.cell(2, 1).unwrap().ch, 'x');
+
+        // Out of bounds of the clip: left, right, above, below.
+        assert!(!b.set_char_region(0, 1, 'x', Style::new(), region));
+        assert!(!b.set_char_region(3, 1, 'x', Style::new(), region));
+        assert!(!b.set_char_region(2, 0, 'x', Style::new(), region));
+        assert!(!b.set_char_region(2, 2, 'x', Style::new(), region));
+        assert_eq!(b.cell(0, 1).unwrap(), &Cell::default());
+        assert_eq!(b.cell(3, 1).unwrap(), &Cell::default());
+    }
+
+    #[test]
+    fn region_clip_also_respects_buffer_bounds() {
+        // A clip rect larger than the buffer: writes still can't escape the
+        // buffer's own extent.
+        let region = Region::clip_only(Rect::new(0, 0, 100, 100));
+        let mut b = Buffer::new(3, 2);
+        assert!(b.set_char_region(2, 1, 'a', Style::new(), region));
+        assert!(!b.set_char_region(3, 0, 'x', Style::new(), region));
+        assert!(!b.set_char_region(0, 2, 'x', Style::new(), region));
+    }
+
+    #[test]
+    fn region_scroll_offset_shifts_content_inside_viewport() {
+        // A 3x2 viewport with scroll_y = 1: content at row 1 renders at
+        // buffer row 0; content rows 0 are scrolled out (clipped away).
+        let region = Region::new(Rect::new(0, 0, 3, 2), 0, 1);
+        let mut b = Buffer::new(3, 2);
+        assert!(!b.set_char_region(0, 0, 'x', Style::new(), region)); // scrolled out
+        assert!(b.set_char_region(0, 1, 'a', Style::new(), region));
+        assert!(b.set_char_region(1, 1, 'b', Style::new(), region));
+        assert!(b.set_char_region(2, 1, 'c', Style::new(), region));
+        assert_eq!(b.cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(b.cell(1, 0).unwrap().ch, 'b');
+        assert_eq!(b.cell(2, 0).unwrap().ch, 'c');
+        // Content row 2 maps to buffer row 1 — still inside the viewport.
+        assert!(b.set_char_region(0, 2, 'd', Style::new(), region));
+        assert_eq!(b.cell(0, 1).unwrap().ch, 'd');
+        // Content row 3 maps to buffer row 2 — outside the 2-row viewport.
+        assert!(!b.set_char_region(0, 3, 'x', Style::new(), region));
+        assert_eq!(b.cell(0, 1).unwrap().ch, 'd'); // unchanged
+    }
+
+    #[test]
+    fn region_horizontal_scroll_shifts_columns() {
+        // scroll_x = 1: content at column 1 renders at buffer column 0;
+        // content at column 0 is clipped away.
+        let region = Region::new(Rect::new(0, 0, 4, 1), 1, 0);
+        let mut b = Buffer::new(4, 1);
+        assert!(!b.set_char_region(0, 0, 'x', Style::new(), region));
+        assert!(b.set_char_region(1, 0, 'h', Style::new(), region));
+        assert!(b.set_char_region(2, 0, 'i', Style::new(), region));
+        assert!(b.set_char_region(3, 0, 'j', Style::new(), region));
+        assert_eq!(b.cell(0, 0).unwrap().ch, 'h');
+        assert_eq!(b.cell(1, 0).unwrap().ch, 'i');
+        assert_eq!(b.cell(2, 0).unwrap().ch, 'j');
+        // Content column 4 maps to buffer column 3 — fits.
+        assert!(b.set_char_region(4, 0, 'k', Style::new(), region));
+        assert_eq!(b.cell(3, 0).unwrap().ch, 'k');
+        // Content column 5 maps to buffer column 4 — outside the clip.
+        assert!(!b.set_char_region(5, 0, 'x', Style::new(), region));
+    }
+
+    #[test]
+    fn region_wide_char_needs_both_columns_inside_clip() {
+        // A wide char at content (0,0) needs buffer columns 0 and 1 inside a
+        // clip of width 3: it fits. At content (2,0) it would need columns 2
+        // and 3, but column 3 is outside the clip — dropped whole.
+        let region = Region::clip_only(Rect::new(0, 0, 3, 1));
+        let mut b = Buffer::new(3, 1);
+        assert!(b.set_char_region(0, 0, 'コ', Style::new(), region));
+        assert_eq!(b.cell(0, 0).unwrap().ch, 'コ');
+        assert_eq!(b.cell(0, 0).unwrap().width, 2);
+        assert!(b.cell(1, 0).unwrap().is_masked());
+        assert!(!b.set_char_region(2, 0, 'コ', Style::new(), region));
+        assert_eq!(b.cell(2, 0).unwrap(), &Cell::default());
+    }
+
+    #[test]
+    fn region_string_stops_at_clip_right_edge() {
+        // A 3-wide clip: "abcdef" paints only "abc".
+        let region = Region::clip_only(Rect::new(0, 0, 3, 1));
+        let mut b = Buffer::new(3, 1);
+        b.set_string_region(0, 0, "abcdef", Style::new(), region);
+        assert_eq!(b.cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(b.cell(1, 0).unwrap().ch, 'b');
+        assert_eq!(b.cell(2, 0).unwrap().ch, 'c');
+    }
+
+    #[test]
+    fn region_string_respects_scroll_and_clip() {
+        // A 4-wide viewport with scroll_y = 2: writing the string at content
+        // row 2 renders it at buffer row 0.
+        let region = Region::new(Rect::new(0, 0, 4, 1), 0, 2);
+        let mut b = Buffer::new(4, 1);
+        b.set_string_region(0, 2, "abcd", Style::new(), region);
+        assert_eq!(b.cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(b.cell(1, 0).unwrap().ch, 'b');
+        assert_eq!(b.cell(2, 0).unwrap().ch, 'c');
+        assert_eq!(b.cell(3, 0).unwrap().ch, 'd');
+
+        // A row that is scrolled out paints nothing.
+        let mut b2 = Buffer::new(4, 1);
+        b2.set_string_region(0, 1, "abcd", Style::new(), region);
+        for x in 0..4 {
+            assert_eq!(b2.cell(x, 0).unwrap(), &Cell::default());
+        }
+    }
+
+    #[test]
+    fn region_clip_offsets_and_scrolls_from_origin() {
+        // Clip at (1,1) sized 2x1, scroll (1,0): content at (2,1) maps to
+        // buffer (1,1) — inside the clip; content at (1,1) maps to buffer
+        // (0,1) — outside the clip's left edge.
+        let region = Region::new(Rect::new(1, 1, 2, 1), 1, 0);
+        let mut b = Buffer::new(4, 3);
+        assert!(!b.set_char_region(1, 1, 'x', Style::new(), region));
+        assert!(b.set_char_region(2, 1, 'y', Style::new(), region));
+        assert_eq!(b.cell(1, 1).unwrap().ch, 'y');
+        assert!(b.set_char_region(3, 1, 'z', Style::new(), region));
+        assert_eq!(b.cell(2, 1).unwrap().ch, 'z');
     }
 }
