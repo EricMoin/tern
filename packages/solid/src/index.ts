@@ -14,15 +14,16 @@
  * exposed as a standalone convenience helper below rather than as an
  * options key:
  *
- * - `createElement(type)`        -> tern node factory (`Box`/`Text`/`StreamingText`)
+ * - `createElement(type)`        -> tern node factory (`Box`/`Text`/`StreamingText`
+ *   and the roadmap elements `Input`/`Spinner`/`StatusBar`/`Panels`)
  * - `createTextNode(value)`      -> `Text` node
  * - `replaceText`/`isTextNode`   -> text content re-point / type check
  * - `insertNode`/`removeNode`    -> tree ops (`Node.insertBefore`/`Node.addChild` / `Node.remove`)
  * - `replaceNode` (convenience)  -> position-accurate in-parent replacement
  * - `setProperty`                -> `Node.setProps` (feeds the runtime's `setProp`/`spread`)
  * - `getParentNode`/`getFirstChild`/`getNextSibling` -> tree traversal
- *   (best-effort: @tern/core `Node` does not track parents or siblings yet,
- *   so a `WeakMap` registry records parents as nodes are inserted)
+ *   (best-effort: @tern/core `Node` exposes `children` but no parent/sibling
+ *   accessors, so a `WeakMap` registry records parents as nodes are inserted)
  *
  * Anchor-based insertion and position-accurate replacement are wired;
  * reactive diffing against the native scene is deferred to post-MVP.
@@ -32,6 +33,13 @@
  * runtime); the vendored copy's `solid-js` import resolves through the
  * package import map (deno.json) to the client build, so signal-driven
  * updates actually reach the scene ops.
+ *
+ * The roadmap element factories (`Input`/`Spinner`/`StatusBar`/`Panels`)
+ * materialize the @tern/core factories of the same name, matching what the
+ * `@tern/react` host components map to (feature parity): same props -> same
+ * scene node structure. `subscribeInput` wires a renderer's key events
+ * through the core `FocusManager` (the Solid-flavored `useInput` equivalent —
+ * Solid has no context, so the renderer is an explicit argument).
  */
 
 import {
@@ -40,17 +48,60 @@ import {
 } from "./universal.ts";
 import {
   Box as TernBox,
-  Text as TernText,
+  Input as TernInput,
+  Panels as TernPanels,
+  Spinner as TernSpinner,
+  StatusBar as TernStatusBar,
   StreamingText as TernStreamingText,
+  Text as TernText,
+  focusManager,
+  FocusManager,
+  type InputProps,
+  type KeyHandler,
   type Node,
   type NodeProps,
+  type PanelsProps,
+  type Renderer,
   type Span,
+  type SpinnerProps,
+  type StatusBarProps,
 } from "@tern/core";
 
 export const name = "@tern/solid";
 export const version = "0.1.0";
 
-export type { Node, NodeProps, Span } from "@tern/core";
+// The @tern/core types the factories and focus wiring expose, re-exported so
+// consumers can type elements, props, focus handles and input handlers without
+// importing @tern/core directly (the same surface @tern/react re-exports).
+export type {
+  FocusHandle,
+  InputProps,
+  KeyEvent,
+  KeyHandler,
+  Node,
+  NodeProps,
+  PanelSpec,
+  PanelsProps,
+  Renderer,
+  Span,
+  SpinnerProps,
+  StatusBarProps,
+  StatusBarSegment,
+} from "@tern/core";
+
+// The @tern/core values behind the roadmap elements and the focus wiring:
+// element edit/drive helpers and the focus machinery.
+export {
+  collapsePanel,
+  editKey,
+  expandPanel,
+  focusManager,
+  focusPanel,
+  FocusManager,
+  tick,
+  togglePanel,
+  useFocus,
+} from "@tern/core";
 
 /**
  * Apply a single prop to a tern scene node. @tern/core's `Node.setProps`
@@ -64,8 +115,11 @@ function applyProp(node: Node, prop: string, value: unknown): void {
 
 /**
  * Best-effort parent registry. @tern/core `Node` exposes `children` but no
- * parent/sibling links, so `insertNode` records the parent here and the
- * traversal callbacks read from it. Entries are removed on `removeNode`.
+ * parent/sibling accessors (its `#parent` link is private), so `insertNode`
+ * records the parent here and the traversal callbacks read from it. Entries
+ * are dropped on `removeNode`; the children lists themselves are kept in sync
+ * by @tern/core's `Node.remove()`, which splices the removed node out of its
+ * parent's `children` list.
  */
 const parentMap = new WeakMap<Node, Node>();
 
@@ -95,9 +149,19 @@ const options: RendererOptions<Node> = {
         return TernText();
       case "streaming_text":
         return TernStreamingText();
+      case "input":
+        return TernInput();
+      case "spinner":
+        return TernSpinner();
+      case "status_bar":
+        return TernStatusBar();
+      case "panels":
+        // `panels` is the one required prop of the core factory; an empty
+        // spec list yields a valid, empty stack.
+        return TernPanels({ panels: [] });
       default:
         throw new Error(
-          `@tern/solid: unknown element type "${tag}" (expected "box", "text", or "streaming_text")`,
+          `@tern/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "spinner", "status_bar", or "panels")`,
         );
     }
   },
@@ -147,7 +211,14 @@ const options: RendererOptions<Node> = {
     }
   },
 
-  /** `removeNode` -> tree op. Detaches the node's subtree from the scene. */
+  /**
+   * `removeNode` -> tree op. Detaches the node's subtree from the scene and
+   * keeps the local bookkeeping consistent: the registry entry is dropped
+   * first (so `getParentNode` stops resolving the node even when the core
+   * remove no-ops), then `Node.remove()` splices the node out of its
+   * parent's `children` list — so `getFirstChild`/`getNextSibling` skip
+   * removed nodes and stay correct after removals.
+   */
   removeNode(_parent: Node, node: Node): void {
     parentMap.delete(node);
     node.remove();
@@ -189,10 +260,11 @@ const options: RendererOptions<Node> = {
  * `node` must not already be a child of that parent (same constraint as
  * `Node.insertBefore`).
  *
- * Note: @tern/core's `Node.remove()` never splices the parent's children
- * list (a core limitation), so after replacement the replaced node's entry
- * remains in `parent.children` — the scene (native handles) and the parent
- * registry reflect the replacement, the children snapshot does not.
+ * @tern/core's `Node.remove()` splices the removed node out of its parent's
+ * `children` list, so the replacement is fully reflected in the local
+ * bookkeeping: after the swap, `parent.children` holds the new node exactly
+ * where the replaced node was, and the traversal callbacks
+ * (`getFirstChild`/`getNextSibling`) agree with the scene.
  */
 export function replaceNode(node: Node, replacedNode: Node): void {
   if (node === replacedNode) return;
@@ -272,6 +344,64 @@ export function StreamingText(props: NodeProps = {}): Node {
   return node;
 }
 
+// ---------------------------------------------------------------------------
+// Roadmap element factories
+//
+// These materialize the @tern/core roadmap factories (subtask 3) with the same
+// props, giving @tern/solid feature parity with the @tern/react host
+// components: same props -> same scene node structure (the @tern/react
+// `hostConfig.createInstance` maps the host tags to these same core factories
+// — see packages/react/src/reconciler.ts). Unlike the primitives above, they
+// call the core factories directly with the full props rather than
+// `createElement` + `spread`: the composition (an input's text leaf, a
+// spinner's rendered text, a status bar's segment children, a panels element's
+// panel boxes) is derived *at creation* from the full props, and `setProps`
+// (what `spread` funnels into) cannot rebuild it. `createElement` with the
+// roadmap tags still materializes the core factories — as empty elements, for
+// the renderer surface — but stateful elements are built with these
+// factories.
+// ---------------------------------------------------------------------------
+
+/**
+ * Create an `input` scene node: the core `Input` factory materialized with
+ * `props` — a framed box with a text leaf carrying the value and caret (and
+ * a dim placeholder when the value is empty). Edit it with `editKey` (the
+ * focused-element handler wired by `useFocus` + `subscribeInput`).
+ */
+export function Input(props: InputProps = {}): Node {
+  return TernInput(props);
+}
+
+/**
+ * Create a `spinner` scene node: the core `Spinner` factory materialized with
+ * `props` — a text leaf rendering a determinate `'▓'`/`'░'` progress bar
+ * (from `value`/`max`/`width`) or an indeterminate frame glyph (from
+ * `frames`/`frame`). Advance it with `tick` on an interval.
+ */
+export function Spinner(props: SpinnerProps = {}): Node {
+  return TernSpinner(props);
+}
+
+/**
+ * Create a `status_bar` scene node: the core `StatusBar` factory materialized
+ * with `props` — a single-row flex strip whose children are the left/center/
+ * right segment `Text` nodes. The segment keys are lifted out of the strip's
+ * props by the core factory.
+ */
+export function StatusBar(props: StatusBarProps = {}): Node {
+  return TernStatusBar(props);
+}
+
+/**
+ * Create a `panels` scene node: the core `Panels` factory materialized with
+ * `props` — a flex stack of panel boxes, each with a header `Text` and a body
+ * node (the active panel's header is bold). Manage panels with
+ * `collapsePanel`/`expandPanel`/`togglePanel`/`focusPanel`.
+ */
+export function Panels(props: PanelsProps): Node {
+  return TernPanels(props);
+}
+
 /**
  * Subscribe an `AsyncIterable<Span>` to a `streaming_text` node.
  *
@@ -318,4 +448,53 @@ export function subscribeStream(
     cancelled = true;
     iterator?.return?.();
   };
+}
+
+// ---------------------------------------------------------------------------
+// Input / focus routing
+// ---------------------------------------------------------------------------
+
+/** Options for {@link subscribeInput}. */
+export interface SubscribeInputOptions {
+  /** When `false`, the subscription is not established (default `true`). */
+  isActive?: boolean;
+  /**
+   * The `FocusManager` consulted before the handler: when it routes the key
+   * to a focused element (`FocusManager.routeKey` returns `true`), the
+   * handler is skipped. Defaults to the core `focusManager`.
+   */
+  focusManager?: FocusManager;
+}
+
+/**
+ * Subscribe `handler` to a renderer's key events, routing each key through
+ * the core `FocusManager` first — the Solid-flavored `useInput` equivalent.
+ * Solid has no React-style context, so the renderer is an explicit argument
+ * (the `@tern/react` `useInput` reads it from the tree context instead).
+ *
+ * Each key is first routed via `manager.routeKey(event)`: when the manager
+ * dispatches it to a focused element's handler (an element registered with
+ * `useFocus(id, node, onKey, manager)`, e.g. an `Input` node edited through
+ * `editKey`), the tree-level `handler` is skipped. Only keys no focused
+ * element handles reach `handler`. The handler is captured at subscribe time;
+ * Solid closures over signal getters stay live because the getters are read
+ * at dispatch time.
+ *
+ * Returns a disposer that unsubscribes (and is a no-op when `isActive` is
+ * `false`). To reactivate a deactivated subscription, call `subscribeInput`
+ * again.
+ */
+export function subscribeInput(
+  renderer: Renderer,
+  handler: KeyHandler,
+  options: SubscribeInputOptions = {},
+): () => void {
+  if (options.isActive === false) return () => {};
+  const manager = options.focusManager ?? focusManager;
+  return renderer.onKey((event) => {
+    // A focused element's key handler wins; otherwise fall back to the
+    // tree-level handler.
+    if (manager.routeKey(event)) return;
+    handler(event);
+  });
 }
