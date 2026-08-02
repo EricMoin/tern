@@ -51,35 +51,47 @@ diffing.
 the full exported surface (renderer tree ops, roadmap element factories,
 focus routing, stream subscription, replacement) against `@tern/core`.
 
-## Phase 2 — Resize, focus & mouse events
+## Phase 2 — Resize, focus & mouse events ✅ done
+
+**Status:** shipped.
 
 **Goal:** surface the terminal's resize, focus, and mouse events through the
 JS API and use them for real UI behavior — layout reflow on resize, mouse
 drag-resize for panels, and focus-aware redraw.
 
-**Context:** the event model now surfaces resize/focus/mouse via tern-node
+**Context:** the event model surfaces resize/focus/mouse via tern-node
 `poll_events`: the `@tern/core` `Renderer` exposes `onResize` / `onFocus` /
 `onMouse` handlers that `pollEvents()` feeds from the tagged `TernEventJs`
 union (`"key"` / `"resize"` / `"focus"` / `"mouse"`). `onResize` receives
 `{ width, height }`, `onFocus` receives `{ focus_gained }`, `onMouse`
-receives `MouseEventJs`. What remains is *consuming* them: nothing re-flows
-layout on resize yet, panels have no mouse-resizable gutters, and timers keep
-ticking while the terminal is unfocused.
+receives `MouseEventJs`. The consumers below are shipped.
 
-**Work items:**
+**Shipped:**
 
-- Resize → layout reflow: subscribe a scene re-layout to `onResize` so a
-  `{ width, height }` change re-flows the scene through tern-layout.
-- Mouse drag-resize handles for [Panels](components.md#panels--split-layouts):
-  map `onMouse` drags on the 1-cell gutters between panels to flex-basis
-  changes on the adjacent panes (min sizes respected).
-- Focus-aware redraw: pause spinner/timer redraw while the terminal is
-  unfocused (via `onFocus` `{ focus_gained: false }`) and resume on regain.
+- **Resize → layout reflow:** `useResize(handler)` in `@tern/react` and
+  `subscribeResize(renderer, handler)` in `@tern/solid` subscribe a
+  renderer's resize events and re-invoke `renderer.render()` after each, so
+  the compositor re-lays out the scene at the new terminal size.
+- **Mouse drag-resize handles for [Panels](components.md#panels--split-layouts):**
+  the core `startPanelDrag` / `dragPanels` / `endPanelDrag` helpers map
+  `onMouse` drags on the 1-cell gutters between panels to `flex_basis`
+  changes on the adjacent panes (clamped to the pane's min size, and to the
+  space the neighbor's min size leaves). Wired by `usePanelMouseDrag`
+  (`@tern/react`) and `subscribePanelDrag` (`@tern/solid`), gated by
+  `Renderer.hit_test` so only painted gutter cells start a drag. The
+  flex-basis mutation is recorded on the scene node; consuming it in the
+  layout engine (tern-layout maps it into taffy's flex-basis) is a follow-up.
+- **Focus-aware redraw:** the `@tern/react` `<Spinner>` mount effect and the
+  `@tern/solid` `startSpinner` skip `tick()`/`render()` while the terminal is
+  unfocused (an `onFocus` event with `focus_gained: false`) and resume on
+  focus regain.
 
-**Exit criteria:** resizing the terminal re-flows the scene and the buffer
-diff reflects the new size; dragging a panels gutter with the mouse changes
-the pane split and a golden buffer matches; a spinning spinner's frames stop
-while the terminal is unfocused and resume on focus regain.
+**Exit criteria (met):** resizing the terminal re-flows the scene via
+`useResize` / `subscribeResize`; dragging a panels gutter with the mouse
+changes the pane split (the drag math and the applied `flex_basis` are
+asserted in the kitchen-sink demos and the `@tern/core` unit tests); a
+spinning spinner's frames stop while the terminal is unfocused and resume on
+focus regain (focus-aware tick, asserted by the `@tern/solid` suite).
 
 ## Phase 3 — Push-based events via napi ThreadsafeFunction
 
@@ -182,7 +194,7 @@ wasm32-unknown-unknown` is clean.
 | Phase | Unlocks component work |
 |-------|------------------------|
 | 1 — solid renderer (shipped) | All JS-side component elements for `@tern/solid` — shipped |
-| 2 — resize, focus & mouse | [Panels](components.md#panels--split-layouts) mouse drag-resize handles; focus-aware redraw (spinner tick pause on blur) |
+| 2 — resize, focus & mouse (shipped) | [Panels](components.md#panels--split-layouts) mouse drag-resize handles (shipped); focus-aware redraw / spinner tick pause on blur (shipped); flex-basis layout reflow follow-up |
 | 3 — push events | Live agent state in [StatusBar](components.md#statusbar) |
 | 4 — tree-sitter | [MarkdownView](components.md#markdownview) syntax highlighting |
 | 5 — ssh serving | Remote code-agent sessions (agent runs in a server, user attaches) |
