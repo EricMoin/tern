@@ -194,14 +194,142 @@ Deno.test("tree ops append/remove children on a detached root", () => {
 
   hc.removeChildFromContainer(container, a);
   hc.removeChildFromContainer(container, b);
-  // Boundary documentation: native removal only happens against an *attached*
-  // scene. On a detached root the core Node.remove() is a no-op, so the JS
-  // children list keeps the entries — the mirrored removal is verified by the
-  // PTY smoke (subtask 13), not here.
+  // removeChildFromContainer -> core Node.remove(): the child is spliced out
+  // of the root's children list even on a detached (unmaterialized) scene, so
+  // the JS tree mirrors the removal without a native call.
   const remaining: number = root.children.length;
-  if (remaining !== 2) {
-    throw new Error(`expected children kept on detached root, got ${remaining}`);
+  if (remaining !== 0) {
+    throw new Error(`expected removed children to be spliced out, got ${remaining}`);
   }
+  if (a.attached || b.attached) throw new Error("removed children must be detached");
+});
+
+Deno.test("insertBefore places a new child before the anchor (host config)", () => {
+  const { renderer, root } = mockRenderer();
+  const container = { root, renderer };
+  const parent = hc.createInstance("box", {}, container, {}, null);
+  const a = hc.createInstance("text", { text: "a" }, container, {}, null);
+  const b = hc.createInstance("text", { text: "b" }, container, {}, null);
+  const c = hc.createInstance("text", { text: "c" }, container, {}, null);
+  parent.addChild(a);
+  parent.addChild(b);
+  parent.addChild(c);
+
+  // Insert a new child before the middle sibling.
+  const x = hc.createInstance("text", { text: "x" }, container, {}, null);
+  hc.insertBefore(parent, x, b);
+  let kids = parent.children;
+  if (kids[0] !== a || kids[1] !== x || kids[2] !== b || kids[3] !== c) {
+    throw new Error(`anchor insert order wrong: ${kids.map((k) => k.props.text).join(",")}`);
+  }
+
+  // Before-first insert.
+  const y = hc.createInstance("text", { text: "y" }, container, {}, null);
+  hc.insertBefore(parent, y, a);
+  kids = parent.children;
+  if (kids[0] !== y || kids[1] !== a || kids[2] !== x || kids[3] !== b || kids[4] !== c) {
+    throw new Error(`before-first insert order wrong: ${kids.map((k) => k.props.text).join(",")}`);
+  }
+});
+
+Deno.test("insertBefore repositions an already-present child (keyed moves)", () => {
+  const { renderer, root } = mockRenderer();
+  const container = { root, renderer };
+  const parent = hc.createInstance("box", {}, container, {}, null);
+  const a = hc.createInstance("text", { text: "a" }, container, {}, null);
+  const b = hc.createInstance("text", { text: "b" }, container, {}, null);
+  const c = hc.createInstance("text", { text: "c" }, container, {}, null);
+  parent.addChild(a);
+  parent.addChild(b);
+  parent.addChild(c);
+
+  // Move `a` (already attached) before `c` — the keyed-reorder path.
+  hc.insertBefore(parent, a, c);
+  let kids = parent.children;
+  if (kids[0] !== b || kids[1] !== a || kids[2] !== c) {
+    throw new Error(`move-before order wrong: ${kids.map((k) => k.props.text).join(",")}`);
+  }
+
+  // Move `c` (already attached) before `b`.
+  hc.insertBefore(parent, c, b);
+  kids = parent.children;
+  if (kids[0] !== c || kids[1] !== b || kids[2] !== a) {
+    throw new Error(`second move order wrong: ${kids.map((k) => k.props.text).join(",")}`);
+  }
+});
+
+Deno.test("appendChild on an already-present child moves it to the end", () => {
+  const { renderer, root } = mockRenderer();
+  const container = { root, renderer };
+  const parent = hc.createInstance("box", {}, container, {}, null);
+  const a = hc.createInstance("text", { text: "a" }, container, {}, null);
+  const b = hc.createInstance("text", { text: "b" }, container, {}, null);
+  const c = hc.createInstance("text", { text: "c" }, container, {}, null);
+  parent.addChild(a);
+  parent.addChild(b);
+  parent.addChild(c);
+
+  // React calls appendChild for the trailing placements of a full reorder;
+  // the child is already attached, so this must reposition, not no-op.
+  hc.appendChild(parent, a);
+  let kids = parent.children;
+  if (kids[0] !== b || kids[1] !== c || kids[2] !== a) {
+    throw new Error(`append-move order wrong: ${kids.map((k) => k.props.text).join(",")}`);
+  }
+  hc.appendChild(parent, b);
+  kids = parent.children;
+  if (kids[0] !== c || kids[1] !== a || kids[2] !== b) {
+    throw new Error(`second append-move order wrong: ${kids.map((k) => k.props.text).join(",")}`);
+  }
+});
+
+Deno.test("insertInContainerBefore honors the anchor order", () => {
+  const { renderer, root } = mockRenderer();
+  const container = { root, renderer };
+  const a = hc.createInstance("text", { text: "a" }, container, {}, null);
+  const b = hc.createInstance("text", { text: "b" }, container, {}, null);
+  hc.appendChildToContainer(container, a);
+  hc.appendChildToContainer(container, b);
+
+  const x = hc.createInstance("text", { text: "x" }, container, {}, null);
+  hc.insertInContainerBefore(container, x, b);
+  const kids = root.children;
+  if (kids[0] !== a || kids[1] !== x || kids[2] !== b) {
+    throw new Error(`container anchor order wrong: ${kids.map((k) => k.props.text).join(",")}`);
+  }
+});
+
+Deno.test("keyed list reorder is reflected in scene order", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const item = (key: string) => createElement(Text, { key, text: key });
+
+  await act(async () => {
+    ternRoot.render(createElement(Box, {}, item("a"), item("b"), item("c")));
+  });
+  const box = root.children[0]!;
+  const order = () => box.children.map((n) => n.props.text).join(",");
+  if (order() !== "a,b,c") throw new Error(`initial order: ${order()}`);
+
+  // Full reorder: React repositions via appendChild on already-present
+  // children (getHostSibling returns null when every trailing sibling moves).
+  await act(async () => {
+    ternRoot.render(createElement(Box, {}, item("c"), item("a"), item("b")));
+  });
+  if (order() !== "c,a,b") throw new Error(`full reorder: ${order()}`);
+
+  // Partial reorder: React repositions via insertBefore with an
+  // already-present child (keyed-list move).
+  await act(async () => {
+    ternRoot.render(createElement(Box, {}, item("b"), item("a"), item("c")));
+  });
+  if (order() !== "b,a,c") throw new Error(`partial reorder: ${order()}`);
+
+  // Returning to the original order reuses the instances.
+  await act(async () => {
+    ternRoot.render(createElement(Box, {}, item("a"), item("b"), item("c")));
+  });
+  if (order() !== "a,b,c") throw new Error(`back to original: ${order()}`);
 });
 
 Deno.test("scheduleTimeout/cancelTimeout proxy setTimeout/clearTimeout", async () => {
@@ -316,12 +444,16 @@ Deno.test("conditional children mount and unmount through tree ops", async () =>
   await act(async () => {
     ternRoot.render(createElement(Box, {}, createElement(Text, { text: "a" })));
   });
-  // Detached core nodes keep removed children in the JS list (native removal
-  // only happens against an attached scene); the reconciler fiber tree is
-  // what React reconciles against, so a re-add reuses the old instance.
+  // The unmounted child is removed through removeChild -> core Node.remove(),
+  // which splices it out of the box's children list — the JS tree mirrors the
+  // scene even on a detached root.
   if (root.children[0] !== box) throw new Error("box instance must be reused");
-  if (box.children.length !== 2) {
-    throw new Error(`expected removed child to stay in detached list, got ${box.children.length}`);
+  const remaining: number = box.children.length;
+  if (remaining !== 1) {
+    throw new Error(`expected one child after unmount, got ${remaining}`);
+  }
+  if (box.children[0]!.props.text !== "a") {
+    throw new Error("remaining child must be 'a'");
   }
 });
 

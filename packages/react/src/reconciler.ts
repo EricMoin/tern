@@ -15,10 +15,12 @@
  * - `createTextInstance` throws — tern requires an explicit `<Text>` element,
  *   bare string children are rejected at render time.
  * - `appendChild` / `insertBefore` / `removeChild` -> tern tree ops. The core
- *   `Node` API is append-only (there is no indexed insert), so `insertBefore`
- *   degrades to append and a reposition of an already-present child is a
- *   no-op — full reorder fidelity is post-MVP (needs an ordered insert in the
- *   native binding).
+ *   `Node` API exposes an ordered insert (`Node.insertBefore` ->
+ *   `NodeHandle.insert_before`), so `insertBefore` places the child at the
+ *   anchor with full reorder fidelity. react-reconciler reuses host instances
+ *   across updates, so an `insertBefore`/`appendChild` on an already-present
+ *   child is a reposition (keyed-list move) and is realized as a
+ *   remove-then-insert against the core API, which throws on duplicates.
  * - `commitUpdate` -> `Node.setProps` (React-only props stripped).
  * - `prepareForCommit` / `resetAfterCommit` -> `renderer.render()`.
  * - `noTimeout: -1`; `scheduleTimeout` / `cancelTimeout` -> `setTimeout` /
@@ -153,16 +155,31 @@ export function toNodeProps(props: TernProps, type?: string): NodeProps {
 
 /**
  * Append `child` under `parent`. The core `Node.addChild` throws when the
- * same child instance is already recorded on that parent (the children list
- * is append-only and never spliced on removal), so a child that is already
- * present is left in place rather than crashing the commit.
+ * same child instance is already recorded on that parent, but React reuses
+ * host instances across updates: an `appendChild` on an already-present
+ * child is a reposition to the end (DOM `appendChild` semantics — this is
+ * how React realizes the trailing placements of a full list reorder), so the
+ * child is detached first.
  */
 function appendTo(parent: Node, child: Node): void {
-  if (parent.children.includes(child)) return;
+  if (parent.children.includes(child)) child.remove();
   parent.addChild(child);
 }
 
-/** Detach a child (and its subtree) from the scene. */
+/**
+ * Place `child` immediately before `beforeChild` under `parent`. Per
+ * react-reconciler semantics this is used both for inserting new children
+ * and for reordering existing ones (keyed-list moves), where `child` is
+ * already attached. The core `Node.insertBefore` throws on an already-present
+ * child, so a move is realized as a remove-then-insert at the anchor.
+ */
+function insertBeforeChild(parent: Node, child: Node, beforeChild: Node): void {
+  if (parent.children.includes(child)) child.remove();
+  parent.insertBefore(child, beforeChild);
+}
+
+/** Detach a child (and its subtree) from the scene; core `Node.remove()`
+ * also splices the child out of its parent's children list. */
 function removeNode(child: Node): void {
   child.remove();
 }
@@ -297,16 +314,16 @@ export const hostConfig: HostConfig = {
     appendTo(container.root, child);
   },
 
-  insertBefore(parent, child) {
-    // The core Node API is append-only: there is no ordered insert and the
-    // children list is never spliced on removal. Inserting a new child
-    // degrades to append; repositions of an already-present child (keyed-list
-    // moves) are no-ops. Full reorder fidelity is post-MVP.
-    appendTo(parent, child);
+  insertBefore(parent, child, beforeChild) {
+    // Anchor-accurate insert per react-reconciler semantics: place `child`
+    // immediately before `beforeChild`. Keyed-list moves (an already-present
+    // `child`) are handled by insertBeforeChild via remove-then-insert, since
+    // the core Node.insertBefore throws on an already-present child.
+    insertBeforeChild(parent, child, beforeChild);
   },
 
-  insertInContainerBefore(container, child) {
-    appendTo(container.root, child);
+  insertInContainerBefore(container, child, beforeChild) {
+    insertBeforeChild(container.root, child, beforeChild);
   },
 
   removeChild(_parent, child) {
