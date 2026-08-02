@@ -9,7 +9,15 @@ import {
   Spinner,
   StatusBar,
   Panels,
+  DiffView,
+  ScrollView,
+  Select,
+  selectKey,
   subscribeInput,
+  subscribeResize,
+  subscribeFocus,
+  subscribePanelDrag,
+  startSpinner,
   editKey,
   tick,
   useFocus,
@@ -19,10 +27,19 @@ import {
   expandPanel,
   togglePanel,
   focusPanel,
+  setTheme,
+  getTheme,
+  defaultTheme,
+  followTail,
+  isStreamFollowing,
+  syncStreamTail,
+  scrollTo,
   type Span,
   type Node,
   type KeyEvent,
   type Renderer,
+  type Theme,
+  type ThemeOverrides,
   renderer,
   rendererOptions,
   replaceNode,
@@ -46,7 +63,13 @@ import {
   Spinner as CoreSpinner,
   StatusBar as CoreStatusBar,
   Panels as CorePanels,
+  DiffView as CoreDiffView,
+  ScrollView as CoreScrollView,
+  createRenderer,
+  type TernEventJs,
 } from "@tern/core";
+import { setAddonForTesting } from "../../core/src/addon.ts";
+import type { TernAddon } from "../../core/src/addon.ts";
 
 // @deno-types="../../../node_modules/solid-js/types/index.d.ts"
 import { createSignal } from "solid-js";
@@ -419,6 +442,163 @@ Deno.test("subscribeStream disposer stops further appends", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// StreamingText auto-scroll
+//
+// `subscribeStream` feeds the core auto-scroll after each appended span:
+// `syncStreamTail` pins `scroll_y` to the stream tail (content height minus
+// the `clip_height` viewport) while following; a manual scroll above the tail
+// detaches (pins the view); `followTail` re-attaches and snaps back. The node
+// attaches under a real core `Renderer` over a *size-aware fake addon* (the
+// `setAddonForTesting` seam — same approach as the @tern/core tests), so
+// `Node.contentSize()` measures the streamed spans and the scroll offsets are
+// observable as scene props.
+// ---------------------------------------------------------------------------
+
+/** Per-handle `content_size` overrides for the panel-drag geometry tests
+ * (keyed by the `FakeStreamNodeHandle` instance backing the node). */
+const fakeDragSizes = new Map<object, { width: number; height: number }>();
+
+/** Mouse events queued for the next `poll_events` call (consumed in order). */
+const pendingMouseEvents: TernEventJs[] = [];
+
+/** A size-aware fake native handle: `content_size` measures streamed spans. */
+class FakeStreamNodeHandle {
+  readonly kind: string;
+  streamText = "";
+  constructor(type: string) {
+    this.kind = type;
+  }
+  content_size(): { width: number; height: number } {
+    // Per-handle override for the panel-drag geometry tests.
+    const override = fakeDragSizes.get(this);
+    if (override !== undefined) return override;
+    if (this.kind === "streaming_text") {
+      const lines = this.streamText.split("\n");
+      let width = 0;
+      for (const line of lines) width = Math.max(width, line.length);
+      return { width, height: lines.length };
+    }
+    return { width: 11, height: 2 };
+  }
+  add_child(child: unknown): unknown {
+    return child;
+  }
+  insert_before(child: unknown, _anchor: unknown): unknown {
+    return child;
+  }
+  set_props(_props: unknown): void {}
+  append_span(text: string, _style?: unknown): void {
+    this.streamText += text;
+  }
+  remove(): boolean {
+    return true;
+  }
+}
+
+/** A fake native `TuiRenderer` standing in for the real addon. */
+class FakeStreamTuiRenderer {
+  destroyed = false;
+  constructor(_options: unknown) {}
+  root(): unknown {
+    return new FakeStreamNodeHandle("box");
+  }
+  poll_events(_timeoutMs: number): TernEventJs[] {
+    // The panel-drag tests dispatch mouse events through this queue; the
+    // streaming tests leave it empty (their events never come from here).
+    return pendingMouseEvents.splice(0);
+  }
+  hit_test(_col: number, _row: number): bigint[] {
+    // Every press lands on a painted cell (the routing gate in
+    // `subscribePanelDrag` consults this).
+    return [7n];
+  }
+  render(): void {}
+  destroy(): void {
+    this.destroyed = true;
+  }
+}
+
+/** The size-aware fake addon injected through `setAddonForTesting`. */
+const streamFakeAddon = {
+  TuiRenderer: FakeStreamTuiRenderer,
+  NodeHandle: FakeStreamNodeHandle,
+  create_node: (type: string) => new FakeStreamNodeHandle(type),
+} as unknown as TernAddon;
+
+Deno.test("subscribeStream auto-scrolls a streaming node to the tail (detach + re-attach)", async () => {
+  setAddonForTesting(streamFakeAddon);
+  try {
+    const renderer = createRenderer();
+    const node = StreamingText({ clip_height: 2, width: 10 });
+    renderer.root.addChild(node);
+    if (!isStreamFollowing(node)) throw new Error("autoScroll must default to following");
+    const source = manualSpanSource();
+    const dispose = subscribeStream(node, source.stream);
+
+    // Three newline-terminated spans -> content 4 rows -> tail 4 - 2 = 2.
+    source.push({ text: "a\n" });
+    await flush();
+    source.push({ text: "b\n" });
+    await flush();
+    source.push({ text: "c\n" });
+    await flush();
+    const y = (): number => node.props.scroll_y as number;
+    if (y() !== 2) throw new Error(`tail scroll_y = ${y()}`);
+
+    // Manual scroll up above the tail: the follow detaches and pins the view.
+    scrollTo(node, 0, 0);
+    if (isStreamFollowing(node)) throw new Error("a scroll above the tail must detach");
+    source.push({ text: "d\n" }); // 5 rows now — the view stays pinned
+    await flush();
+    if (y() !== 0) throw new Error(`pinned scroll_y = ${y()}`);
+
+    // followTail: re-attach and snap to the current tail (5 - 2 = 3).
+    followTail(node);
+    if (!isStreamFollowing(node)) throw new Error("followTail must re-attach");
+    if (y() !== 3) throw new Error(`snap scroll_y = ${y()}`);
+
+    // And follows subsequent growth again (6 rows -> tail 4).
+    source.push({ text: "e\n" });
+    await flush();
+    if (y() !== 4) throw new Error(`follow scroll_y = ${y()}`);
+
+    dispose();
+  } finally {
+    setAddonForTesting(null);
+  }
+});
+
+Deno.test("StreamingText with autoScroll: false keeps the view pinned under subscribeStream", async () => {
+  setAddonForTesting(streamFakeAddon);
+  try {
+    const renderer = createRenderer();
+    const node = StreamingText({ autoScroll: false, clip_height: 2, width: 10 });
+    if ("autoScroll" in node.props) {
+      throw new Error(`autoScroll leaked into props: ${JSON.stringify(node.props)}`);
+    }
+    renderer.root.addChild(node);
+    const source = manualSpanSource();
+    const dispose = subscribeStream(node, source.stream);
+
+    source.push({ text: "a\n" });
+    await flush();
+    source.push({ text: "b\n" });
+    await flush();
+    source.push({ text: "c\n" });
+    await flush();
+
+    if (isStreamFollowing(node)) throw new Error("autoScroll: false must not follow");
+    if (node.props.scroll_y !== undefined) {
+      throw new Error(`scroll_y must stay unset, got ${node.props.scroll_y}`);
+    }
+
+    dispose();
+  } finally {
+    setAddonForTesting(null);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Reactive integration: signal -> targeted scene update (Phase-1 exit
 // criterion at the @tern/core level)
 // ---------------------------------------------------------------------------
@@ -716,6 +896,89 @@ Deno.test("Input/Spinner/StatusBar/Panels factories materialize the core element
     throw new Error("createElement(status_bar) mapping");
   }
   if (createElement("panels").type !== "panels") throw new Error("createElement(panels) mapping");
+  if (createElement("diff").type !== "diff") throw new Error("createElement(diff) mapping");
+});
+
+Deno.test("DiffView factory materializes per-kind rows with gutter, markers, colors and scroll", () => {
+  const diff = DiffView({
+    hunks: [
+      { kind: "ctx", old_line: 1, new_line: 1, text: "  fn main() {" },
+      { kind: "del", old_line: 2, new_line: 0, text: "    let x = 1;" },
+      { kind: "add", old_line: 0, new_line: 2, text: "    let x = 2;" },
+    ],
+    scroll_y: 3,
+    wrap: false,
+  });
+  if (diff.type !== "diff") throw new Error(`diff type = ${diff.type}`);
+  if (diff.props.scroll_y !== 3) throw new Error(`scroll_y = ${diff.props.scroll_y}`);
+  if ("hunks" in diff.props) throw new Error("hunks must not reach the scene props");
+  if (childCount(diff) !== 3) throw new Error(`rows = ${childCount(diff)}`);
+
+  const ctxRow = diff.children[0]!;
+  const delRow = diff.children[1]!;
+  const addRow = diff.children[2]!;
+  // Gutter: right-aligned old/new line numbers (single-digit -> width 1).
+  if (ctxRow.children[0]?.props.text !== "1 1") {
+    throw new Error(`ctx gutter = ${JSON.stringify(ctxRow.children[0]?.props.text)}`);
+  }
+  if (delRow.children[0]?.props.text !== "2  ") {
+    throw new Error(`del gutter = ${JSON.stringify(delRow.children[0]?.props.text)}`);
+  }
+  // Markers: space / '-' / '+'.
+  if (ctxRow.children[1]?.props.text !== " " || delRow.children[1]?.props.text !== "-" ||
+      addRow.children[1]?.props.text !== "+") {
+    throw new Error("marker chars must be space/-/+ per kind");
+  }
+  // Kind colors: del red, add green, ctx dimmed.
+  if (delRow.children[1]?.props.fg !== "#e06c75" || delRow.children[2]?.props.fg !== "#e06c75") {
+    throw new Error(`del colors = ${JSON.stringify(delRow.children[1]?.props.fg)}`);
+  }
+  if (addRow.children[1]?.props.fg !== "#98c379" || addRow.children[2]?.props.fg !== "#98c379") {
+    throw new Error(`add colors = ${JSON.stringify(addRow.children[1]?.props.fg)}`);
+  }
+  if (ctxRow.children[2]?.props.dim !== true) throw new Error("ctx content must be dimmed");
+  // wrap passes through to the content leaves.
+  for (const row of diff.children) {
+    if (row.children[2]?.props.wrap !== false) {
+      throw new Error("content leaves must carry wrap=false");
+    }
+  }
+});
+
+Deno.test("ScrollView factory materializes the core element with region props, content and a scrollbar", () => {
+  const content = Text({ text: "content" });
+  const view = ScrollView({
+    clip_x: 1,
+    clip_y: 2,
+    clip_width: 10,
+    clip_height: 4,
+    scroll_y: 2,
+    showScrollbar: true,
+    children: [content],
+  });
+  if (view.type !== "scroll_view") throw new Error(`type = ${view.type}`);
+  if (view.props.clip_x !== 1 || view.props.clip_y !== 2) {
+    throw new Error(`clip origin = ${JSON.stringify(view.props)}`);
+  }
+  if (view.props.clip_width !== 10 || view.props.clip_height !== 4) {
+    throw new Error(`clip size = ${JSON.stringify(view.props)}`);
+  }
+  if (view.props.scroll_y !== 2) throw new Error(`scroll_y = ${view.props.scroll_y}`);
+  // Content child (first) + the scrollbar text leaf (absolute at the right
+  // edge); both keys are consumed by the factory — never scene props.
+  if (childCount(view) !== 2) throw new Error(`children = ${childCount(view)}`);
+  if (view.children[0] !== content) throw new Error("content must be the first child");
+  const leaf = view.children[1];
+  if (leaf === undefined || leaf.type !== "text" || leaf.props.position !== "absolute") {
+    throw new Error("showScrollbar must compose a scrollbar text leaf");
+  }
+  if ("showScrollbar" in view.props || "children" in view.props) {
+    throw new Error(`consumed keys leaked: ${JSON.stringify(view.props)}`);
+  }
+  // The renderer surface maps the scroll_view tag too (as an empty element).
+  if (createElement("scroll_view").type !== "scroll_view") {
+    throw new Error("createElement(scroll_view) mapping");
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -777,6 +1040,11 @@ Deno.test("parity: solid renders the same scene structure as react's materializa
     { header: "A", body: CoreBox() },
     { header: "B", body: CoreBox(), collapsed: true },
   ];
+  const diffHunks = [
+    { kind: "ctx" as const, old_line: 1, new_line: 1, text: "  a" },
+    { kind: "del" as const, old_line: 2, new_line: 0, text: "  b" },
+    { kind: "add" as const, old_line: 0, new_line: 2, text: "  c" },
+  ];
 
   // The React baseline: the @tern/core factories (what React's hostConfig
   // materializes) built into the same tree shape.
@@ -789,6 +1057,11 @@ Deno.test("parity: solid renders the same scene structure as react's materializa
       CoreSpinner({ value: 5, max: 10, width: 8 }),
       CoreStatusBar({ left: "L", right: "R" }),
       CorePanels({ panels: panelsSpec, active: 1 }),
+      CoreDiffView({ hunks: diffHunks, scroll_y: 2, wrap: false }),
+      CoreScrollView(
+        { clip_x: 1, clip_y: 2, clip_width: 20, clip_height: 10, scroll_x: 1, scroll_y: 3, showScrollbar: true },
+        CoreText({ text: "line" }),
+      ),
     ),
   );
 
@@ -805,6 +1078,17 @@ Deno.test("parity: solid renders the same scene structure as react's materializa
           Spinner({ value: 5, max: 10, width: 8 }),
           StatusBar({ left: "L", right: "R" }),
           Panels({ panels: panelsSpec, active: 1 }),
+          DiffView({ hunks: diffHunks, scroll_y: 2, wrap: false }),
+          ScrollView({
+            clip_x: 1,
+            clip_y: 2,
+            clip_width: 20,
+            clip_height: 10,
+            scroll_x: 1,
+            scroll_y: 3,
+            showScrollbar: true,
+            children: [Text({ text: "line" })],
+          }),
         ],
       }),
     solidHost,
@@ -832,9 +1116,13 @@ function mockRenderer(): {
   root: Node;
   renderCalls: number[];
   keyHandlers: Set<(event: KeyEvent) => void>;
+  resizeHandlers: Set<(event: { width: number; height: number }) => void>;
+  focusHandlers: Set<(event: { focus_gained: boolean }) => void>;
 } {
   const renderCalls: number[] = [];
   const keyHandlers = new Set<(event: KeyEvent) => void>();
+  const resizeHandlers = new Set<(event: { width: number; height: number }) => void>();
+  const focusHandlers = new Set<(event: { focus_gained: boolean }) => void>();
   const root = Box();
   const renderer = {
     root,
@@ -845,9 +1133,17 @@ function mockRenderer(): {
       keyHandlers.add(handler);
       return () => keyHandlers.delete(handler);
     },
+    onResize: (handler: (event: { width: number; height: number }) => void) => {
+      resizeHandlers.add(handler);
+      return () => resizeHandlers.delete(handler);
+    },
+    onFocus: (handler: (event: { focus_gained: boolean }) => void) => {
+      focusHandlers.add(handler);
+      return () => focusHandlers.delete(handler);
+    },
     destroy: () => {},
   } as unknown as Renderer;
-  return { renderer, root, renderCalls, keyHandlers };
+  return { renderer, root, renderCalls, keyHandlers, resizeHandlers, focusHandlers };
 }
 
 function keyEvent(over: Partial<KeyEvent> = {}): KeyEvent {
@@ -947,6 +1243,300 @@ Deno.test("subscribeInput with isActive: false stays detached", () => {
   dispose();
 });
 
+// Select: factory parity + selectKey routing + floating z_index
+// ---------------------------------------------------------------------------
+
+Deno.test("Select factory materializes the core element with filter and option rows", () => {
+  const select = Select({
+    options: [
+      { value: "a", label: "A" },
+      { value: "b", label: "B" },
+    ],
+  });
+  if (select.type !== "select") throw new Error(`type = ${select.type}`);
+  // Filter row + 2 option rows (no summary in single mode).
+  if (select.children.length !== 3) throw new Error(`rows = ${select.children.length}`);
+  if (select.children[0]?.props.text !== "filter…") throw new Error("filter row");
+  if (select.children[1]?.props.text !== "A" || select.children[2]?.props.text !== "B") {
+    throw new Error(`rows = ${select.children.map((c) => c.props.text).join(",")}`);
+  }
+  if ("options" in select.props) throw new Error("options must not reach the scene props");
+  // Multi mode: checkmarks + selected-count summary.
+  const multi = Select({
+    options: [{ value: "a", label: "A", selected: true }],
+    multi: true,
+  });
+  if (multi.children[1]?.props.text !== "✓ A") throw new Error(`row = ${multi.children[1]?.props.text}`);
+  if (multi.children[2]?.props.text !== "1 selected") {
+    throw new Error(`summary = ${multi.children[2]?.props.text}`);
+  }
+});
+
+Deno.test("selectKey routes through the FocusManager to a focused select", () => {
+  const { renderer, keyHandlers } = mockRenderer();
+  const manager = new FocusManager();
+  const select = Select({
+    options: [
+      { value: "apple", label: "Apple" },
+      { value: "banana", label: "Banana" },
+    ],
+  });
+  const confirms: Array<{ value: string | string[] }> = [];
+  // Length read through a function: TS narrows a const-typed empty array's
+  // `length` to 0 (the pushes happen inside closures it cannot see).
+  const confirmCount = () => confirms.length;
+  // Accessors: selectKey mutates the node in place, which TS's control flow
+  // cannot see — reading through functions defeats the stale narrowing.
+  const visibleText = () => select.children[1]?.props.text;
+  const childCount = () => select.children.length;
+
+  // Register the select node with the manager: routed keys drive it via the
+  // core `selectKey`, firing onConfirm-style callbacks like React's
+  // `<Select focusId>`.
+  const focusHandle = useFocus("sel", select, (event) => {
+    const next = selectKey(select, event);
+    if (event.name === "enter") confirms.push(next);
+  }, manager);
+  const dispose = subscribeInput(renderer, () => {}, { focusManager: manager });
+
+  if (keyHandlers.size !== 1) throw new Error(`expected 1 key handler, got ${keyHandlers.size}`);
+  if (!manager.has("sel")) throw new Error("useFocus must register the id");
+
+  // Not focused: keys fall through to the tree handler (a no-op here).
+  for (const handler of keyHandlers) handler(keyEvent({ char: "b" }));
+  if (confirmCount() !== 0) throw new Error("unfocused select must not receive keys");
+
+  // Focused: the typeahead filter narrows the visible rows on the node.
+  if (!manager.focus("sel")) throw new Error("focus(sel) must succeed");
+  for (const handler of keyHandlers) handler(keyEvent({ char: "b" }));
+  if (childCount() !== 2) throw new Error(`rows after filter = ${childCount()}`);
+  if (visibleText() !== "Banana") throw new Error(`visible = ${visibleText()}`);
+
+  // Enter confirms the highlighted (filtered) option.
+  for (const handler of keyHandlers) handler(keyEvent({ name: "enter" }));
+  if (confirmCount() !== 1 || confirms[0]!.value !== "banana") {
+    throw new Error(`confirm = ${JSON.stringify(confirms)}`);
+  }
+  if (select.props.value !== "banana") throw new Error(`node value = ${select.props.value}`);
+
+  dispose();
+  if (keyHandlers.size >= 1) throw new Error("key handler must be detached on dispose");
+  focusHandle.dispose();
+  if (manager.has("sel")) throw new Error("select must unregister on dispose");
+});
+
+Deno.test("selectKey space toggles a multi checkmark and updates the count", () => {
+  const select = Select({
+    options: [
+      { value: "a", label: "A" },
+      { value: "b", label: "B" },
+    ],
+    multi: true,
+  });
+  const rowText = () => select.children[1]?.props.text;
+  const summaryText = () => select.children[3]?.props.text;
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  selectKey(select, { name: "char", char: " ", ...base });
+  if (rowText() !== "✓ A") throw new Error(`row = ${rowText()}`);
+  if (summaryText() !== "1 selected") throw new Error(`summary = ${summaryText()}`);
+  selectKey(select, { name: "char", char: " ", ...base });
+  if (rowText() !== "  A") throw new Error(`row = ${rowText()}`);
+  if (summaryText() !== "0 selected") throw new Error(`summary = ${summaryText()}`);
+});
+
+Deno.test("Select floating mode sets a z_index prop", () => {
+  const floating = Select({
+    options: [{ value: "a", label: "A" }],
+    floating: true,
+  });
+  if (floating.props.z_index !== 0) throw new Error(`z_index = ${floating.props.z_index}`);
+  if ("floating" in floating.props) throw new Error("floating must not reach the scene props");
+  const layered = Select({
+    options: [{ value: "a", label: "A" }],
+    floating: true,
+    z_index: 5,
+  });
+  if (layered.props.z_index !== 5) throw new Error(`z_index = ${layered.props.z_index}`);
+});
+
+Deno.test("subscribeResize re-renders on resize events and detaches on dispose", () => {
+  const { renderer, resizeHandlers, renderCalls } = mockRenderer();
+  const sizes: Array<{ width: number; height: number }> = [];
+
+  const dispose = subscribeResize(renderer, (size) => sizes.push(size));
+  if (resizeHandlers.size !== 1) {
+    throw new Error(`expected 1 resize handler, got ${resizeHandlers.size}`);
+  }
+
+  const rendersBeforeResize = renderCalls.length;
+  for (const handler of resizeHandlers) handler({ width: 100, height: 30 });
+  if (sizes.length !== 1 || sizes[0]!.width !== 100 || sizes[0]!.height !== 30) {
+    throw new Error(`handler must receive the new size, got ${JSON.stringify(sizes)}`);
+  }
+  if (renderCalls.length <= rendersBeforeResize) {
+    throw new Error(
+      `subscribeResize must re-invoke renderer.render() on resize (${rendersBeforeResize} -> ${renderCalls.length})`,
+    );
+  }
+
+  dispose();
+  if (resizeHandlers.size >= 1) throw new Error("resize handler must be detached on dispose");
+});
+
+Deno.test("subscribeFocus delivers focus events and detaches on dispose", () => {
+  const { renderer, focusHandlers } = mockRenderer();
+  const events: Array<{ focus_gained: boolean }> = [];
+
+  const dispose = subscribeFocus(renderer, (event) => events.push(event));
+  if (focusHandlers.size !== 1) {
+    throw new Error(`expected 1 focus handler, got ${focusHandlers.size}`);
+  }
+
+  for (const handler of focusHandlers) handler({ focus_gained: true });
+  for (const handler of focusHandlers) handler({ focus_gained: false });
+  if (events.length !== 2 || events[0]!.focus_gained !== true || events[1]!.focus_gained !== false) {
+    throw new Error(`focus payloads = ${JSON.stringify(events)}`);
+  }
+
+  dispose();
+  if (focusHandlers.size >= 1) throw new Error("focus handler must be detached on dispose");
+});
+
+Deno.test("startSpinner pauses ticks while unfocused and resumes on focus regain", async () => {
+  const { renderer, renderCalls, focusHandlers } = mockRenderer();
+  const spinner = Spinner();
+  // The core `tick` stores the running frame counter on the node's props; it
+  // is monotonic across ticks (the rendered glyph wraps), so it is the fake
+  // tick counter for the test.
+  const ticks = () => (typeof spinner.props.frame === "number" ? spinner.props.frame : 0);
+
+  const dispose = startSpinner(renderer, spinner, { interval: 5 });
+  if (focusHandlers.size !== 1) {
+    throw new Error(`expected 1 focus handler, got ${focusHandlers.size}`);
+  }
+
+  // Blur the terminal: ticks and repaints must freeze.
+  for (const handler of focusHandlers) handler({ focus_gained: false });
+  const ticksAtBlur = ticks();
+  const rendersAtBlur = renderCalls.length;
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  if (ticks() !== ticksAtBlur) {
+    throw new Error(`spinner must not tick while unfocused (${ticksAtBlur} -> ${ticks()})`);
+  }
+  if (renderCalls.length !== rendersAtBlur) {
+    throw new Error(
+      `render() must not run while unfocused (${rendersAtBlur} -> ${renderCalls.length})`,
+    );
+  }
+
+  // Regain focus: ticks and repaints resume from where they froze.
+  for (const handler of focusHandlers) handler({ focus_gained: true });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  if (ticks() === ticksAtBlur) {
+    throw new Error("spinner must resume ticking after focus regain");
+  }
+  if (renderCalls.length <= rendersAtBlur) {
+    throw new Error(
+      `render() must resume after focus regain (${rendersAtBlur} -> ${renderCalls.length})`,
+    );
+  }
+
+  // Disposal clears the interval and tears down the focus subscription.
+  dispose();
+  if (focusHandlers.size >= 1) throw new Error("focus handler must be detached on dispose");
+  const frozen = ticks();
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  if (ticks() !== frozen) throw new Error("disposed driver must stop ticking");
+});
+
+// ---------------------------------------------------------------------------
+// Panel drag-resize (subscribePanelDrag)
+//
+// The helper subscribes to the renderer's mouse events: `down_left` on the
+// 1-cell gutter between adjacent panels starts a drag, each `drag_left`
+// mutates the adjacent pane's `flex_basis` (clamped to the pane's min size)
+// and re-renders, and `up_left` ends it. The panels tree attaches under a
+// real core `Renderer` over the size-aware fake addon, so
+// `Node.contentSize()` reports the per-handle laid-out sizes and the mouse
+// events flow through the fake `poll_events`.
+// ---------------------------------------------------------------------------
+
+Deno.test("subscribePanelDrag resizes a panels split on gutter drags and clamps to the pane min", () => {
+  setAddonForTesting(streamFakeAddon);
+  try {
+    const renderer = createRenderer();
+    const panels = Panels({
+      panels: [
+        { header: "A", body: Box() },
+        { header: "B", body: Box() },
+      ],
+      direction: "column",
+    });
+    renderer.root.addChild(panels);
+    // Laid-out sizes: panel A rows 0-2, gutter row 3, panel B rows 4-5,
+    // stack 9 rows tall.
+    fakeDragSizes.set(panels.handle, { width: 60, height: 9 });
+    fakeDragSizes.set(panels.children[0]!.handle, { width: 60, height: 3 });
+    fakeDragSizes.set(panels.children[1]!.handle, { width: 60, height: 2 });
+
+    const results: Array<unknown> = [];
+    // Read through a function: TS narrows a const-typed empty array's
+    // `length` to 0 (the pushes happen inside closures it cannot see).
+    const resultCount = (): number => results.length;
+    const dispose = subscribePanelDrag(renderer, panels, (result) => results.push(result));
+    const emit = (kind: string, column: number, row: number): void => {
+      pendingMouseEvents.push({
+        type: "mouse",
+        mouse: { kind, column, row, ctrl: false, alt: false, shift: false },
+      });
+      renderer.pollEvents(0);
+    };
+
+    // down_left on gutter 0 starts the drag (results[0] = the handle).
+    emit("down_left", 0, 3);
+    if (resultCount() !== 1 || results[0] === null || (results[0] as { index: number }).index !== 0) {
+      throw new Error(`start result = ${JSON.stringify(results[0])}`);
+    }
+
+    // drag_left down 1 cell: panel A's flex_basis 3 -> 4; the helper re-renders.
+    emit("drag_left", 0, 4);
+    const panelA = panels.children[0]!;
+    // Read through a function so TS control-flow narrowing does not pin the
+    // prop to the literal of the first assertion.
+    const basis = (): number => panelA.props.flex_basis as number;
+    if (basis() !== 4) {
+      throw new Error(`flex_basis after drag = ${basis()}`);
+    }
+    if (resultCount() !== 2 || (results[1] as { flex_basis?: number }).flex_basis !== 4) {
+      throw new Error(`drag result = ${JSON.stringify(results[1])}`);
+    }
+
+    // Drag far above the split: clamps to the pane min (1).
+    emit("drag_left", 0, -20);
+    if (basis() !== 1) {
+      throw new Error(`min-clamped flex_basis = ${basis()}`);
+    }
+
+    // up_left ends the drag; a later drag_left is inert.
+    emit("up_left", 0, -20);
+    emit("drag_left", 0, 5);
+    if (basis() !== 1) {
+      throw new Error(`post-up drag flex_basis = ${basis()}`);
+    }
+
+    dispose();
+    const countBeforeDispose = resultCount();
+    emit("down_left", 0, 3);
+    if (resultCount() !== countBeforeDispose) {
+      throw new Error("a disposed subscription must not dispatch");
+    }
+  } finally {
+    setAddonForTesting(null);
+    pendingMouseEvents.length = 0;
+    fakeDragSizes.clear();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // removeNode bookkeeping: getNextSibling/getFirstChild stay correct
 // ---------------------------------------------------------------------------
@@ -1019,5 +1609,83 @@ Deno.test("replaceNode is fully reflected in parent.children (no stale entry)", 
   }
   if (rendererOptions.getParentNode(a) !== undefined) {
     throw new Error("replaced node's registry entry must be cleared");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Theme system
+// ---------------------------------------------------------------------------
+
+Deno.test("element factories resolve theme roles against the default theme", () => {
+  const node = Text({ text: "err", role: "danger" });
+  if (node.props.fg !== defaultTheme.palette.danger.fg) {
+    throw new Error(`fallback fg = ${node.props.fg}`);
+  }
+  if (node.props.bg !== defaultTheme.palette.danger.bg) {
+    throw new Error(`fallback bg = ${node.props.bg}`);
+  }
+  // The semantic hints are consumed — never scene props.
+  if ("role" in node.props || "component" in node.props) {
+    throw new Error(`semantic hints leaked: ${JSON.stringify(node.props)}`);
+  }
+});
+
+Deno.test("setTheme merges a partial theme over the default and getTheme round-trips", () => {
+  const before = getTheme();
+  try {
+    setTheme({ palette: { danger: { fg: "#ff0000" } } });
+    const after = getTheme();
+    if (after.palette.danger.fg !== "#ff0000") throw new Error(`merged fg = ${after.palette.danger.fg}`);
+    // Un-overridden role kept from the default.
+    if (after.palette.success.fg !== defaultTheme.palette.success.fg) {
+      throw new Error(`unoverridden role changed: ${after.palette.success.fg}`);
+    }
+    const node = Text({ text: "x", role: "danger" });
+    if (node.props.fg !== "#ff0000") throw new Error(`stamped fg = ${node.props.fg}`);
+    // The un-overridden bg comes from the default (merged, not replaced).
+    if (node.props.bg !== defaultTheme.palette.danger.bg) {
+      throw new Error(`merged bg = ${node.props.bg}`);
+    }
+  } finally {
+    setTheme(before);
+  }
+});
+
+Deno.test("setTheme component presets stamp onto the roadmap factories", () => {
+  const before = getTheme();
+  try {
+    setTheme({ components: { status_bar: { fg: "#eeeeee", bg: "#111111" } } });
+    const bar = StatusBar({ left: "L" });
+    if (bar.props.fg !== "#eeeeee" || bar.props.bg !== "#111111") {
+      throw new Error(`stamped strip = ${JSON.stringify(bar.props)}`);
+    }
+    // The preset resolution must not disturb the element's composition.
+    if (bar.children.length !== 1 || bar.children[0]?.props.text !== "L") {
+      throw new Error(`segments = ${bar.children.map((c) => c.props.text).join(",")}`);
+    }
+  } finally {
+    setTheme(before);
+  }
+});
+
+Deno.test("explicit props beat the theme stamps in solid factories", () => {
+  const before = getTheme();
+  try {
+    setTheme({ palette: { danger: { fg: "#ff0000", bg: "#111111" } } });
+    const node = Text({ text: "x", role: "danger", fg: "#00ff00" });
+    if (node.props.fg !== "#00ff00") throw new Error(`explicit fg = ${node.props.fg}`);
+    if (node.props.bg !== "#111111") throw new Error(`role bg = ${node.props.bg}`);
+  } finally {
+    setTheme(before);
+  }
+});
+
+Deno.test("getTheme returns a full Theme", () => {
+  const theme: Theme = getTheme();
+  if (theme.palette.primary.fg === undefined || theme.palette.primary.bg === undefined) {
+    throw new Error(`primary role incomplete: ${JSON.stringify(theme.palette.primary)}`);
+  }
+  if (theme.components.input === undefined) {
+    throw new Error("input preset missing");
   }
 });
