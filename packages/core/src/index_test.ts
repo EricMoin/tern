@@ -8,24 +8,91 @@
  * path — addon loading, scene materialization, render/poll/destroy — is
  * covered by the PTY smoke (`packages/core/smoke.mjs`), so these tests run
  * under plain `deno test` with no permission flags.
+ *
+ * Event dispatch (the `Renderer` `onKey`/`onResize`/`onFocus`/`onMouse`
+ * subscriber sets and the tagged `TernEventJs` returned by `pollEvents`) is
+ * exercised against a *fake* native addon injected through the
+ * `setAddonForTesting` seam in `./addon.ts` — no `.node` binary is loaded.
  */
 
 import {
   Box,
+  FocusManager,
+  Input,
   Node,
+  Panels,
+  Spinner,
+  StatusBar,
   StreamingText,
   Text,
+  collapsePanel,
   createRenderer,
+  editKey,
+  expandPanel,
+  focusManager,
+  focusPanel,
   name,
+  tick,
+  togglePanel,
+  useFocus,
   version,
 } from "./index.ts";
+import { setAddonForTesting } from "./addon.ts";
+import type { TernAddon } from "./addon.ts";
 import type {
   KeyEvent,
+  MouseEventJs,
   NodeHandle,
   Span,
+  TernEventJs,
   TuiRenderer,
   TuiRendererOptions,
 } from "./index.ts";
+
+// ---------------------------------------------------------------------------
+// Fake native addon (event dispatch)
+// ---------------------------------------------------------------------------
+
+/** Events queued for the next fake `poll_events` call (consumed in order). */
+const pendingEvents: TernEventJs[] = [];
+
+/** A fake native `TuiRenderer` standing in for the real addon. */
+class FakeTuiRenderer {
+  destroyed = false;
+  constructor(_options: unknown) {}
+  root(): NodeHandle {
+    // The `Renderer` constructor only stores this in `Node.wrapRoot`;
+    // the dispatch tests never touch it.
+    return {} as NodeHandle;
+  }
+  poll_events(_timeoutMs: number): TernEventJs[] {
+    return pendingEvents.splice(0);
+  }
+  render(): void {}
+  destroy(): void {
+    this.destroyed = true;
+  }
+}
+
+/** The fake addon injected through `setAddonForTesting`. */
+const fakeAddon = {
+  TuiRenderer: FakeTuiRenderer,
+  NodeHandle: class {},
+  create_node: () => {
+    throw new Error("create_node is not used by the dispatch tests");
+  },
+} as unknown as TernAddon;
+
+/** Run `fn` with the fake addon installed, resetting the seam afterwards. */
+function withFakeAddon(fn: () => void): void {
+  pendingEvents.length = 0;
+  setAddonForTesting(fakeAddon);
+  try {
+    fn();
+  } finally {
+    setAddonForTesting(null);
+  }
+}
 
 Deno.test("core exports package metadata", () => {
   if (name !== "@tern/core") {
@@ -367,4 +434,441 @@ Deno.test("createRenderer is a function accepting options", () => {
   // and materializing nodes calls the native addon (needs --allow-ffi). The
   // full renderer lifecycle (render/pollEvents/onKey/destroy + native scene
   // materialization) is covered by the PTY smoke (packages/core/smoke.mjs).
+});
+
+// ---------------------------------------------------------------------------
+// Event dispatch (fake native addon)
+// ---------------------------------------------------------------------------
+
+Deno.test("pollEvents dispatches resize events to onResize and unsubscribe stops dispatch", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const resized: Array<{ width: number; height: number }> = [];
+    const unsub = renderer.onResize((size) => resized.push(size));
+    const resize: TernEventJs = { type: "resize", width: 120, height: 40 };
+    pendingEvents.push(resize);
+    const returned = renderer.pollEvents(0);
+    if (returned.length !== 1 || returned[0] !== resize) {
+      throw new Error("pollEvents must return the resize event verbatim");
+    }
+    if (resized.length !== 1) throw new Error(`onResize calls = ${resized.length}`);
+    if (resized[0]!.width !== 120 || resized[0]!.height !== 40) {
+      throw new Error(`resize payload = ${JSON.stringify(resized[0])}`);
+    }
+    // Unsubscribing stops further dispatch.
+    unsub();
+    pendingEvents.push({ type: "resize", width: 10, height: 10 });
+    renderer.pollEvents(0);
+    if (resized.length !== 1) {
+      throw new Error("unsubscribed onResize handler must not fire");
+    }
+  });
+});
+
+Deno.test("pollEvents dispatches key events to onKey with the KeyEvent payload", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const keys: KeyEvent[] = [];
+    renderer.onKey((event) => keys.push(event));
+    const key: KeyEvent = { name: "char", char: "q", ctrl: false, alt: false, shift: false };
+    const tagged: TernEventJs = { type: "key", key };
+    pendingEvents.push(tagged);
+    const returned = renderer.pollEvents(0);
+    if (returned.length !== 1 || returned[0] !== tagged) {
+      throw new Error("pollEvents must return the key event verbatim");
+    }
+    if (keys.length !== 1 || keys[0] !== key) {
+      throw new Error("onKey must receive the unwrapped KeyEvent payload");
+    }
+  });
+});
+
+Deno.test("pollEvents dispatches focus events to onFocus", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const focusEvents: Array<{ focus_gained: boolean }> = [];
+    renderer.onFocus((event) => focusEvents.push(event));
+    pendingEvents.push({ type: "focus", focus_gained: true });
+    pendingEvents.push({ type: "focus", focus_gained: false });
+    renderer.pollEvents(0);
+    if (focusEvents.length !== 2) throw new Error(`onFocus calls = ${focusEvents.length}`);
+    if (focusEvents[0]!.focus_gained !== true || focusEvents[1]!.focus_gained !== false) {
+      throw new Error(`focus payloads = ${JSON.stringify(focusEvents)}`);
+    }
+    // Unsubscribe contract mirrors onKey: the removed handler never fires.
+    let unsubscribedFired = 0;
+    const unsub = renderer.onFocus(() => {
+      unsubscribedFired++;
+    });
+    unsub();
+    pendingEvents.push({ type: "focus", focus_gained: true });
+    renderer.pollEvents(0);
+    if (unsubscribedFired !== 0) {
+      throw new Error("unsubscribed onFocus handler must not fire");
+    }
+  });
+});
+
+Deno.test("pollEvents dispatches mouse events to onMouse", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const mouseEvents: MouseEventJs[] = [];
+    renderer.onMouse((event) => mouseEvents.push(event));
+    const mouse: MouseEventJs = {
+      kind: "down_left",
+      column: 3,
+      row: 7,
+      ctrl: false,
+      alt: false,
+      shift: true,
+    };
+    pendingEvents.push({ type: "mouse", mouse });
+    renderer.pollEvents(0);
+    if (mouseEvents.length !== 1 || mouseEvents[0] !== mouse) {
+      throw new Error("onMouse must receive the MouseEventJs payload");
+    }
+  });
+});
+
+Deno.test("pollEvents returns the tagged union verbatim", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const events: TernEventJs[] = [
+      { type: "key", key: { name: "enter", ctrl: false, alt: false, shift: false } },
+      { type: "resize", width: 80, height: 24 },
+      { type: "focus", focus_gained: true },
+      {
+        type: "mouse",
+        mouse: { kind: "moved", column: 1, row: 2, ctrl: false, alt: false, shift: false },
+      },
+    ];
+    pendingEvents.push(...events);
+    const returned = renderer.pollEvents(0);
+    if (returned.length !== events.length) {
+      throw new Error(`returned ${returned.length} events, expected ${events.length}`);
+    }
+    for (let i = 0; i < events.length; i++) {
+      if (returned[i] !== events[i]) {
+        throw new Error(`event ${i} must be passed through verbatim`);
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Roadmap elements: Input
+// ---------------------------------------------------------------------------
+
+Deno.test("Input composes a box with a text leaf carrying value and caret", () => {
+  const input = Input({ value: "ab", caret: 1 });
+  if (input.type !== "input") throw new Error(`type = ${input.type}`);
+  if (input.props.value !== "ab") throw new Error(`value = ${input.props.value}`);
+  if (input.props.caret !== 1) throw new Error(`caret = ${input.props.caret}`);
+  const leaf = input.children[0];
+  if (leaf === undefined || leaf.type !== "text") {
+    throw new Error("input must compose a text leaf");
+  }
+  if (leaf.props.text !== "ab") throw new Error(`leaf text = ${leaf.props.text}`);
+  if (leaf.props.caret !== 1) throw new Error(`leaf caret = ${leaf.props.caret}`);
+});
+
+Deno.test("Input shows a dim placeholder when empty", () => {
+  const input = Input({ placeholder: "type…" });
+  const leaf = input.children[0];
+  if (leaf === undefined) throw new Error("missing text leaf");
+  if (leaf.props.text !== "type…") throw new Error(`placeholder = ${leaf.props.text}`);
+  if (leaf.props.dim !== true) throw new Error(`dim = ${leaf.props.dim}`);
+  if (leaf.props.caret !== 0) throw new Error(`caret = ${leaf.props.caret}`);
+});
+
+Deno.test("editKey inserts a char at the caret", () => {
+  const input = Input({ value: "ab", caret: 1 });
+  const next = editKey(input, { name: "char", char: "X", ctrl: false, alt: false, shift: false });
+  if (next.value !== "aXb") throw new Error(`value = ${next.value}`);
+  if (next.caret !== 2) throw new Error(`caret = ${next.caret}`);
+  if (input.props.value !== "aXb") throw new Error(`node value = ${input.props.value}`);
+  if (input.children[0]?.props.text !== "aXb") {
+    throw new Error(`leaf text = ${input.children[0]?.props.text}`);
+  }
+});
+
+Deno.test("editKey backspace removes the char before the caret", () => {
+  const input = Input({ value: "ab", caret: 2 });
+  const next = editKey(input, { name: "backspace", ctrl: false, alt: false, shift: false });
+  if (next.value !== "a") throw new Error(`value = ${next.value}`);
+  if (next.caret !== 1) throw new Error(`caret = ${next.caret}`);
+  if (input.props.value !== "a") throw new Error(`node value = ${input.props.value}`);
+});
+
+Deno.test("editKey moves the caret with arrows, home and end", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  const mk = () => Input({ value: "abc", caret: 2 });
+  const left = editKey(mk(), { name: "left", ...base });
+  if (left.caret !== 1) throw new Error(`left caret = ${left.caret}`);
+  const right = editKey(mk(), { name: "right", ...base });
+  if (right.caret !== 3) throw new Error(`right caret = ${right.caret}`);
+  const home = editKey(mk(), { name: "home", ...base });
+  if (home.caret !== 0) throw new Error(`home caret = ${home.caret}`);
+  const end = editKey(mk(), { name: "end", ...base });
+  if (end.caret !== 3) throw new Error(`end caret = ${end.caret}`);
+  // Movement at the boundaries is a no-op.
+  const noLeft = editKey(Input({ value: "abc", caret: 0 }), { name: "left", ...base });
+  if (noLeft.caret !== 0) throw new Error(`left at start = ${noLeft.caret}`);
+  const noRight = editKey(Input({ value: "abc", caret: 3 }), { name: "right", ...base });
+  if (noRight.caret !== 3) throw new Error(`right at end = ${noRight.caret}`);
+  // Unknown keys leave the input unchanged.
+  const unknown = editKey(mk(), { name: "tab", ...base });
+  if (unknown.value !== "abc" || unknown.caret !== 2) {
+    throw new Error(`tab must not edit: ${unknown.value}/${unknown.caret}`);
+  }
+});
+
+Deno.test("editKey is multi-width aware for the caret column", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  // "コ" is a 2-column char: the caret after it sits at display column 2.
+  const left = editKey(Input({ value: "コa", caret: 2 }), { name: "left", ...base });
+  if (left.caret !== 0) throw new Error(`left over a wide char = ${left.caret}`);
+  const right = editKey(Input({ value: "コa", caret: 0 }), { name: "right", ...base });
+  if (right.caret !== 2) throw new Error(`right past a wide char = ${right.caret}`);
+  // Inserting at column 2 lands between コ and a, and the caret advances by
+  // the inserted char's width.
+  const ins = editKey(Input({ value: "コa", caret: 2 }), { name: "char", char: "b", ...base });
+  if (ins.value !== "コba") throw new Error(`inserted value = ${ins.value}`);
+  if (ins.caret !== 3) throw new Error(`inserted caret = ${ins.caret}`);
+  // Backspace over a wide char removes the whole glyph and steps two columns.
+  const bs = editKey(Input({ value: "コ", caret: 2 }), { name: "backspace", ...base });
+  if (bs.value !== "" || bs.caret !== 0) throw new Error(`backspace wide = ${bs.value}/${bs.caret}`);
+});
+
+// ---------------------------------------------------------------------------
+// Roadmap elements: Spinner
+// ---------------------------------------------------------------------------
+
+Deno.test("Spinner renders a determinate bar of filled and empty cells", () => {
+  const bar = Spinner({ value: 5, max: 10, width: 4 });
+  if (bar.type !== "spinner") throw new Error(`type = ${bar.type}`);
+  if (bar.props.text !== "▓▓░░") throw new Error(`bar = ${bar.props.text}`);
+  const full = Spinner({ value: 10, max: 10, width: 3 });
+  if (full.props.text !== "▓▓▓") throw new Error(`full = ${full.props.text}`);
+  const none = Spinner({ value: 0, max: 10, width: 3 });
+  if (none.props.text !== "░░░") throw new Error(`empty = ${none.props.text}`);
+  // Filled cells round up: 3/10 * 4 = 1.2 -> 2 cells.
+  const ceilBar = Spinner({ value: 3, max: 10, width: 4 });
+  if (ceilBar.props.text !== "▓▓░░") throw new Error(`ceil = ${ceilBar.props.text}`);
+});
+
+Deno.test("tick advances the indeterminate frame and wraps", () => {
+  const spinner = Spinner({ frames: ["a", "b", "c"] });
+  const text0 = spinner.props.text;
+  if (text0 !== "a") throw new Error(`frame 0 = ${text0}`);
+  const t1 = tick(spinner);
+  if (t1 !== "b") throw new Error(`tick 1 = ${t1}`);
+  const f1 = spinner.props.frame;
+  if (f1 !== 1) throw new Error(`frame = ${f1}`);
+  const t2 = tick(spinner);
+  if (t2 !== "c") throw new Error(`tick 2 = ${t2}`);
+  const t3 = tick(spinner);
+  if (t3 !== "a") throw new Error(`tick wrap = ${t3}`);
+  const f3 = spinner.props.frame;
+  if (f3 !== 3) throw new Error(`frame wrap = ${f3}`);
+});
+
+Deno.test("tick on a determinate spinner leaves the bar unchanged", () => {
+  const bar = Spinner({ value: 5, max: 10, width: 4 });
+  const before = bar.props.text;
+  const next = tick(bar);
+  if (next !== "▓▓░░") throw new Error(`next = ${next}`);
+  if (bar.props.text !== before) throw new Error("determinate bar must not change on tick");
+  if (bar.props.frame !== undefined) throw new Error(`frame = ${bar.props.frame}`);
+});
+
+// ---------------------------------------------------------------------------
+// Roadmap elements: StatusBar
+// ---------------------------------------------------------------------------
+
+Deno.test("StatusBar composes left/center/right segment Text nodes", () => {
+  const bar = StatusBar({ left: "L", center: "C", right: "R" });
+  if (bar.type !== "status_bar") throw new Error(`type = ${bar.type}`);
+  if (bar.props.flex_direction !== "row") throw new Error(`flex_direction = ${bar.props.flex_direction}`);
+  if (bar.props.justify_content !== "space-between") {
+    throw new Error(`justify_content = ${bar.props.justify_content}`);
+  }
+  if (bar.props.height !== 1) throw new Error(`height = ${bar.props.height}`);
+  const kids = bar.children;
+  if (kids.length !== 3) throw new Error(`segments = ${kids.length}`);
+  const [left, center, right] = kids;
+  if (left === undefined || left.type !== "text" || left.props.text !== "L") {
+    throw new Error("left segment must be a Text with the segment text");
+  }
+  if (center?.props.text !== "C") throw new Error("center segment text");
+  if (right?.props.text !== "R") throw new Error("right segment text");
+});
+
+Deno.test("StatusBar accepts node segments, omits missing ones, and lifts segment keys out of the strip props", () => {
+  const rightNode = Text({ text: "R" });
+  const bar = StatusBar({ left: "only", right: rightNode });
+  const kids = bar.children;
+  if (kids.length !== 2) throw new Error(`segments = ${kids.length}`);
+  if (kids[0]?.props.text !== "only") throw new Error(`left text = ${kids[0]?.props.text}`);
+  if (kids[1] !== rightNode) throw new Error("a node segment must be used verbatim");
+  // left/right are absolute-position inset keywords in tern-layout; the
+  // segment keys must never reach the strip's props.
+  if ("left" in bar.props || "right" in bar.props || "center" in bar.props) {
+    throw new Error(`segment keys leaked into strip props: ${JSON.stringify(bar.props)}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Roadmap elements: Panels
+// ---------------------------------------------------------------------------
+
+Deno.test("Panels builds header + body panels with an active index", () => {
+  const bodyA = Text({ text: "a-body" });
+  const bodyB = Text({ text: "b-body" });
+  const panels = Panels({ panels: [{ header: "A", body: bodyA }, { header: "B", body: bodyB }], active: 1 });
+  if (panels.type !== "panels") throw new Error(`type = ${panels.type}`);
+  if (panels.props.active !== 1) throw new Error(`active = ${panels.props.active}`);
+  if (panels.props.flex_direction !== "column") throw new Error(`direction = ${panels.props.flex_direction}`);
+  const kids = panels.children;
+  if (kids.length !== 2) throw new Error(`panels = ${kids.length}`);
+  const first = kids[0]!;
+  const second = kids[1]!;
+  if (first.type !== "box") throw new Error(`panel type = ${first.type}`);
+  if (first.children.length !== 2) throw new Error("panel A must have header + body");
+  if (first.children[0]?.props.text !== "A") throw new Error(`header = ${first.children[0]?.props.text}`);
+  if (first.children[1] !== bodyA) throw new Error("panel A body must be the given node");
+  if (second.children[1] !== bodyB) throw new Error("panel B body must be the given node");
+  // The active panel's header is bold; inactive headers are not.
+  if (second.children[0]?.props.bold !== true) throw new Error("active header must be bold");
+  if (first.children[0]?.props.bold !== false) throw new Error("inactive header must not be bold");
+});
+
+Deno.test("Panels builds collapsed panels header-only", () => {
+  const body = Text({ text: "x" });
+  const panels = Panels({ panels: [{ header: "A", body, collapsed: true }] });
+  const panel = panels.children[0]!;
+  if (panel.children.length !== 1) throw new Error(`collapsed children = ${panel.children.length}`);
+  if (panel.children[0]?.props.text !== "A") throw new Error("header must be retained");
+});
+
+Deno.test("togglePanel collapses and restores a panel body", () => {
+  const body = Text({ text: "body" });
+  const panels = Panels({ panels: [{ header: "A", body }] });
+  const panel = panels.children[0]!;
+  const collapsed = togglePanel(panels, 0);
+  if (collapsed !== true) throw new Error("toggle must collapse");
+  const collapsedCount = panel.children.length;
+  if (collapsedCount !== 1) throw new Error(`collapsed children = ${collapsedCount}`);
+  if (body.attached) throw new Error("removed body must be detached");
+  const expanded = togglePanel(panels, 0);
+  if (expanded !== false) throw new Error("toggle must expand");
+  const expandedCount = panel.children.length;
+  if (expandedCount !== 2) throw new Error(`expanded children = ${expandedCount}`);
+  if (panel.children[1] !== body) throw new Error("restored body must be the same node");
+});
+
+Deno.test("collapsePanel and expandPanel are idempotent and ignore bad indices", () => {
+  const body = Text({ text: "body" });
+  const panels = Panels({ panels: [{ header: "A", body }] });
+  const panel = panels.children[0]!;
+  collapsePanel(panels, 0);
+  collapsePanel(panels, 0);
+  const afterCollapse = panel.children.length;
+  if (afterCollapse !== 1) throw new Error(`double collapse must be a no-op (${afterCollapse})`);
+  expandPanel(panels, 0);
+  expandPanel(panels, 0);
+  const afterExpand = panel.children.length;
+  if (afterExpand !== 2) throw new Error(`double expand must be a no-op (${afterExpand})`);
+  collapsePanel(panels, 99);
+  const afterBad = panel.children.length;
+  if (afterBad !== 2) throw new Error(`collapsing a bad index must be a no-op (${afterBad})`);
+});
+
+Deno.test("focusPanel moves the active index and restyles headers", () => {
+  const panels = Panels({
+    panels: [{ header: "A", body: Text({ text: "1" }) }, { header: "B", body: Text({ text: "2" }) }],
+  });
+  const initialActive = panels.props.active;
+  if (initialActive !== 0) throw new Error(`initial active = ${initialActive}`);
+  focusPanel(panels, 1);
+  const newActive = panels.props.active;
+  if (newActive !== 1) throw new Error(`active after focus = ${newActive}`);
+  if (panels.children[1]?.children[0]?.props.bold !== true) {
+    throw new Error("new active header must be bold");
+  }
+  if (panels.children[0]?.children[0]?.props.bold !== false) {
+    throw new Error("old active header must be un-bolded");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Focus manager
+// ---------------------------------------------------------------------------
+
+Deno.test("FocusManager routes keys to the focused element's handler", () => {
+  const manager = new FocusManager();
+  const received: Array<{ id: string; key: KeyEvent }> = [];
+  manager.register({ id: "a", node: Text({ text: "a" }), onKey: (key) => received.push({ id: "a", key }) });
+  manager.register({ id: "b", node: Text({ text: "b" }), onKey: (key) => received.push({ id: "b", key }) });
+  const key: KeyEvent = { name: "char", char: "x", ctrl: false, alt: false, shift: false };
+  if (manager.routeKey(key) !== false) throw new Error("nothing focused must not route");
+  if (manager.focus("a") !== true) throw new Error("focus(a) must succeed");
+  if (manager.activeId !== "a") throw new Error(`activeId = ${manager.activeId}`);
+  if (manager.routeKey(key) !== true) throw new Error("focused route must be handled");
+  const afterA = received.length;
+  if (afterA !== 1 || received[0]?.id !== "a") throw new Error(`key must route to a (${afterA})`);
+  manager.focus("b");
+  manager.routeKey(key);
+  const afterB = received.length;
+  if (afterB !== 2 || received[1]?.id !== "b") throw new Error(`key must route to b (${afterB})`);
+  if (received[1]?.key !== key) throw new Error("handler must receive the key event verbatim");
+});
+
+Deno.test("routeKey with an explicit node routes to that node's handler", () => {
+  const manager = new FocusManager();
+  const bNode = Text({ text: "b" });
+  let hits = 0;
+  manager.register({ id: "a", node: Text({ text: "a" }), onKey: () => hits++ });
+  manager.register({ id: "b", node: bNode, onKey: () => (hits += 10) });
+  const key: KeyEvent = { name: "enter", ctrl: false, alt: false, shift: false };
+  manager.routeKey(key, bNode);
+  if (hits !== 10) throw new Error(`explicit node route = ${hits}`);
+});
+
+Deno.test("unregister clears the active focus and stops dispatch", () => {
+  const manager = new FocusManager();
+  const node = Text({ text: "x" });
+  let hits = 0;
+  const unsub = manager.register({ id: "x", node, onKey: () => hits++ });
+  manager.focus("x");
+  if (manager.active?.node !== node) throw new Error("active entry must expose the node");
+  unsub();
+  if (manager.activeId !== null) throw new Error("active must clear on unregister");
+  if (manager.has("x")) throw new Error("entry must be gone after unregister");
+  const key: KeyEvent = { name: "char", char: "q", ctrl: false, alt: false, shift: false };
+  if (manager.routeKey(key) !== false) throw new Error("unregistered id must not route");
+  if (hits !== 0) throw new Error("no dispatch after unregister");
+});
+
+Deno.test("useFocus registers, focuses and disposes through the manager", () => {
+  const manager = new FocusManager();
+  const node = Text({ text: "x" });
+  let hits = 0;
+  const handle = useFocus("f", node, () => hits++, manager);
+  if (!manager.has("f")) throw new Error("useFocus must register the id");
+  handle.focus();
+  if (!handle.isFocused()) throw new Error("focus() must make the id active");
+  const key: KeyEvent = { name: "char", char: "q", ctrl: false, alt: false, shift: false };
+  if (manager.routeKey(key) !== true) throw new Error("routed key must be handled");
+  if (hits !== 1) throw new Error(`routed through the handle's handler = ${hits}`);
+  handle.blur();
+  if (handle.isFocused()) throw new Error("blur() must clear the active focus");
+  handle.dispose();
+  if (manager.has("f")) throw new Error("dispose() must unregister the id");
+});
+
+Deno.test("the default focus manager is a FocusManager instance", () => {
+  if (!(focusManager instanceof FocusManager)) {
+    throw new Error("default focus manager must be a FocusManager");
+  }
 });
