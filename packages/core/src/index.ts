@@ -118,6 +118,7 @@ export class Node {
   #handle: NativeNodeHandle | null;
   #props: NodeProps;
   #children: Node[];
+  #parent: Node | null;
   #attached: boolean;
   #spans: Span[];
 
@@ -127,6 +128,7 @@ export class Node {
     this.#handle = null;
     this.#props = { ...props };
     this.#children = [...children];
+    this.#parent = null;
     this.#attached = false;
     this.#spans = [];
   }
@@ -159,7 +161,8 @@ export class Node {
 
   /**
    * The children declared at creation, or added via `addChild` /
-   * `insertBefore`, in scene order. Returns a copy.
+   * `insertBefore`, in scene order (removals via `remove` are reflected).
+   * Returns a copy.
    */
   get children(): readonly Node[] {
     return [...this.#children];
@@ -184,6 +187,7 @@ export class Node {
       this.#ensureHandle().add_child(child.#ensureHandle());
       child.#attach();
     }
+    child.#parent = this;
     this.#children.push(child);
     return child;
   }
@@ -214,6 +218,7 @@ export class Node {
       this.#ensureHandle().insert_before(child.#ensureHandle(), anchor.#ensureHandle());
       child.#attach();
     }
+    child.#parent = this;
     this.#children.splice(index, 0, child);
     return child;
   }
@@ -258,14 +263,27 @@ export class Node {
   }
 
   /**
-   * Detach this node (and its whole subtree) from the scene. Returns `false`
-   * when the node was already detached (or is the scene root).
+   * Detach this node (and its whole subtree) from its parent and the scene.
+   *
+   * The node is spliced out of its parent's `children` list and its
+   * materialized native handles are invalidated (the whole subtree is marked
+   * detached and its handles dropped), so a later re-attach via `addChild` /
+   * `insertBefore` re-materializes a fresh scene node. On a detached tree —
+   * where no native handles exist — the JS children list is still updated, so
+   * the tree always mirrors the removal.
+   *
+   * Returns `false` when the node has no parent to detach from: an orphaned
+   * template or the scene root.
    */
   remove(): boolean {
-    if (this.#handle === null) return false;
-    const removed = this.#handle.remove();
-    if (removed) this.#unattach();
-    return removed;
+    if (this.#parent === null) return false;
+    const parent = this.#parent;
+    const index = parent.#children.indexOf(this);
+    if (index !== -1) parent.#children.splice(index, 1);
+    this.#parent = null;
+    if (this.#handle !== null) this.#handle.remove();
+    this.#detachSubtree();
+    return true;
   }
 
   /** Create the native handle on demand (idempotent). */
@@ -283,6 +301,7 @@ export class Node {
     const handle = this.#ensureHandle();
     this.#flushSpans(handle);
     for (const child of this.#children) {
+      child.#parent = this;
       handle.add_child(child.#ensureHandle());
       child.#attach();
     }
@@ -300,9 +319,17 @@ export class Node {
     this.#spans = [];
   }
 
-  #unattach(): void {
+  /**
+   * Mark this node and its whole subtree detached, invalidating the
+   * materialized native handles so a re-attach re-creates fresh scene nodes.
+   * The subtree's internal parent/child structure is preserved (`#children`
+   * and `#parent` links inside the subtree are untouched) — only the
+   * attachment to the shared scene is torn down.
+   */
+  #detachSubtree(): void {
     this.#attached = false;
-    for (const child of this.#children) child.#unattach();
+    this.#handle = null;
+    for (const child of this.#children) child.#detachSubtree();
   }
 }
 

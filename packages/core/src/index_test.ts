@@ -256,6 +256,109 @@ Deno.test("remove on a detached template returns false", () => {
   if (node.attached) throw new Error("node must stay unattached");
 });
 
+Deno.test("remove detaches the node from its parent's children list", () => {
+  const parent = Box();
+  const a = Text({ text: "a" });
+  const b = Text({ text: "b" });
+  const c = Text({ text: "c" });
+  parent.addChild(a);
+  parent.addChild(b);
+  parent.addChild(c);
+
+  // A parentless node (here the detached `parent` itself) cannot be removed.
+  if (parent.remove() !== false) throw new Error("parentless remove must return false");
+
+  if (b.remove() !== true) throw new Error("remove must return true when the node is in a tree");
+  const kids = parent.children;
+  if (kids.length !== 2) throw new Error(`children.length = ${kids.length}`);
+  if (kids[0] !== a || kids[1] !== c) {
+    throw new Error("removed child must be spliced out of the children list");
+  }
+  if (b.attached) throw new Error("removed node must be detached");
+});
+
+Deno.test("remove is idempotent and the removed child can be re-added", () => {
+  const parent = Box();
+  const a = Text({ text: "a" });
+  const b = Text({ text: "b" });
+  parent.addChild(a);
+  parent.addChild(b);
+
+  if (a.remove() !== true) throw new Error("first remove must return true");
+  if (a.remove() !== false) throw new Error("second remove must return false");
+
+  // The removed child is no longer blocked by the duplicate guard: re-adding
+  // it appends a fresh scene entry at the end.
+  parent.addChild(a);
+  const kids = parent.children;
+  if (kids.length !== 2) throw new Error(`children.length = ${kids.length}`);
+  if (kids[0] !== b || kids[1] !== a) {
+    throw new Error("re-added child must be appended at the end");
+  }
+});
+
+Deno.test("remove invalidates the whole subtree and re-attach restores it", () => {
+  const parent = Box();
+  const other = Text({ text: "other" });
+  const childBox = Box({}, Text({ text: "deep" }));
+  parent.addChild(childBox);
+  parent.addChild(other);
+  const deep = childBox.children[0]!;
+
+  if (childBox.remove() !== true) throw new Error("subtree root remove must return true");
+  const kids = parent.children;
+  if (kids.length !== 1 || kids[0] !== other) {
+    throw new Error("removed subtree must leave only the remaining sibling");
+  }
+  if (childBox.attached || deep.attached) {
+    throw new Error("the whole subtree must be detached");
+  }
+
+  // Re-attaching the removed subtree re-materializes it as a unit (its
+  // internal children are preserved).
+  parent.insertBefore(childBox, other);
+  const after = parent.children;
+  if (after.length !== 2 || after[0] !== childBox || after[1] !== other) {
+    throw new Error("re-inserted subtree must land before the anchor");
+  }
+  if (childBox.children.length !== 1 || childBox.children[0] !== deep) {
+    throw new Error("subtree children must be preserved across remove/re-add");
+  }
+});
+
+Deno.test("remove after an ordered insert keeps sibling order", () => {
+  const a = Text({ text: "a" });
+  const b = Text({ text: "b" });
+  const c = Text({ text: "c" });
+  const parent = Box({}, a, b, c);
+
+  const x = Text({ text: "x" });
+  parent.insertBefore(x, b);
+  if (parent.children[1] !== x || parent.children[2] !== b) {
+    throw new Error("insertBefore must place x before b");
+  }
+
+  x.remove();
+  const kids = parent.children;
+  if (kids.length !== 3) throw new Error(`children.length = ${kids.length}`);
+  if (kids[0] !== a || kids[1] !== b || kids[2] !== c) {
+    throw new Error("removing x must restore the original order");
+  }
+
+  parent.insertBefore(x, b);
+  if (parent.children[1] !== x || parent.children[2] !== b) {
+    throw new Error("re-inserting x must land before b again");
+  }
+});
+
+Deno.test("the scene root cannot be removed", () => {
+  // wrapRoot is @internal; the fake handle is never touched on this path
+  // (remove() short-circuits on the root's missing parent).
+  const root = Node.wrapRoot({} as never);
+  if (root.remove() !== false) throw new Error("the scene root must not be removable");
+  if (!root.attached) throw new Error("the scene root must stay attached");
+});
+
 Deno.test("createRenderer is a function accepting options", () => {
   if (typeof createRenderer !== "function") {
     throw new Error(`typeof createRenderer = ${typeof createRenderer}`);
