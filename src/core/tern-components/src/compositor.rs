@@ -9,25 +9,57 @@
 //!   engine (children land inside `rect + border + padding`).
 //! * **Text** — paints its `text` prop content starting at the rect origin,
 //!   clipped to the rect (multi-width aware: a wide character never gets
-//!   truncated mid-glyph at the right edge).
+//!   truncated mid-glyph at the right edge). A `caret` Int prop (a display
+//!   column) paints the block caret over the cell under the cursor, using the
+//!   node's style reversed.
 //! * **StreamingText** — paints its accumulated stream spans starting at the
 //!   rect origin, one row per wrapped soft line, honoring each span's style
 //!   (fg/bg/modifiers), clipping to the rect bottom and right.
 //! * **Root** — a plain container; paints nothing itself.
 //!
-//! Nodes are painted in pre-order (parent before children) so children always
-//! paint over their ancestors. Geometry comes from the layout engine
-//! ([`LayoutEngine`]); cells outside the viewport are ignored.
+//! The roadmap components ([`Input`](crate::Input), [`Spinner`](crate::Spinner),
+//! [`Panels`](crate::Panels), [`StatusBar`](crate::StatusBar)) materialize as
+//! `Box`/`Text` subtrees and need no special paint handling; when one is
+//! painted as the tree root, its frame is promoted to the scene root so it
+//! fills the viewport (and a `StatusBar`/`Input` root is given the viewport
+//! row width for overflow trimming / horizontal scroll).
+//!
+//! ## Clip and scroll regions
+//!
+//! Any node may declare a clip rect (the `clip_x` / `clip_y` / `clip_width` /
+//! `clip_height` props) and a scroll offset (`scroll_x` / `scroll_y`). The
+//! region is inherited: a node's effective region intersects its ancestors'
+//! clips and sums their scroll offsets, so a scrollable pane is a box with
+//! `clip_*` + `scroll_*` props whose overflowing children paint inside the
+//! clipped, panned viewport. Every cell a node draws (background, border,
+//! text, stream spans) is mapped through its effective region: the position
+//! is shifted by the scroll offset and rejected when it lands outside the
+//! clip rect (or the buffer).
+//!
+//! ## Paint order (z-order stacking)
+//!
+//! Every laid-out node (one with a rect in the layout result) is collected
+//! into a flat list in pre-order (parent before children), then painted in
+//! ascending order of its effective z-index — the `z_index` integer prop,
+//! default 0. The sort is stable, so equal z-indexes keep pre-order: a child
+//! paints after its parent, and a later sibling after an earlier one. Higher
+//! z-index paints later and therefore covers lower ones, which is what lets
+//! an absolutely positioned overlay with a higher `z_index` paint on top of
+//! in-flow content beneath it. With no `z_index` set anywhere, the order is
+//! exactly the historical pre-order, so all existing behavior is preserved.
+//! Geometry comes from the layout engine ([`LayoutEngine`]); cells outside
+//! the viewport are ignored.
 
 use std::collections::HashMap;
 
-use tern_core::buffer::Buffer;
+use tern_core::buffer::{Buffer, Region};
 use tern_core::cell::{char_width, Cell};
 use tern_core::color::Color;
+use tern_core::cursor::Cursor;
 use tern_core::layout::LayoutEngine;
 use tern_core::rect::{Rect, Size};
 use tern_core::scene::{NodeId, NodeKind, PropValue, Scene, SceneNode};
-use tern_core::style::{BorderStyle, Style};
+use tern_core::style::{BorderStyle, Modifiers, Style};
 use tern_layout::TaffyLayoutEngine;
 
 use crate::renderable::Renderable;
@@ -52,33 +84,56 @@ impl Compositor {
 
     /// Paint a single renderable tree into a fresh `viewport`-sized buffer.
     ///
-    /// Accepts a [`Renderable`], [`Box`](crate::Box), or [`Text`](crate::Text)
-    /// root. The tree's root becomes the scene root, so it fills the
-    /// viewport: a top-level [`Box`](crate::Box) therefore puts its border
-    /// glyphs at the edges of the buffer.
+    /// Accepts a [`Renderable`], [`Box`](crate::Box), [`Text`](crate::Text),
+    /// or any roadmap component ([`Input`](crate::Input),
+    /// [`Spinner`](crate::Spinner), [`Panels`](crate::Panels),
+    /// [`StatusBar`](crate::StatusBar)) root. A container root's frame is
+    /// promoted to the scene root, so it fills the viewport: a top-level
+    /// [`Box`](crate::Box) therefore puts its border glyphs at the edges of
+    /// the buffer, and a top-level [`StatusBar`](crate::StatusBar) spans the
+    /// whole bottom row.
     pub fn paint(&mut self, root: impl Into<Renderable>, viewport: Size) -> Buffer {
-        let root: Renderable = root.into();
+        let mut root: Renderable = root.into();
         let mut scene = Scene::new();
         let scene_root = scene.root_id();
+
+        // Strip/field components painted as the tree root span the viewport
+        // row: give them the real row width so overflow trimming and
+        // horizontal scroll have something to work against.
+        match &mut root {
+            Renderable::StatusBar(sb) => {
+                sb.width = Some(viewport.width as usize);
+            }
+            Renderable::Input(inp) => {
+                inp.width = Some(
+                    (viewport.width as usize)
+                        .saturating_sub(2 * (inp.padding as usize + inp.border as usize)),
+                );
+            }
+            _ => {}
+        }
+
         match root {
-            Renderable::Box(b) => {
-                // The top-level box fills the viewport: promote it to the
-                // scene root (which the layout engine sizes to the viewport).
+            Renderable::Text(t) => {
+                scene.add_text(scene_root, &t.content, t.style);
+            }
+            other => {
+                // Container root: promote its frame to the scene root (which
+                // the layout engine sizes to the viewport), then materialize
+                // its content under the root.
+                let frame = other
+                    .root_box()
+                    .expect("non-text roots carry a root frame");
                 assert!(
                     scene.update(
                         scene_root,
                         Some(NodeKind::Box),
-                        Some(b.style),
-                        Some(b.to_props())
+                        Some(frame.style),
+                        Some(frame.to_props())
                     ),
                     "scene root always exists"
                 );
-                for child in &b.children {
-                    child.materialize(&mut scene, scene_root);
-                }
-            }
-            Renderable::Text(t) => {
-                scene.add_text(scene_root, &t.content, t.style);
+                other.materialize_under(&mut scene, scene_root);
             }
         }
         self.paint_scene(&scene, viewport)
@@ -87,58 +142,169 @@ impl Compositor {
     /// Paint a whole scene into a fresh `viewport`-sized buffer.
     pub fn paint_scene(&mut self, scene: &Scene, viewport: Size) -> Buffer {
         let mut buffer = Buffer::new(viewport.width, viewport.height);
-        let rects: HashMap<NodeId, Rect> = self
-            .layout
-            .compute(scene, viewport)
-            .into_iter()
-            .collect();
-        self.paint_subtree(scene, scene.root_id(), &rects, &mut buffer);
+        // taffy 0.7 reports each node's `Layout.location` relative to its
+        // parent (verified against taffy's `round_layout` in
+        // `taffy/src/compute/mod.rs`: `layout.location = round(unrounded
+        // location)` with no parent-origin accumulation). Painting needs
+        // scene-absolute rects, so accumulate parent origins into the raw
+        // layout result before anything else. For trees where every nested
+        // parent sits at the origin (all pre-existing golden tests) this is
+        // an exact no-op; it is what makes depth-2+ subtrees — nested boxes,
+        // and the roadmap components' group/panel -> text leaves — land at
+        // their real scene positions.
+        let raw = self.layout.compute(scene, viewport);
+        let rects = scene_absolute_rects(scene, raw);
+        // Collect every laid-out node in pre-order, then paint by ascending
+        // effective z-index. The sort is stable, so equal z-indexes keep
+        // pre-order: with no `z_index` prop anywhere this paints exactly like
+        // the historical pre-order traversal.
+        let mut order: Vec<NodeId> = Vec::new();
+        collect_paint_order(scene, scene.root_id(), &rects, &mut order);
+        order.sort_by(|&a, &b| z_index(scene, a).cmp(&z_index(scene, b)));
+        for id in order {
+            if let Some(node) = scene.node(id) {
+                if let Some(&rect) = rects.get(&id) {
+                    // A node's frame (box background/border) is drawn through
+                    // its ancestors' regions only; its content (text, stream,
+                    // children) also applies its own scroll offset, so a pane
+                    // scrolls its content inside its own fixed frame.
+                    let frame = effective_region(scene, id, viewport, false);
+                    let content = effective_region(scene, id, viewport, true);
+                    paint_node(node, rect, frame, content, &mut buffer);
+                }
+            }
+        }
         buffer
     }
+}
 
-    /// Paint `id` and its descendants (pre-order: parent first, so children
-    /// paint over ancestors).
-    fn paint_subtree(
-        &self,
+/// Convert taffy's parent-relative layout rects into scene-absolute rects by
+/// walking the tree pre-order and adding each parent's scene origin. The
+/// scene root has no parent, so its rect is already absolute; a descendant's
+/// scene rect is its relative rect translated by its parent's scene origin.
+/// A node without geometry (e.g. `display: none`) contributes no offset.
+fn scene_absolute_rects(scene: &Scene, relative: Vec<(NodeId, Rect)>) -> HashMap<NodeId, Rect> {
+    let rel: HashMap<NodeId, Rect> = relative.into_iter().collect();
+    let mut abs: HashMap<NodeId, Rect> = HashMap::new();
+    fn walk(
         scene: &Scene,
         id: NodeId,
-        rects: &HashMap<NodeId, Rect>,
-        buffer: &mut Buffer,
+        rel: &HashMap<NodeId, Rect>,
+        abs: &mut HashMap<NodeId, Rect>,
+        parent_origin: (i32, i32),
     ) {
         let Some(node) = scene.node(id) else {
             return;
         };
-        // Nodes with no geometry (e.g. `display: none`) are skipped.
-        if let Some(&rect) = rects.get(&id) {
-            paint_node(node, rect, buffer);
-        }
+        let origin = match rel.get(&id) {
+            Some(r) => {
+                let scene_rect =
+                    Rect::new(r.x + parent_origin.0, r.y + parent_origin.1, r.width, r.height);
+                abs.insert(id, scene_rect);
+                (scene_rect.x, scene_rect.y)
+            }
+            None => parent_origin,
+        };
         for &child in &node.children {
-            self.paint_subtree(scene, child, rects, buffer);
+            walk(scene, child, rel, abs, origin);
         }
+    }
+    walk(scene, scene.root_id(), &rel, &mut abs, (0, 0));
+    abs
+}
+
+/// The effective region a node draws through: the intersection of the clip
+/// rects declared on the node's ancestors (plus the node itself when
+/// `include_own`), and the sum of the same scroll offsets. The region is in
+/// scene coordinates; drawing is shifted by the scroll and rejected when the
+/// mapped cell lands outside the clip.
+///
+/// `include_own` selects whether the node's *own* clip rect and scroll offset
+/// participate: `false` for a box's frame (its background/border draw through
+/// the inherited region only, so a pane's border stays put while its content
+/// pans), `true` for content (text, stream spans, children), where the node's
+/// own clip bounds its subtree and its own scroll pans it inside the clip.
+fn effective_region(scene: &Scene, id: NodeId, viewport: Size, include_own: bool) -> Region {
+    let mut clip = Rect::new(0, 0, viewport.width as u32, viewport.height as u32);
+    let mut scroll_x = 0i32;
+    let mut scroll_y = 0i32;
+    let mut cur = Some(id);
+    while let Some(nid) = cur {
+        if include_own || nid != id {
+            if let Some(c) = scene.clip_rect(nid) {
+                clip = clip.intersection(&c).unwrap_or(Rect::zero());
+            }
+        }
+        if include_own || nid != id {
+            let (sx, sy) = scene.scroll_offset(nid);
+            scroll_x += sx;
+            scroll_y += sy;
+        }
+        cur = scene.node(nid).and_then(|n| n.parent);
+    }
+    Region::new(clip, scroll_x, scroll_y)
+}
+
+/// Collect every laid-out node in the subtree rooted at `id` into `out`, in
+/// pre-order (parent before children). Nodes without geometry (e.g.
+/// `display: none`) are skipped.
+fn collect_paint_order(
+    scene: &Scene,
+    id: NodeId,
+    rects: &HashMap<NodeId, Rect>,
+    out: &mut Vec<NodeId>,
+) {
+    let Some(node) = scene.node(id) else {
+        return;
+    };
+    if rects.contains_key(&id) {
+        out.push(id);
+    }
+    for &child in &node.children {
+        collect_paint_order(scene, child, rects, out);
     }
 }
 
-/// Paint a single node into its laid-out rect.
-fn paint_node(node: &SceneNode, rect: Rect, buffer: &mut Buffer) {
+/// The effective paint z-index of a node: its `z_index` integer prop, or 0
+/// when unset. Higher values paint later (on top).
+fn z_index(scene: &Scene, id: NodeId) -> i32 {
+    match scene.prop(id, "z_index") {
+        Some(PropValue::Int(i)) => *i as i32,
+        _ => 0,
+    }
+}
+
+/// Paint a single node into its laid-out rect, drawing its frame through
+/// `frame` (box background/border) and its content through `content` (text,
+/// stream spans).
+fn paint_node(node: &SceneNode, rect: Rect, frame: Region, content: Region, buffer: &mut Buffer) {
     match node.kind {
         NodeKind::Root => {}
-        NodeKind::Box => paint_box(node, rect, buffer),
-        NodeKind::Text => paint_text(node, rect, buffer),
-        NodeKind::StreamingText => paint_streaming_text(node, rect, buffer),
+        NodeKind::Box => paint_box(node, rect, frame, buffer),
+        NodeKind::Text => paint_text(node, rect, content, buffer),
+        NodeKind::StreamingText => paint_streaming_text(node, rect, content, buffer),
     }
 }
 
 /// Paint a box: background fill, optional border ring, then children (painted
 /// by the traversal) on top. The padding inset is baked into the children's
-/// layout rects.
-fn paint_box(node: &SceneNode, rect: Rect, buffer: &mut Buffer) {
+/// layout rects. The frame is drawn through `region` (the node's own scroll
+/// excluded), so a scrollable pane's background and border stay put while its
+/// content pans inside them.
+fn paint_box(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) {
     // Background: fill the rect only when a non-default background is set, so
     // default boxes stay transparent over whatever is beneath them.
     if node.style.bg != Color::Default {
-        let x0 = rect.x.max(0) as u16;
-        let y0 = rect.y.max(0) as u16;
-        let x1 = rect.right().min(buffer.width as i32) as u16;
-        let y1 = rect.bottom().min(buffer.height as i32) as u16;
+        let x0 = region.map_x(rect.x).max(region.clip.x).max(0) as u16;
+        let y0 = region.map_y(rect.y).max(region.clip.y).max(0) as u16;
+        let x1 = region
+            .map_x(rect.right())
+            .min(region.clip.right())
+            .min(buffer.width as i32) as u16;
+        let y1 = region
+            .map_y(rect.bottom())
+            .min(region.clip.bottom())
+            .min(buffer.height as i32) as u16;
         if x1 > x0 && y1 > y0 {
             for y in y0..y1 {
                 for x in x0..x1 {
@@ -149,14 +315,20 @@ fn paint_box(node: &SceneNode, rect: Rect, buffer: &mut Buffer) {
     }
 
     // Border ring: concrete glyphs are chosen here (tern-core carries only the
-    // style choice); the ring is clipped to the buffer.
+    // style choice); the ring is clipped to the region (and the buffer).
     let Some((tl, tr, bl, br, h, v)) = border_glyphs(node.style.border_style) else {
         return;
     };
-    let x0 = rect.x.max(0) as u16;
-    let y0 = rect.y.max(0) as u16;
-    let x1 = rect.right().min(buffer.width as i32) as u16;
-    let y1 = rect.bottom().min(buffer.height as i32) as u16;
+    let x0 = region.map_x(rect.x).max(region.clip.x).max(0) as u16;
+    let y0 = region.map_y(rect.y).max(region.clip.y).max(0) as u16;
+    let x1 = region
+        .map_x(rect.right())
+        .min(region.clip.right())
+        .min(buffer.width as i32) as u16;
+    let y1 = region
+        .map_y(rect.bottom())
+        .min(region.clip.bottom())
+        .min(buffer.height as i32) as u16;
     if x1 <= x0 || y1 <= y0 {
         return;
     }
@@ -177,36 +349,60 @@ fn paint_box(node: &SceneNode, rect: Rect, buffer: &mut Buffer) {
     buffer.set_char(last_x, last_y, br, node.style);
 }
 
-/// Paint a text leaf's content starting at its rect origin, clipped to the
-/// rect (and to the buffer). A wide character that would straddle the right
-/// edge is dropped, never truncated mid-glyph.
-fn paint_text(node: &SceneNode, rect: Rect, buffer: &mut Buffer) {
-    let Some(PropValue::Str(content)) = node.props.get("text") else {
-        return;
-    };
-    let y = rect.y;
-    if y < 0 || y >= buffer.height as i32 {
-        return;
+/// Paint a text leaf's content starting at its rect origin, through `region`
+/// (the content is shifted by the region's scroll offset and clipped to its
+/// clip rect — and to the buffer). A wide character that would straddle the
+/// right edge is dropped, never truncated mid-glyph.
+///
+/// When the node carries a `caret` Int prop (a display-column offset — the
+/// [`Input`](crate::Input) component stamps it), the block caret is painted
+/// over the cell under the cursor using the node's own style reversed, via
+/// tern-core's [`Buffer::render_caret`] (subtask 3's caret machinery). The
+/// caret is painted even over the placeholder when the text is empty. The
+/// caret position is mapped through the region like any other cell, so a
+/// scrolled/clipped text leaf scrolls its caret along with its content.
+fn paint_text(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) {
+    if let Some(PropValue::Str(content)) = node.props.get("text") {
+        let y = rect.y;
+        if region.map_y(y) >= region.clip.y
+            && region.map_y(y) < region.clip.bottom()
+            && region.clip.bottom() > region.clip.y
+        {
+            let right = rect
+                .right()
+                .min(region.clip.right() + region.scroll_x);
+            let mut cx = rect.x;
+            for ch in content.chars() {
+                if cx >= right || ch == '\n' {
+                    break;
+                }
+                let w = char_width(ch);
+                if w == 0 {
+                    continue;
+                }
+                // Paint only fully visible glyphs: skip when the lead cell is
+                // off-screen to the left or the wide glyph crosses the right
+                // edge.
+                if cx >= 0 && cx + w as i32 <= right {
+                    buffer.set_char_region(cx, y, ch, node.style, region);
+                }
+                cx += w as i32;
+            }
+        }
     }
-    let right = rect.right().min(buffer.width as i32);
-    if right <= rect.x {
-        return;
-    }
-    let mut cx = rect.x;
-    for ch in content.chars() {
-        if cx >= right || ch == '\n' {
-            break;
+
+    if let Some(PropValue::Int(caret_col)) = node.props.get("caret") {
+        let cx = rect.x + *caret_col as i32;
+        let cy = rect.y;
+        if region.contains(cx, cy) {
+            let bx = region.map_x(cx);
+            let by = region.map_y(cy);
+            if bx >= 0 && by >= 0 {
+                let caret_style = node.style.add_modifier(Modifiers::REVERSED);
+                let cursor = Cursor::new(bx as u16, by as u16).styled(caret_style);
+                buffer.render_caret(cursor);
+            }
         }
-        let w = char_width(ch);
-        if w == 0 {
-            continue;
-        }
-        // Paint only fully visible glyphs: skip when the lead cell is
-        // off-screen to the left or the wide glyph crosses the right edge.
-        if cx >= 0 && cx + w as i32 <= right {
-            buffer.set_char(cx as u16, y as u16, ch, node.style);
-        }
-        cx += w as i32;
     }
 }
 
@@ -219,7 +415,8 @@ struct WrapCursor {
 
 /// Paint a `StreamingText` leaf: its accumulated stream spans are
 /// concatenated in order and painted into the rect starting at its origin,
-/// one row per wrapped soft line.
+/// one row per wrapped soft line, through `region` (shifted by the region's
+/// scroll offset, clipped to its clip rect and the buffer).
 ///
 /// Wrapping is greedy and token-aware: a token (a whitespace-free run) that
 /// does not fit on the current row wraps whole to the next row; a token wider
@@ -228,16 +425,23 @@ struct WrapCursor {
 /// style never bleeds into the next. A wide character that would straddle the
 /// right edge — or that is wider than the row itself — is dropped, never split
 /// mid-glyph. Painting stops at the rect's bottom edge; both edges are clipped
-/// to the buffer.
-fn paint_streaming_text(node: &SceneNode, rect: Rect, buffer: &mut Buffer) {
+/// to the region and the buffer.
+fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) {
     let Some(stream) = node.stream.as_deref() else {
         return;
     };
     if stream.is_empty() {
         return;
     }
-    let right = rect.right().min(buffer.width as i32);
-    let bottom = rect.bottom().min(buffer.height as i32);
+    let right = rect
+        .right()
+        .min(region.clip.right() + region.scroll_x);
+    // Content rows pan inside the node's own frame: the last content row that
+    // can map into the frame is `rect.bottom() + scroll_y - 1`, so the layout
+    // runs rows up to (exclusive) that bound. Rows whose mapped position
+    // falls outside the frame are skipped at paint time (see
+    // [`row_inside_frame`]).
+    let bottom = rect.bottom() + region.scroll_y;
     if right <= rect.x || bottom <= rect.y {
         return;
     }
@@ -257,10 +461,11 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, buffer: &mut Buffer) {
                     paint_word(
                         &word,
                         word_style,
-                        rect.x,
+                        rect,
                         right,
                         bottom,
                         &mut cursor,
+                        region,
                         buffer,
                     );
                     word.clear();
@@ -277,15 +482,19 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, buffer: &mut Buffer) {
                     paint_word(
                         &word,
                         word_style,
-                        rect.x,
+                        rect,
                         right,
                         bottom,
                         &mut cursor,
+                        region,
                         buffer,
                     );
                     word.clear();
-                    if cursor.row < bottom && cursor.col < right {
-                        buffer.set_char(cursor.col as u16, cursor.row as u16, ' ', span.style);
+                    if cursor.row < bottom
+                        && cursor.col < right
+                        && row_inside_frame(rect, region, cursor.row)
+                    {
+                        buffer.set_char_region(cursor.col, cursor.row, ' ', span.style, region);
                         cursor.col += 1;
                     }
                 }
@@ -301,10 +510,11 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, buffer: &mut Buffer) {
         paint_word(
             &word,
             word_style,
-            rect.x,
+            rect,
             right,
             bottom,
             &mut cursor,
+            region,
             buffer,
         );
         word.clear();
@@ -314,24 +524,40 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, buffer: &mut Buffer) {
     }
 }
 
+/// Whether a content row at scene row `row` is visible inside the node's own
+/// frame after the region's scroll: its mapped position must land within the
+/// frame's vertical extent `[rect.y, rect.bottom())`. Rows that pan above or
+/// below the frame are skipped (the frame's background/border are painted by
+/// the box itself, through a scroll-free region).
+fn row_inside_frame(rect: Rect, region: Region, row: i32) -> bool {
+    let mapped = region.map_y(row);
+    mapped >= rect.y && mapped < rect.bottom()
+}
+
 /// Paint one whitespace-free token with `style` at the cursor, soft-wrapping
 /// at `right` (column, exclusive) and clipping below `bottom` (row,
-/// exclusive).
+/// exclusive), through `region`.
 ///
 /// A token that does not fit on the current row (which already holds content)
 /// moves whole to the next row; a token wider than the whole row is
 /// hard-broken across rows. A wide character that would straddle `right` — or
 /// that is wider than the row itself — is dropped, never split mid-glyph. The
-/// cursor advances past every token glyph, including dropped ones.
+/// cursor advances past every token glyph, including dropped ones. Each glyph
+/// is drawn via [`Buffer::set_char_region`], so it is also shifted by the
+/// region's scroll and clipped to its clip rect; glyphs on a row whose mapped
+/// position falls outside `frame` (the node's own rect) are skipped, so
+/// scrolled content stays inside the pane.
 fn paint_word(
     word: &str,
     style: Style,
-    line_start: i32,
+    frame: Rect,
     right: i32,
     bottom: i32,
     cursor: &mut WrapCursor,
+    region: Region,
     buffer: &mut Buffer,
 ) {
+    let line_start = frame.x;
     if word.is_empty() {
         return;
     }
@@ -362,8 +588,8 @@ fn paint_word(
                 return;
             }
         }
-        if cursor.col >= 0 && cursor.row >= 0 {
-            buffer.set_char(cursor.col as u16, cursor.row as u16, ch, style);
+        if row_inside_frame(frame, region, cursor.row) {
+            buffer.set_char_region(cursor.col, cursor.row, ch, style, region);
         }
         cursor.col += w as i32;
     }
@@ -387,7 +613,11 @@ fn border_glyphs(style: BorderStyle) -> Option<(char, char, char, char, char, ch
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::Input;
+    use crate::panels::{Panel, Panels};
     use crate::renderable::{Box, Text};
+    use crate::spinner::Spinner;
+    use crate::statusbar::{Segment, SegmentAlign, StatusBar};
     use tern_core::scene::Span;
     use tern_core::style::{Modifiers, Style};
 
@@ -560,6 +790,139 @@ mod tests {
     }
 
     #[test]
+    fn input_caret_paints_reversed_block_over_caret_cell() {
+        // A root Input fills the viewport with its 1-cell padding frame; the
+        // text leaf lands at (1,1), and the caret prop (display col 2) paints
+        // the reversed block caret over the blank cell at (3,1).
+        let input = Input::with_value("ab");
+        let buffer = Compositor::new().paint(input, Size::new(6, 3));
+
+        assert_eq!(buffer.cell(1, 1).unwrap().ch, 'a');
+        assert_eq!(buffer.cell(2, 1).unwrap().ch, 'b');
+        let caret = buffer.cell(3, 1).unwrap();
+        assert_eq!(caret.ch, ' ');
+        assert!(caret.style.modifiers.contains(Modifiers::REVERSED));
+        // Neighbors are untouched.
+        assert!(!buffer.cell(2, 1).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        assert!(!buffer.cell(4, 1).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn input_placeholder_paints_dimmed_with_caret_at_head() {
+        // An empty input shows the dimmed placeholder; the caret sits at
+        // display col 0, adding REVERSED over the placeholder's DIM.
+        let input = Input::new().placeholder("ask");
+        let buffer = Compositor::new().paint(input, Size::new(6, 3));
+
+        let c = buffer.cell(1, 1).unwrap();
+        assert_eq!(c.ch, 'a');
+        assert!(c.style.modifiers.contains(Modifiers::DIM));
+        assert!(c.style.modifiers.contains(Modifiers::REVERSED));
+        // The rest of the placeholder stays dimmed but not reversed.
+        let second = buffer.cell(2, 1).unwrap();
+        assert_eq!(second.ch, 's');
+        assert!(second.style.modifiers.contains(Modifiers::DIM));
+        assert!(!second.style.modifiers.contains(Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn input_hidden_caret_paints_no_block() {
+        let input = Input::with_value("ab").hide_caret();
+        let buffer = Compositor::new().paint(input, Size::new(6, 3));
+        for x in 0..6 {
+            let c = buffer.cell(x, 1).unwrap();
+            assert!(!c.style.modifiers.contains(Modifiers::REVERSED));
+        }
+        assert_eq!(buffer.cell(1, 1).unwrap().ch, 'a');
+    }
+
+    #[test]
+    fn spinner_bar_paints_filled_and_empty_cells() {
+        // A determinate spinner painted as the root: 4-wide bar, 1 of 4 done
+        // -> '▓' + 3 '░' + " 25%".
+        let mut spinner = Spinner::determinate(4).bar_width(4);
+        spinner.set_progress(1);
+        let buffer = Compositor::new().paint(spinner, Size::new(8, 1));
+        let row: String = (0..8)
+            .map(|x| buffer.cell(x, 0).unwrap().ch)
+            .collect();
+        assert_eq!(row, "▓░░░ 25%");
+    }
+
+    #[test]
+    fn spinner_indeterminate_paints_current_frame() {
+        let spinner = Spinner::with_frames(&["⠋", "⠙"]);
+        let buffer = Compositor::new().paint(spinner, Size::new(4, 1));
+        assert_eq!(buffer.cell(0, 0).unwrap().ch, '⠋');
+        assert_eq!(buffer.cell(1, 0).unwrap().ch, ' ');
+    }
+
+    #[test]
+    fn status_bar_narrow_viewport_drops_low_priority_segments() {
+        // Row width 12; total content 13 > 12, so the lowest-priority segment
+        // ("ab") is dropped. The survivors lay out with space-between: the
+        // left group "cde" (cols 0-2), the right group "fg hijk" pushed to
+        // the right edge (f at col 5, h at col 8 — the free cell plus the
+        // strip gap sit between the groups).
+        let bar = StatusBar::new(Style::new())
+            .segment(
+                Segment::new("ab", Style::new())
+                    .priority(0),
+            )
+            .segment(
+                Segment::new("cde", Style::new())
+                    .priority(1),
+            )
+            .segment(
+                Segment::new("fg", Style::new())
+                    .align(SegmentAlign::Right)
+                    .priority(2),
+            )
+            .segment(
+                Segment::new("hijk", Style::new())
+                    .align(SegmentAlign::Right)
+                    .priority(3),
+            );
+        let buffer = Compositor::new().paint(bar, Size::new(12, 1));
+        let row: String = (0..12).map(|x| buffer.cell(x, 0).unwrap().ch).collect();
+
+        assert!(row.starts_with("cde"), "row = {row:?}");
+        assert_eq!(row.chars().nth(5), Some('f'));
+        assert_eq!(row.chars().nth(8), Some('h'));
+        assert!(!row.contains('a'), "dropped segment still painted: {row:?}");
+    }
+
+    #[test]
+    fn status_bar_pins_left_and_right_segments_to_the_edges() {
+        let bar = StatusBar::new(Style::new()).left("L", Style::new()).right("R", Style::new());
+        let buffer = Compositor::new().paint(bar, Size::new(20, 1));
+        assert_eq!(buffer.cell(0, 0).unwrap().ch, 'L');
+        assert_eq!(buffer.cell(19, 0).unwrap().ch, 'R');
+    }
+
+    #[test]
+    fn panels_collapsed_hides_body_in_painted_buffer() {
+        let panels = Panels::new(vec![
+            Panel::new("one", Text::new("body-a", Style::new())).collapsed(),
+            Panel::new("two", Text::new("body-b", Style::new())),
+        ]);
+        let buffer = Compositor::new().paint(panels, Size::new(20, 5));
+        let rows: Vec<String> = (0..5)
+            .map(|y| (0..20).map(|x| buffer.cell(x, y).unwrap().ch).collect())
+            .collect();
+
+        // Row 0: the collapsed panel's header (toggle + title), body omitted.
+        assert!(rows[0].starts_with("▸ one"), "row0 = {:?}", rows[0]);
+        // Row 1: the inter-panel gap.
+        assert!(rows[1].trim().is_empty());
+        // Rows 2-3: the expanded panel's header then its body.
+        assert!(rows[2].starts_with("▾ two"), "row2 = {:?}", rows[2]);
+        assert!(rows[3].starts_with("body-b"), "row3 = {:?}", rows[3]);
+        // The collapsed panel's body never painted.
+        assert!(!rows.iter().any(|r| r.contains("body-a")));
+    }
+
+    #[test]
     fn golden_streaming_text_spans_styles_in_12x3() {
         // A 12x3 StreamingText rect holding spans 'abc' (fg red) + 'def'
         // (bold): the concatenated content paints on the first row, each span
@@ -660,5 +1023,236 @@ mod tests {
         ));
         let buffer2 = Compositor::new().paint_scene(&scene2, Size::new(1, 1));
         assert_eq!(buffer2.cell(0, 0).unwrap(), &Cell::default());
+    }
+
+    /// A scene with an in-flow `5x5` bg box at the origin and an absolute
+    /// overlay box (with `top`/`left`/`size` props) placed on top of it.
+    ///
+    /// `z` is the overlay's `z_index` (or `None` to leave it unset).
+    fn overlay_scene(overlay_z: Option<i64>) -> Scene {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let flow = scene
+            .add_child(root, NodeKind::Box, Style::new().bg(Color::Indexed(1)))
+            .expect("flow box");
+        scene.set_prop(flow, "width", PropValue::Int(5));
+        scene.set_prop(flow, "height", PropValue::Int(5));
+        let overlay = scene
+            .add_child(root, NodeKind::Box, Style::new().bg(Color::Indexed(2)))
+            .expect("overlay box");
+        scene.set_prop(overlay, "position", PropValue::Str("absolute".into()));
+        scene.set_prop(overlay, "top", PropValue::Int(1));
+        scene.set_prop(overlay, "left", PropValue::Int(1));
+        scene.set_prop(overlay, "width", PropValue::Int(3));
+        scene.set_prop(overlay, "height", PropValue::Int(3));
+        if let Some(z) = overlay_z {
+            scene.set_prop(overlay, "z_index", PropValue::Int(z));
+        }
+        scene
+    }
+
+    #[test]
+    fn z_order_higher_z_paints_on_top() {
+        // The overlay (z_index 2) paints over the in-flow box where their
+        // rects overlap; each keeps its own background where they do not.
+        let buffer = Compositor::new().paint_scene(&overlay_scene(Some(2)), Size::new(20, 12));
+        // Overlap cell (1..4, 1..4): the higher-z overlay wins.
+        assert_eq!(buffer.cell(2, 2).unwrap().style.bg, Color::Indexed(2));
+        // Overlay-only cell.
+        assert_eq!(buffer.cell(3, 3).unwrap().style.bg, Color::Indexed(2));
+        // Flow-only cell: the flow box's own background.
+        assert_eq!(buffer.cell(0, 0).unwrap().style.bg, Color::Indexed(1));
+    }
+
+    #[test]
+    fn z_order_default_zero_preserves_later_sibling_on_top() {
+        // No z_index anywhere: both nodes stack at 0 and the stable sort
+        // keeps pre-order, so the later sibling (the overlay) paints on top —
+        // exactly the pre-z-order behavior.
+        let buffer = Compositor::new().paint_scene(&overlay_scene(None), Size::new(20, 12));
+        assert_eq!(buffer.cell(2, 2).unwrap().style.bg, Color::Indexed(2));
+    }
+
+    #[test]
+    fn z_order_tie_keeps_tree_order() {
+        // Equal explicit z-indexes keep tree order: the later sibling still
+        // paints on top.
+        let mut scene = overlay_scene(Some(3));
+        let root = scene.root_id();
+        // Give the in-flow box the same z_index so the tie is explicit.
+        let flow = scene.children(root).unwrap()[0];
+        scene.set_prop(flow, "z_index", PropValue::Int(3));
+
+        let buffer = Compositor::new().paint_scene(&scene, Size::new(20, 12));
+        assert_eq!(buffer.cell(2, 2).unwrap().style.bg, Color::Indexed(2));
+    }
+
+    #[test]
+    fn absolute_overlay_paints_above_flow() {
+        // An absolutely positioned overlay with a higher z-index than its
+        // in-flow sibling paints over it where the rects overlap.
+        let scene = overlay_scene(Some(1));
+        let root = scene.root_id();
+        // The in-flow box keeps z_index 0 (default); the overlay has 1.
+        let flow = scene.children(root).unwrap()[0];
+        assert_eq!(scene.prop(flow, "z_index"), None, "flow box z defaults to 0");
+
+        let buffer = Compositor::new().paint_scene(&scene, Size::new(20, 12));
+        // Overlap cell: the overlay wins.
+        assert_eq!(buffer.cell(2, 2).unwrap().style.bg, Color::Indexed(2));
+        // Flow-only cell: the flow box's background still shows through.
+        assert_eq!(buffer.cell(0, 0).unwrap().style.bg, Color::Indexed(1));
+    }
+
+    #[test]
+    fn clip_rect_restricts_subtree_drawing() {
+        // A 6x3 box at the origin with a clip rect covering only its first
+        // two rows: a 3-row-tall child text is drawn only inside the clip.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let b = scene
+            .add_child(root, NodeKind::Box, Style::new())
+            .expect("box");
+        scene.set_prop(b, "width", PropValue::Int(6));
+        scene.set_prop(b, "height", PropValue::Int(3));
+        scene.set_clip_rect(b, Rect::new(0, 0, 6, 2));
+
+        // Three single-row text children at rows 0, 1, 2 (column layout).
+        scene.set_prop(b, "flex_direction", PropValue::Str("column".into()));
+        for (row, ch) in ["a", "b", "c"].iter().enumerate() {
+            let t = scene.add_text(b, ch, Style::new()).expect("text");
+            scene.set_prop(t, "height", PropValue::Int(1));
+            scene.set_prop(t, "align_self", PropValue::Str("flex-start".into()));
+            let _ = row;
+        }
+
+        let buffer = Compositor::new().paint_scene(&scene, Size::new(6, 3));
+        // Clip rows 0-1: 'a' and 'b' visible, 'c' (row 2) clipped away.
+        assert_eq!(buffer.cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(buffer.cell(0, 1).unwrap().ch, 'b');
+        assert_eq!(buffer.cell(0, 2).unwrap(), &Cell::default());
+    }
+
+    #[test]
+    fn clip_rect_out_of_bounds_paints_nothing() {
+        // A clip rect that lies entirely outside the laid-out text: nothing
+        // from the subtree paints.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let b = scene
+            .add_child(root, NodeKind::Box, Style::new())
+            .expect("box");
+        scene.set_prop(b, "width", PropValue::Int(4));
+        scene.set_prop(b, "height", PropValue::Int(1));
+        // Clip to a region that does not overlap the box at all.
+        scene.set_clip_rect(b, Rect::new(10, 10, 2, 2));
+        scene.add_text(b, "hi", Style::new()).expect("text");
+
+        let buffer = Compositor::new().paint_scene(&scene, Size::new(4, 1));
+        for x in 0..4 {
+            assert_eq!(buffer.cell(x, 0).unwrap(), &Cell::default());
+        }
+    }
+
+    #[test]
+    fn scroll_offset_pans_content_inside_clip() {
+        // A 4x3 box with scroll_y = 1: content at row 1 renders at row 0 and
+        // row 0 scrolls out of view.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let b = scene
+            .add_child(root, NodeKind::Box, Style::new())
+            .expect("box");
+        scene.set_prop(b, "width", PropValue::Int(4));
+        scene.set_prop(b, "height", PropValue::Int(3));
+        scene.set_clip_rect(b, Rect::new(0, 0, 4, 3));
+        scene.set_scroll_offset(b, 0, 1);
+
+        // Column layout with 3 rows of text.
+        scene.set_prop(b, "flex_direction", PropValue::Str("column".into()));
+        for ch in ["a", "b", "c"] {
+            let t = scene.add_text(b, ch, Style::new()).expect("text");
+            scene.set_prop(t, "height", PropValue::Int(1));
+            scene.set_prop(t, "align_self", PropValue::Str("flex-start".into()));
+        }
+
+        let buffer = Compositor::new().paint_scene(&scene, Size::new(4, 3));
+        // 'a' (row 0) is scrolled out; 'b' renders at row 0, 'c' at row 1.
+        assert_eq!(buffer.cell(0, 0).unwrap().ch, 'b');
+        assert_eq!(buffer.cell(0, 1).unwrap().ch, 'c');
+        assert_eq!(buffer.cell(0, 2).unwrap(), &Cell::default());
+    }
+
+    #[test]
+    fn scroll_offset_with_clip_clips_beyond_region() {
+        // scroll_y = 2 on a 3-row viewport: rows 0-1 scroll out, row 2
+        // renders at row 0; content below the clip (row 3+) never shows.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let b = scene
+            .add_child(root, NodeKind::Box, Style::new())
+            .expect("box");
+        scene.set_prop(b, "width", PropValue::Int(4));
+        scene.set_prop(b, "height", PropValue::Int(3));
+        scene.set_clip_rect(b, Rect::new(0, 0, 4, 3));
+        scene.set_scroll_offset(b, 0, 2);
+
+        scene.set_prop(b, "flex_direction", PropValue::Str("column".into()));
+        for ch in ["a", "b", "c", "d"] {
+            let t = scene.add_text(b, ch, Style::new()).expect("text");
+            scene.set_prop(t, "height", PropValue::Int(1));
+            scene.set_prop(t, "align_self", PropValue::Str("flex-start".into()));
+        }
+
+        let buffer = Compositor::new().paint_scene(&scene, Size::new(4, 3));
+        // Content rows 2 and 3 map to buffer rows 0 and 1.
+        assert_eq!(buffer.cell(0, 0).unwrap().ch, 'c');
+        assert_eq!(buffer.cell(0, 1).unwrap().ch, 'd');
+        assert_eq!(buffer.cell(0, 2).unwrap(), &Cell::default());
+    }
+
+    #[test]
+    fn scroll_pans_streaming_text_and_frame_stays() {
+        // A bordered 5x3 box with scroll_y = 1 holding a streaming child: the
+        // border stays at the frame while the stream's first row scrolls out
+        // and its second row pans to the top of the content area. The clip
+        // rect is the content area inside the border, so scrolled content
+        // never overwrites the frame.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let b = scene
+            .add_child(
+                root,
+                NodeKind::Box,
+                Style::new().border_style(BorderStyle::Plain),
+            )
+            .expect("box");
+        scene.set_prop(b, "width", PropValue::Int(5));
+        scene.set_prop(b, "height", PropValue::Int(3));
+        scene.set_prop(b, "border", PropValue::Int(1));
+        // Clip = the content area inside the 1-cell border.
+        scene.set_clip_rect(b, Rect::new(1, 1, 3, 1));
+        scene.set_scroll_offset(b, 0, 1);
+
+        let s = scene
+            .add_child(b, NodeKind::StreamingText, Style::new())
+            .expect("stream");
+        scene.set_prop(s, "width", PropValue::Int(3));
+        scene.set_prop(s, "height", PropValue::Int(2));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "ab\ncd".to_string(),
+                style: Style::new(),
+            }
+        ));
+
+        let rows = render_scene_rows(&scene, Size::new(5, 3));
+        // Border frame intact: +---+ top, +---+ bottom.
+        // Content: stream row 0 ('ab') scrolled out; stream row 1 ('cd')
+        // panned to the box's first content row.
+        assert_eq!(rows[0], "+---+");
+        assert_eq!(rows[1], "|cd |");
+        assert_eq!(rows[2], "+---+");
     }
 }

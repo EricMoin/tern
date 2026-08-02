@@ -3,43 +3,103 @@
 //!
 //! [`Text`] is a leaf that paints its content into its laid-out rect
 //! (clipped to it). [`Box`] is a flex container that paints its background,
-//! optional border glyphs, and a padding inset around its children. Both are
-//! plain data plus builder helpers, mirroring the imperative component model
-//! of the render pipeline (see `docs/architecture.md`, stages 5-6).
+//! optional border glyphs, and a padding inset around its children. The
+//! roadmap components — [`Input`](crate::Input), [`Spinner`](crate::Spinner),
+//! [`Panels`](crate::Panels), [`StatusBar`](crate::StatusBar) — layer richer
+//! interaction state on top of the same pattern: each is a plain-data struct
+//! with builder helpers and editing/mutation methods that materializes as a
+//! subtree of `Box`/`Text` scene nodes (see `docs/components.md`).
+//!
+//! Every container renderable exposes a *root frame* ([`Renderable::root_box`]:
+//! the top-level box's style + layout props) plus its content
+//! ([`Renderable::materialize_under`]). The compositor uses those to promote
+//! the frame to the scene root when the renderable is painted as the top of a
+//! tree, so a root `Box`/`StatusBar` fills the viewport.
 
 use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene};
 use tern_core::{Color, Modifiers, Style};
 
-/// A node in an imperative component tree: either a [`Text`] leaf or a
-/// [`Box`] container.
+use crate::input::Input;
+use crate::panels::Panels;
+use crate::spinner::Spinner;
+use crate::statusbar::StatusBar;
+
+/// A node in an imperative component tree: a [`Text`] leaf, a [`Box`]
+/// container, or one of the roadmap components.
 #[derive(Debug, Clone)]
 pub enum Renderable {
     /// A text leaf.
     Text(Text),
     /// A box container.
     Box(Box),
+    /// A single-line text-entry field ([`Input`]).
+    Input(Input),
+    /// An animated progress indicator ([`Spinner`]).
+    Spinner(Spinner),
+    /// A stacked, collapsible panel container ([`Panels`]).
+    Panels(Panels),
+    /// A bottom status strip ([`StatusBar`]).
+    StatusBar(StatusBar),
 }
 
 impl Renderable {
     /// Materialize this renderable as a new subtree under `parent`, returning
     /// the new node's id.
+    ///
+    /// Container renderables (and bare [`Box`]es) materialize their root frame
+    /// as a new box node, then their content under it. A [`Text`] leaf adds a
+    /// text node directly.
     pub(crate) fn materialize(&self, scene: &mut Scene, parent: NodeId) -> NodeId {
         match self {
             Renderable::Text(t) => scene
                 .add_text(parent, &t.content, t.style)
                 .expect("text node materialized under an existing parent"),
-            Renderable::Box(b) => {
+            other => {
+                let frame = other
+                    .root_box()
+                    .expect("container renderables carry a root frame");
                 let id = scene
-                    .add_child(parent, NodeKind::Box, b.style)
-                    .expect("box node materialized under an existing parent");
-                for (key, value) in b.to_props() {
+                    .add_child(parent, NodeKind::Box, frame.style)
+                    .expect("container node materialized under an existing parent");
+                for (key, value) in frame.to_props() {
                     scene.set_prop(id, &key, value);
                 }
-                for child in &b.children {
-                    child.materialize(scene, id);
-                }
+                other.materialize_under(scene, id);
                 id
             }
+        }
+    }
+
+    /// The root frame of a container renderable: the top-level box's style and
+    /// layout props (without children), used by the compositor to promote the
+    /// frame to the scene root when this renderable is painted as the top of a
+    /// tree. `None` for bare [`Text`] roots.
+    pub(crate) fn root_box(&self) -> Option<Box> {
+        match self {
+            Renderable::Box(b) => Some(b.clone()),
+            Renderable::Input(i) => Some(i.frame()),
+            Renderable::Spinner(s) => Some(s.frame()),
+            Renderable::Panels(p) => Some(p.frame()),
+            Renderable::StatusBar(sb) => Some(sb.frame()),
+            Renderable::Text(_) => None,
+        }
+    }
+
+    /// Materialize everything below the (already-promoted) root frame under
+    /// `parent`. For a bare [`Box`] that is its children; for a roadmap
+    /// component, its content.
+    pub(crate) fn materialize_under(&self, scene: &mut Scene, parent: NodeId) {
+        match self {
+            Renderable::Box(b) => {
+                for child in &b.children {
+                    child.materialize(scene, parent);
+                }
+            }
+            Renderable::Input(i) => i.materialize_content(scene, parent),
+            Renderable::Spinner(s) => s.materialize_content(scene, parent),
+            Renderable::Panels(p) => p.materialize_content(scene, parent),
+            Renderable::StatusBar(sb) => sb.materialize_content(scene, parent),
+            Renderable::Text(_) => {}
         }
     }
 }

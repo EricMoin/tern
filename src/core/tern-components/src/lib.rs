@@ -1,15 +1,20 @@
-//! tern-components — the compositor and imperative Text/Box renderables.
+//! tern-components — the compositor and imperative renderables.
 //!
 //! Sits at stage 6 of the render pipeline (see `docs/architecture.md`): the
 //! [`Compositor`] runs the layout engine from tern-layout over a scene tree
 //! and paints the laid-out nodes into a tern-core [`Buffer`].
 //!
-//! Two API surfaces:
+//! Three API surfaces:
 //!
 //! * **Imperative renderables** — [`Text`] and [`Box`] builder objects that
 //!   materialize into a tern-core [`Scene`]. A [`Text`] paints its content
 //!   clipped to its laid-out rect; a [`Box`] paints its background, optional
 //!   border glyphs, and a padding inset around its children.
+//! * **Roadmap components** — [`Input`], [`Spinner`], [`Panels`], and
+//!   [`StatusBar`], the Rust renderable half of the `docs/components.md`
+//!   widget roadmap. Each is plain state plus builder/editing methods that
+//!   materializes as a `Box`/`Text` subtree; [`Input`] stamps a `caret` prop
+//!   the compositor paints as a block caret.
 //! * **The [`Compositor`]** — takes a renderable tree root (or a raw
 //!   [`Scene`]) and a viewport size, runs the layout engine, and paints into a
 //!   fresh [`Buffer`].
@@ -17,7 +22,15 @@
 #![forbid(unsafe_code)]
 
 mod compositor;
+mod input;
+mod panels;
 mod renderable;
+mod spinner;
+mod statusbar;
 
 pub use compositor::Compositor;
+pub use input::{Input, Key, KeyAction};
+pub use panels::{Panel, Panels};
 pub use renderable::{Box, Renderable, Text};
+pub use spinner::{BRAILLE_FRAMES, LINE_FRAMES, Spinner, SpinnerKind};
+pub use statusbar::{Segment, SegmentAlign, StatusBar};
