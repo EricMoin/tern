@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use crate::rect::Rect;
 use crate::style::Style;
 
 /// Stable identity of a scene node, unique within a [`Scene`].
@@ -348,6 +349,64 @@ impl Scene {
     /// Read a property from a node.
     pub fn prop(&self, id: NodeId, key: &str) -> Option<&PropValue> {
         self.nodes.get(&id).and_then(|n| n.props.get(key))
+    }
+
+    /// The clip rect declared on a node via the `clip_x` / `clip_y` /
+    /// `clip_width` / `clip_height` props (in scene coordinates), or `None`
+    /// when any of the four is absent. When set, the compositor restricts
+    /// drawing of the node's subtree to this rect.
+    pub fn clip_rect(&self, id: NodeId) -> Option<Rect> {
+        let x = self.int_prop(id, "clip_x")?;
+        let y = self.int_prop(id, "clip_y")?;
+        let width = self.int_prop(id, "clip_width")?;
+        let height = self.int_prop(id, "clip_height")?;
+        if width < 0 || height < 0 {
+            return None;
+        }
+        Some(Rect::new(x as i32, y as i32, width as u32, height as u32))
+    }
+
+    /// Set a node's clip rect via the `clip_x` / `clip_y` / `clip_width` /
+    /// `clip_height` props. Returns `false` when the node does not exist.
+    pub fn set_clip_rect(&mut self, id: NodeId, clip: Rect) -> bool {
+        let Some(n) = self.nodes.get_mut(&id) else {
+            return false;
+        };
+        n.props.insert("clip_x".to_string(), PropValue::Int(clip.x as i64));
+        n.props.insert("clip_y".to_string(), PropValue::Int(clip.y as i64));
+        n.props.insert("clip_width".to_string(), PropValue::Int(clip.width as i64));
+        n.props.insert("clip_height".to_string(), PropValue::Int(clip.height as i64));
+        true
+    }
+
+    /// The scroll offset declared on a node via the `scroll_x` / `scroll_y`
+    /// props (in cells), defaulting to `(0, 0)` when either is absent. The
+    /// compositor shifts the node's content by this offset inside its clip
+    /// rect.
+    pub fn scroll_offset(&self, id: NodeId) -> (i32, i32) {
+        (
+            self.int_prop(id, "scroll_x").unwrap_or(0) as i32,
+            self.int_prop(id, "scroll_y").unwrap_or(0) as i32,
+        )
+    }
+
+    /// Set a node's scroll offset via the `scroll_x` / `scroll_y` props.
+    /// Returns `false` when the node does not exist.
+    pub fn set_scroll_offset(&mut self, id: NodeId, x: i32, y: i32) -> bool {
+        let Some(n) = self.nodes.get_mut(&id) else {
+            return false;
+        };
+        n.props.insert("scroll_x".to_string(), PropValue::Int(x as i64));
+        n.props.insert("scroll_y".to_string(), PropValue::Int(y as i64));
+        true
+    }
+
+    /// Read an integer property from a node.
+    fn int_prop(&self, id: NodeId, key: &str) -> Option<i64> {
+        match self.prop(id, key) {
+            Some(PropValue::Int(i)) => Some(*i),
+            _ => None,
+        }
     }
 
     /// Whether `id` is `ancestor` itself or a descendant of it.
@@ -748,5 +807,57 @@ mod tests {
         assert!(scene.node(s).is_none());
         assert!(scene.stream(s).is_none());
         assert!(scene.children(root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn clip_rect_defaults_to_none() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let b = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        assert_eq!(scene.clip_rect(b), None);
+        assert_eq!(scene.clip_rect(NodeId(999)), None);
+    }
+
+    #[test]
+    fn clip_rect_roundtrips_via_props() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let b = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        assert!(scene.set_clip_rect(b, Rect::new(2, 3, 10, 5)));
+        assert_eq!(scene.clip_rect(b), Some(Rect::new(2, 3, 10, 5)));
+        // Reading the raw props matches the setters.
+        assert_eq!(scene.prop(b, "clip_x"), Some(&PropValue::Int(2)));
+        assert_eq!(scene.prop(b, "clip_height"), Some(&PropValue::Int(5)));
+
+        // Missing a node fails.
+        assert!(!scene.set_clip_rect(NodeId(999), Rect::new(0, 0, 1, 1)));
+    }
+
+    #[test]
+    fn clip_rect_rejects_negative_dimensions() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let b = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        scene.set_prop(b, "clip_x", PropValue::Int(0));
+        scene.set_prop(b, "clip_y", PropValue::Int(0));
+        scene.set_prop(b, "clip_width", PropValue::Int(-4));
+        scene.set_prop(b, "clip_height", PropValue::Int(2));
+        assert_eq!(scene.clip_rect(b), None);
+    }
+
+    #[test]
+    fn scroll_offset_defaults_and_roundtrips() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let b = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        assert_eq!(scene.scroll_offset(b), (0, 0));
+        assert_eq!(scene.scroll_offset(NodeId(999)), (0, 0));
+
+        assert!(scene.set_scroll_offset(b, 4, -2));
+        assert_eq!(scene.scroll_offset(b), (4, -2));
+        assert_eq!(scene.prop(b, "scroll_x"), Some(&PropValue::Int(4)));
+        assert_eq!(scene.prop(b, "scroll_y"), Some(&PropValue::Int(-2)));
+
+        assert!(!scene.set_scroll_offset(NodeId(999), 1, 1));
     }
 }
