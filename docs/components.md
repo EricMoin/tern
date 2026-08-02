@@ -19,17 +19,38 @@ The MVP ships the core `Text` / `Box` renderables plus the compositor. A
 completeness pass has since landed the **Rust renderable half** of the
 [Input](#input), [Spinner](#spinner), [Panels / split layouts](#panels--split-layouts),
 and [StatusBar](#statusbar) components in `src/core/tern-components` (state,
-interaction, and paint are unit- and golden-tested); their **JS elements** and
-renderer wiring (timer redraw, focus/key routing) remain. The components below
-layer richer behavior on top of that foundation.
+interaction, and paint are unit- and golden-tested), and the **JS elements and
+renderer wiring** now ship too: element factories in `@tern/core`, host
+components/factories in `@tern/react` and `@tern/solid`, focus/key routing via
+the core `FocusManager`, and spinner timer redraw. The components below layer
+richer behavior on top of that foundation.
+
+## Event model
+
+Terminal events reach the scene through `@tern/core`'s `Renderer`:
+`pollEvents()` blocks up to a timeout for native input and returns the tagged
+`TernEventJs` union (`"key"` / `"resize"` / `"focus"` / `"mouse"`), feeding the
+`onKey` / `onResize` / `onFocus` / `onMouse` handlers the renderer exposes:
+
+- `onKey(event)` — a `KeyEvent` (key name plus optional `char` / modifiers).
+- `onResize({ width, height })` — the new terminal size.
+- `onFocus({ focus_gained })` — `true` on focus gained, `false` on lost.
+- `onMouse(event)` — a `MouseEventJs` payload.
+
+Key routing goes through the core `FocusManager`: elements register with
+`useFocus(id, node, onKey)` and the manager dispatches each key to the focused
+element's handler (`routeKey`). The tree-level input hooks consult the manager
+first — `useInput` in `@tern/react` and `subscribeInput` in `@tern/solid`
+route each key through the core `FocusManager` before falling back to the tree
+handler.
 
 ## Status legend
 
 | Status | Meaning |
 |--------|---------|
 | ✅ MVP | Ships in the first runnable milestone |
+| ✅ Shipped | JS element + renderer wiring complete |
 | 🔜 Soon | Next after MVP; small, well-understood |
-| 🔜 Soon · Rust ✅ | The tern-components renderable half ships; the JS element / renderer wiring is pending |
 | 🧭 Later | Needs a prerequisite phase (see [roadmap.md](roadmap.md)) |
 
 | Component | Status | Needs |
@@ -37,10 +58,10 @@ layer richer behavior on top of that foundation.
 | [StreamingText](#streamingtext) | 🔜 Soon | incremental span feed |
 | [MarkdownView](#markdownview) | 🧭 Later | tree-sitter highlighting |
 | [DiffView](#diffview) | 🔜 Soon | — |
-| [Input](#input) | 🔜 Soon · Rust ✅ | JS element + focus/key routing |
-| [Spinner](#spinner) | 🔜 Soon · Rust ✅ | JS element + timer-driven redraw |
-| [Panels / split layouts](#panels--split-layouts) | 🔜 Soon · Rust ✅ | resize handles + JS element |
-| [StatusBar](#statusbar) | 🔜 Soon · Rust ✅ | JS element + reserved viewport row |
+| [Input](#input) | ✅ Shipped | — |
+| [Spinner](#spinner) | ✅ Shipped | focus-aware tick pause → [roadmap Phase 2](roadmap.md#phase-2--resize-focus--mouse-events) |
+| [Panels / split layouts](#panels--split-layouts) | ✅ Shipped | mouse drag-resize handles → [roadmap Phase 2](roadmap.md#phase-2--resize-focus--mouse-events) |
+| [StatusBar](#statusbar) | ✅ Shipped | reserved viewport row |
 | [Select](#select) | 🧭 Later | — |
 
 ---
@@ -103,7 +124,7 @@ half-open while tokens are still arriving. The view must render best-effort
 - **Block styles:** headings, lists, blockquotes, horizontal rules, code
   fences, paragraphs. Rendered as styled spans over `Text`/`Box`.
 - **Inline styles:** `**bold**`, `` `code` ``, `[links](url)`, `*italic*`.
-- **Syntax highlighting** inside code fences via tree-sitter (Phase 3 in
+- **Syntax highlighting** inside code fences via tree-sitter (Phase 4 in
   [roadmap.md](roadmap.md)); before that lands, fences render with a single
   fence style and no token colors.
 - **Layout:** reuses tern-layout over block-level boxes; code blocks get a
@@ -197,8 +218,11 @@ for history navigation and word-jump.
 **Rust renderable:** ships in `src/core/tern-components` — `Input` owns the
 value, char-index cursor, placeholder, bounded history ring, and a
 renderer-agnostic `Key`/`handle_key` mapping; it materializes as a framed box
-with a `caret`-prop text leaf the compositor paints as a block caret. JS
-element and focus/key routing are pending.
+with a `caret`-prop text leaf the compositor paints as a block caret. The JS
+element (`Input` in `@tern/core`; `<Input>` in `@tern/react`, `Input` in
+`@tern/solid`) adds focus/key routing: a `focusId` registers with the core
+`FocusManager` (`useFocus`), routed keys edit the value via `editKey`, and
+`onChange` / `onSubmit` fire on edits and Enter.
 
 ---
 
@@ -207,8 +231,10 @@ element and focus/key routing are pending.
 **Purpose:** show activity — indeterminate "working…" (agent thinking) and
 determinate progress (tool execution, file upload, token budget).
 
-**Core problem:** animation needs a *periodic redraw* that the MVP
-paint-on-demand pipeline does not provide yet (see the timer/event note below).
+**Core problem:** animation needs a *periodic redraw* on top of a
+paint-on-demand pipeline. The JS side now provides it — `<Spinner>` in
+`@tern/react` runs a tick interval while mounted (see the Rust renderable note
+below); pausing the tick while the terminal is unfocused is roadmap Phase 2.
 
 **Design:**
 
@@ -233,8 +259,10 @@ unmounted.
 
 **Rust renderable:** ships in `src/core/tern-components` — `Spinner` cycles
 indeterminate frames on `tick()` (the renderer timer drives it) and paints the
-determinate bar via `filled_cells()`/`bar()`. JS element and the timer wiring
-are pending.
+determinate bar via `filled_cells()`/`bar()`. The JS element (`Spinner` in
+`@tern/core`; `<Spinner>` in `@tern/react`, `Spinner` in `@tern/solid`) adds
+timer redraw: a tick interval (default 100 ms) advances the frame via `tick`
+while mounted and is cleared on unmount.
 
 ---
 
@@ -273,8 +301,11 @@ keyboard resize sequence changes pane widths and a golden buffer matches.
 
 **Rust renderable:** ships in `src/core/tern-components` — `Panels` stacks
 `Panel`s (column or row), each with a collapsible header; `toggle`/`collapse`/
-`expand` hide the body and an `active` index tracks focus. Resize handles and
-the JS element are pending.
+`expand` hide the body and an `active` index tracks focus. The JS element
+(`Panels` in `@tern/core`; `<Panels>` in `@tern/react`, `Panels` in
+`@tern/solid`) exposes `collapsePanel` / `expandPanel` / `togglePanel` /
+`focusPanel`. Mouse drag-resize handles are still tracked in
+[roadmap.md](roadmap.md) Phase 2.
 
 ---
 
@@ -311,9 +342,13 @@ test).
 
 **Rust renderable:** ships in `src/core/tern-components` — `StatusBar` holds
 left/center/right `Segment`s and `trimmed()` drops lowest-priority segments
-(rightmost-first on ties) against a row width; it materializes as a
-`space-between` strip. JS element and the reserved-viewport-row wiring are
-pending.
+(rightmost-first on ties) against a row width. The JS element (`StatusBar` in
+`@tern/core`; `<StatusBar>` in `@tern/react`, `StatusBar` in `@tern/solid`)
+materializes as a single-row `space-between` strip (height 1) whose children
+are the left/center/right segment `Text` nodes. The reserved viewport row
+(the compositor subtracting the bottom row before laying out panels, see
+**Design** above) does not ship yet — a `StatusBar` is currently laid out as
+an ordinary node in the scene.
 
 ---
 
