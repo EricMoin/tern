@@ -30,6 +30,15 @@
 //! fills the viewport (and a `StatusBar`/`Input`/`Textarea` root is given the
 //! viewport row width for overflow trimming / horizontal scroll / soft wrap).
 //!
+//! ## Reserved status row
+//!
+//! A `StatusBar` in the tree owns the bottom viewport row: the layout
+//! viewport handed to the engine is one row shorter, so panels and scroll
+//! regions lay out entirely above it, and the strip frame — stamped
+//! `status_bar: true` by [`StatusBar`](crate::StatusBar) — is pinned to that
+//! row (docs/components.md "StatusBar — Reserved row"). A top-level
+//! `StatusBar` therefore spans the whole bottom row, not the whole viewport.
+//!
 //! ## Clip and scroll regions
 //!
 //! Any node may declare a clip rect (the `clip_x` / `clip_y` / `clip_width` /
@@ -126,6 +135,13 @@ impl Compositor {
             _ => {}
         }
 
+        // A root StatusBar is a single-row strip that spans the whole bottom
+        // row: its frame carries an explicit height of 1 (see
+        // `StatusBar::frame`), which disables the "root fills the viewport"
+        // rule, so the compositor stamps the viewport width back onto the
+        // promoted frame — the strip must span the full row it pins to.
+        let root_is_status_bar = matches!(root, Renderable::StatusBar(_));
+
         match root {
             Renderable::Text(t) => {
                 scene.add_text(scene_root, &t.content, t.style);
@@ -146,6 +162,9 @@ impl Compositor {
                     ),
                     "scene root always exists"
                 );
+                if root_is_status_bar {
+                    scene.set_prop(scene_root, "width", PropValue::Int(viewport.width as i64));
+                }
                 other.materialize_under(&mut scene, scene_root);
             }
         }
@@ -159,14 +178,15 @@ impl Compositor {
         // parent (verified against taffy's `round_layout` in
         // `taffy/src/compute/mod.rs`: `layout.location = round(unrounded
         // location)` with no parent-origin accumulation). Painting needs
-        // scene-absolute rects, so accumulate parent origins into the raw
-        // layout result before anything else. For trees where every nested
-        // parent sits at the origin (all pre-existing golden tests) this is
-        // an exact no-op; it is what makes depth-2+ subtrees — nested boxes,
-        // and the roadmap components' group/panel -> text leaves — land at
-        // their real scene positions.
-        let raw = self.layout.compute(scene, viewport);
-        let rects = scene_absolute_rects(scene, raw);
+        // scene-absolute rects, so [`layout_rects`](Compositor::layout_rects)
+        // accumulates parent origins into the raw layout result before
+        // anything else (and reserves the bottom row for a `StatusBar`, if
+        // the scene has one). For trees where every nested parent sits at the
+        // origin (all pre-existing golden tests) this is an exact no-op; it
+        // is what makes depth-2+ subtrees — nested boxes, and the roadmap
+        // components' group/panel -> text leaves — land at their real scene
+        // positions.
+        let rects = self.layout_rects(scene, viewport);
         // Collect every laid-out node in pre-order, then paint by ascending
         // effective z-index. The sort is stable, so equal z-indexes keep
         // pre-order: with no `z_index` prop anywhere this paints exactly like
@@ -206,8 +226,7 @@ impl Compositor {
     /// clip and scroll, so a scrollable pane's border stays hittable while
     /// scrolled-out content is not.
     pub fn hit_test(&mut self, scene: &Scene, col: i32, row: i32, viewport: Size) -> Vec<NodeId> {
-        let raw = self.layout.compute(scene, viewport);
-        let rects = scene_absolute_rects(scene, raw);
+        let rects = self.layout_rects(scene, viewport);
         let mut order: Vec<NodeId> = Vec::new();
         collect_paint_order(scene, scene.root_id(), &rects, &mut order);
         order.sort_by(|&a, &b| z_index(scene, a).cmp(&z_index(scene, b)));
@@ -291,6 +310,46 @@ impl Compositor {
             _ => Some((rect.width, rect.height)),
         }
     }
+
+    /// Compute scene-absolute rects for `scene` under `viewport`, reserving
+    /// the bottom viewport row for the scene's `StatusBar` (when it has one).
+    ///
+    /// A `StatusBar` owns the reserved row (docs/components.md "StatusBar —
+    /// Reserved row"): the layout viewport handed to the engine is one row
+    /// shorter, so every panel and scroll region lays out entirely above the
+    /// row; the strip frame — and with it the whole strip subtree — is then
+    /// pinned to that row, so no panel/scroll region overlaps it. A scene
+    /// without a `StatusBar` is laid out against the full viewport exactly as
+    /// before.
+    fn layout_rects(&mut self, scene: &Scene, viewport: Size) -> HashMap<NodeId, Rect> {
+        let Some(sb) = find_status_bar(scene) else {
+            return scene_absolute_rects(scene, self.layout.compute(scene, viewport));
+        };
+        // One row shorter for the panels; never below one row so a
+        // degenerate 1-row viewport still lays out (it is the strip's own
+        // row — a root `StatusBar` keeps working there).
+        let layout_viewport =
+            Size::new(viewport.width, viewport.height.saturating_sub(1).max(1));
+        let mut rects = scene_absolute_rects(scene, self.layout.compute(scene, layout_viewport));
+        // Pin the strip frame to the reserved row and shift its whole subtree
+        // by the same delta, so the segments keep their internal geometry.
+        let Some(&frame) = rects.get(&sb) else {
+            return rects;
+        };
+        let dy = viewport.height as i32 - 1 - frame.y;
+        if dy != 0 {
+            let mut stack: Vec<NodeId> = vec![sb];
+            while let Some(id) = stack.pop() {
+                if let Some(rect) = rects.get_mut(&id) {
+                    rect.y += dy;
+                }
+                if let Some(node) = scene.node(id) {
+                    stack.extend(node.children.iter().copied());
+                }
+            }
+        }
+        rects
+    }
 }
 
 /// Whether `id` (with laid-out rect `rect`) covers the cell (`col`, `row`)
@@ -323,6 +382,22 @@ fn hits_region(
     let ox = col + region.scroll_x;
     let oy = row + region.scroll_y;
     rect.contains(ox, oy) && region.contains(ox, oy)
+}
+
+/// The id of the scene's `StatusBar` strip frame, if any: the node stamped
+/// `status_bar: true` by [`StatusBar::materialize_content`](crate::StatusBar)
+/// when it materializes. The compositor uses the marker to reserve the bottom
+/// viewport row for the strip (docs/components.md "StatusBar — Reserved row");
+/// like `z_index` / `wrap` it is compositor-consumed, never a layout keyword.
+fn find_status_bar(scene: &Scene) -> Option<NodeId> {
+    fn walk(scene: &Scene, id: NodeId) -> Option<NodeId> {
+        let node = scene.node(id)?;
+        if matches!(node.props.get("status_bar"), Some(PropValue::Bool(true))) {
+            return Some(id);
+        }
+        node.children.iter().find_map(|&child| walk(scene, child))
+    }
+    walk(scene, scene.root_id())
 }
 
 /// Convert taffy's parent-relative layout rects into scene-absolute rects by
@@ -1192,6 +1267,75 @@ mod tests {
         let buffer = Compositor::new().paint(bar, Size::new(20, 1));
         assert_eq!(buffer.cell(0, 0).unwrap().ch, 'L');
         assert_eq!(buffer.cell(19, 0).unwrap().ch, 'R');
+    }
+
+    #[test]
+    fn status_bar_root_pins_to_the_bottom_row() {
+        // A root StatusBar is a single-row strip, not a viewport-filling box:
+        // it pins to the bottom row of a 20x3 viewport, leaving rows 0-1
+        // empty (docs/components.md "StatusBar — Reserved row").
+        let bar = StatusBar::new(Style::new()).left("L", Style::new()).right("R", Style::new());
+        let buffer = Compositor::new().paint(bar, Size::new(20, 3));
+        assert_eq!(buffer.cell(0, 2).unwrap().ch, 'L');
+        assert_eq!(buffer.cell(19, 2).unwrap().ch, 'R');
+        for y in 0..2 {
+            for x in 0..20 {
+                assert_eq!(buffer.cell(x, y).unwrap(), &Cell::default(), "({x},{y}) not empty");
+            }
+        }
+    }
+
+    #[test]
+    fn golden_panels_and_status_bar_reserve_bottom_row() {
+        // A column app layout of an expanded Panels strip plus a StatusBar,
+        // painted into a 20x8 viewport: the compositor subtracts the bottom
+        // row from the layout viewport, so the panels lay out entirely above
+        // it and the strip — which flex would have placed at row 5 — pins to
+        // the last row (row 7). The last row belongs to the status bar; no
+        // panel content and no segment leak across the boundary.
+        let tree = Box::new(
+            Style::new(),
+            vec![
+                Panels::new(vec![
+                    Panel::new("one", Text::new("body-a", Style::new())),
+                    Panel::new("two", Text::new("body-b", Style::new())),
+                ])
+                .into(),
+                StatusBar::new(Style::new())
+                    .left("L", Style::new())
+                    .right("R", Style::new())
+                    .into(),
+            ],
+        )
+        .column();
+
+        let buffer = Compositor::new().paint(tree, Size::new(20, 8));
+        let rows: Vec<String> = (0..8)
+            .map(|y| (0..20).map(|x| buffer.cell(x, y).unwrap().ch).collect())
+            .collect();
+
+        // Panels fill the rows above the reserved one: header + body per
+        // panel, with the 1-cell inter-panel gap.
+        assert!(rows[0].starts_with("▾ one"), "row0 = {:?}", rows[0]);
+        assert!(rows[1].starts_with("body-a"), "row1 = {:?}", rows[1]);
+        assert!(rows[2].trim().is_empty(), "row2 = {:?}", rows[2]);
+        assert!(rows[3].starts_with("▾ two"), "row3 = {:?}", rows[3]);
+        assert!(rows[4].starts_with("body-b"), "row4 = {:?}", rows[4]);
+        // The in-flow slot the strip would have occupied (row 5) is vacated
+        // and stays empty: the strip pinned to the reserved last row.
+        assert!(rows[5].trim().is_empty(), "row5 = {:?}", rows[5]);
+        assert!(rows[6].trim().is_empty(), "row6 = {:?}", rows[6]);
+        // The reserved row belongs to the status bar: its left/right segments
+        // pin to the strip's edges.
+        assert_eq!(rows[7].chars().nth(0), Some('L'), "row7 = {:?}", rows[7]);
+        assert_eq!(rows[7].chars().nth(19), Some('R'), "row7 = {:?}", rows[7]);
+        // No segment leaked above the reserved row, and no panel content
+        // leaked onto it.
+        assert!(
+            !rows[..7].iter().any(|r| r.contains('L') || r.contains('R')),
+            "segments leaked above the reserved row"
+        );
+        assert!(!rows[7].contains('▾') && !rows[7].contains("body"), "row7 = {:?}", rows[7]);
     }
 
     #[test]
