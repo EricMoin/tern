@@ -1,7 +1,7 @@
 {
   "name": "@tern/react",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "license": "MIT",
   "description": "tern react — react-reconciler custom renderer for tern",
   "type": "module",

@@ -1,7 +1,7 @@
 {
   "name": "@tern/core",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "license": "MIT",
   "description": "tern core — TypeScript bindings for the tern TUI engine",
   "type": "module",
