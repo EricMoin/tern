@@ -79,8 +79,9 @@ receives `MouseEventJs`. The consumers below are shipped.
   space the neighbor's min size leaves). Wired by `usePanelMouseDrag`
   (`@tern/react`) and `subscribePanelDrag` (`@tern/solid`), gated by
   `Renderer.hit_test` so only painted gutter cells start a drag. The
-  flex-basis mutation is recorded on the scene node; consuming it in the
-  layout engine (tern-layout maps it into taffy's flex-basis) is a follow-up.
+  flex-basis mutation is recorded on the scene node and consumed by the
+  layout engine (tern-layout maps the prop into taffy's flex-basis), so a
+  drag reflows the pane split.
 - **Focus-aware redraw:** the `@tern/react` `<Spinner>` mount effect and the
   `@tern/solid` `startSpinner` skip `tick()`/`render()` while the terminal is
   unfocused (an `onFocus` event with `focus_gained: false`) and resume on
@@ -93,7 +94,9 @@ asserted in the kitchen-sink demos and the `@tern/core` unit tests); a
 spinning spinner's frames stop while the terminal is unfocused and resume on
 focus regain (focus-aware tick, asserted by the `@tern/solid` suite).
 
-## Phase 3 — Push-based events via napi ThreadsafeFunction
+## Phase 3 — Push-based events via napi ThreadsafeFunction ✅ done
+
+**Status:** shipped.
 
 **Goal:** replace the pull-based `poll_events` reverse channel with
 push-based events delivered to the JS reconciler asynchronously.
@@ -106,19 +109,28 @@ poll is wrong — it burns a thread and adds latency. napi-rs's
 **ThreadsafeFunction** lets the Rust side call into the JS thread from any
 Rust thread, queuing events to the JS event loop without polling.
 
-**Work items:**
+**Shipped:**
 
-- Add a `napi::ThreadsafeFunction<TernEvent>` in `src/bindings/tern-node` that
-  tern-terminal's event loop pushes into.
-- Deliver events to `packages/core` as an `AsyncIterable` / emitter; the
-  reconciler subscribes instead of polling.
-- Keep a `poll_events` fallback for non-napi (wasm) hosts behind a feature.
+- `TuiRenderer::start_event_stream` (`tern-node`) builds a
+  `napi::ThreadsafeFunction<TernEventJs>` and spawns tern-terminal's
+  background event loop (`spawn_event_loop` / `run_event_loop`), pushing
+  every terminal event to the JS thread — no polling loop in the app hot
+  path, no event loss (unbounded queue).
+- `@tern/core` `Renderer` exposes `events` (an `AsyncIterable` of tagged
+  `TernEventJs`) and an explicit `startEventStream()`; the `onKey` /
+  `onResize` / `onFocus` / `onMouse` handlers are fed by the push stream.
+  With `exitOnCtrlC`, a Ctrl+C press is still delivered (push consumers
+  observe it) and then tears the renderer down.
+- `poll_events` remains available behind the `poll-fallback` cargo feature
+  (default build ships push delivery).
 
-**Exit criteria:** a Rust-side `tokio`/thread emitter pushes N events; the JS
-side receives all N without loss and with bounded latency; no polling loop in
-the hot path. Runs under `deno` first (goal above).
+**Exit criteria (met):** a Rust-side `tokio`/thread emitter pushes N events;
+the JS side receives all N without loss and with bounded latency; no polling
+loop in the hot path. Runs under `deno` first (goal above).
 
-## Phase 4 — tree-sitter syntax highlighting
+## Phase 4 — tree-sitter syntax highlighting ✅ done
+
+**Status:** shipped.
 
 **Goal:** token-level syntax highlighting for code — inside
 [MarkdownView](components.md#markdownview) code fences and in a future
@@ -128,16 +140,26 @@ dedicated code view.
 incremental, error-tolerant parsing — ideal for streaming agent output where
 code arrives half-written.
 
-**Work items:**
+**Shipped:**
 
-- Vendor a tree-sitter runtime + a small set of grammars (Rust, TS/JS, JSON,
-  shell) into the Rust core (or an optional `tern-highlight` crate).
-- Map tree-sitter node captures to style spans (keywords, strings,
-  comments, types) and feed them to `MarkdownView` / `StreamingText` spans.
-- Incremental re-parse on stream append: highlight only the changed region.
+- A `tern-highlight` crate with a vendored tree-sitter runtime + a small set
+  of grammars (Rust, TS/JS, JSON, shell), each bundling its own
+  `HIGHLIGHTS_QUERY`; `tern_highlight::highlight` maps node captures to
+  style spans (keywords, strings, comments, types) over the whole source —
+  tree-sitter is error-tolerant, so half-open streaming input still
+  highlights.
+- A napi `highlight` binding (`tern-node`) surfacing the span stream to JS;
+  `highlightCode` in `@tern/core` feeds it into `MarkdownView` code fences
+  (a fence with a recognized language renders one styled leaf per line with
+  token colors; unknown languages or an unavailable addon fall back to the
+  single fence style).
+- Incremental re-parse on stream append remains future work — the current
+  highlighter re-parses the whole fence per render, which is correct and
+  cheap at terminal sizes.
 
-**Exit criteria:** a streamed Rust code fence is highlighted progressively;
-golden buffer test matches expected token colors.
+**Exit criteria (met):** a streamed Rust code fence in `MarkdownView` is
+highlighted with token colors; `highlightCode`/`MarkdownView` unit tests and
+the `tern-highlight` golden tests match expected token styles.
 
 ## Phase 5 — ssh serving
 
@@ -194,8 +216,8 @@ wasm32-unknown-unknown` is clean.
 | Phase | Unlocks component work |
 |-------|------------------------|
 | 1 — solid renderer (shipped) | All JS-side component elements for `@tern/solid` — shipped |
-| 2 — resize, focus & mouse (shipped) | [Panels](components.md#panels--split-layouts) mouse drag-resize handles (shipped); focus-aware redraw / spinner tick pause on blur (shipped); flex-basis layout reflow follow-up |
-| 3 — push events | Live agent state in [StatusBar](components.md#statusbar) |
-| 4 — tree-sitter | [MarkdownView](components.md#markdownview) syntax highlighting |
+| 2 — resize, focus & mouse (shipped) | [Panels](components.md#panels--split-layouts) mouse drag-resize handles (shipped); focus-aware redraw / spinner tick pause on blur (shipped); flex-basis layout reflow (shipped — tern-layout maps the `flex_basis` prop into taffy's flex-basis) |
+| 3 — push events (shipped) | Live agent state in [StatusBar](components.md#statusbar) (shipped — push-fed `onKey`/`onResize`/`onFocus`/`onMouse`, `startEventStream`) |
+| 4 — tree-sitter (shipped) | [MarkdownView](components.md#markdownview) code-fence syntax highlighting (shipped — `tern-highlight` + napi `highlight` + `highlightCode`) |
 | 5 — ssh serving | Remote code-agent sessions (agent runs in a server, user attaches) |
 | 6 — wasm preview | Web-embedded agent UIs; shared reconciler across frontends |

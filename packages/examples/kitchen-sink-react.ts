@@ -27,11 +27,14 @@ import { Fragment, createElement, useRef, type ReactElement } from "react";
 import {
   Box as CoreBox,
   Input as CoreInput,
+  MARKDOWN_FENCE_BG,
   MODAL_Z_INDEX,
+  MarkdownView,
   createRenderer,
   useFocus as coreUseFocus,
   SCROLLBAR_THUMB_CHAR,
   type MouseEventJs,
+  type TernEventJs,
 } from "@tern/core";
 import {
   Box,
@@ -122,6 +125,24 @@ const SELECT_OPTIONS = [
   { value: "banana", label: "Banana" },
   { value: "cherry", label: "Cherry" },
 ];
+
+/**
+ * The Markdown source of the `<MarkdownView>` demo node: a heading, a
+ * paragraph mixing inline styles, and a rust code fence (the fence exercises
+ * the tree-sitter `highlightCode` path when the native addon is available;
+ * without the addon it falls back to the single fence style).
+ */
+const MARKDOWN_SOURCE = [
+  "# Agent output",
+  "",
+  "Streaming **bold** answer with `code` and [links](https://example.com).",
+  "",
+  "```rust",
+  "fn main() {",
+  "    let x = 1;",
+  "}",
+  "```",
+].join("\n");
 
 /** The columns of the `<Table>`: a left-aligned name, a left-aligned role
  * and a right-aligned score (mixed alignment exercises the per-column cell
@@ -299,6 +320,14 @@ try {
 }
 
 render(createElement(App), renderer);
+
+// The core `MarkdownView` factory is not a React host element (the reconciler
+// only knows the roadmap host tags), so the demo mounts it imperatively as a
+// scene-root sibling — the same pattern the solid kitchen-sink uses for its
+// modal. It renders the MARKDOWN_SOURCE column (heading, styled paragraph,
+// rust code fence) and is asserted below.
+const markdownNode = MarkdownView({ source: MARKDOWN_SOURCE, width: 40 });
+renderer.root.addChild(markdownNode);
 
 // React schedules passive effects (useInput's key subscription, and the
 // StreamingText stream pump) on the scheduler rather than flushing them
@@ -541,6 +570,44 @@ assert(
 );
 assert(statusBar?.props.height === 1, "status bar strip is 1 row tall");
 assert(!("left" in (statusBar?.props ?? {})), "segment keys are lifted out of the strip props");
+// The strip is stamped `status_bar: true` — the marker the compositor reads
+// to reserve the bottom viewport row for the strip (docs/components.md
+// "StatusBar — Reserved row"), so no panel/scroll region overlaps it.
+assert(statusBar?.props.status_bar === true, "the strip carries the reserved-row marker (status_bar: true)");
+
+// --- MarkdownView (mounted as a scene-root sibling) ---------------------------------
+// The core factory renders the source column: a heading, a styled paragraph
+// and a rust code fence. The fence highlights through tree-sitter when the
+// native addon is available (the smoke harness runs with it); without the
+// addon it falls back to the single fence style — both shapes are asserted
+// structurally, mirroring the @tern/core unit tests.
+const markdownNode2 = renderer.root.children[2];
+assert(markdownNode2?.type === "markdown", "MarkdownView materializes as a scene-root sibling");
+assert(markdownNode2?.props.flex_direction === "column", "the markdown root is a flex column");
+assert(!("source" in (markdownNode2?.props ?? {})), "the parsed source never reaches the scene props");
+const mdHeading = markdownNode2?.children[0];
+assert(
+  mdHeading?.type === "text" && mdHeading.props.bold === true && mdHeading.props.underline === true,
+  "the H1 heading renders bold + underlined",
+);
+const mdFence = markdownNode2?.children.find((child) => child.props.bg === MARKDOWN_FENCE_BG);
+assert(mdFence !== undefined, "the rust code fence composes a bg box");
+assert(
+  (mdFence?.children.length ?? 0) === 3,
+  `the fence holds one leaf per code line (got ${mdFence?.children.length})`,
+);
+// The fence leaves reconstruct the source lines exactly (whether highlighted
+// with token colors or plain): a highlighted line may be a flex row of
+// per-span leaves, so the text is the leaves' joined props.
+const fenceText = (node: Node): string =>
+  typeof node.props.text === "string"
+    ? node.props.text
+    : node.children.map(fenceText).join("");
+const fenceLines = mdFence?.children.map((line) => fenceText(line)).join("\n") ?? "";
+assert(
+  fenceLines === "fn main() {\n    let x = 1;\n}",
+  `the fence renders the code lines (got ${JSON.stringify(fenceLines)})`,
+);
 
 // --- Theme ------------------------------------------------------------------------
 assert(themedPrimary?.props.fg === "#123456", "role=primary resolves the custom palette fg");
@@ -642,23 +709,33 @@ focusManager.unregister("area");
 // Event loop: quit on 'q' (via useInput → exit()), or on ctrl+c auto-destroy
 // ---------------------------------------------------------------------------
 
+renderer.startEventStream();
 let quit = false;
 const deadline = Date.now() + 5000;
+const events = renderer.events[Symbol.asyncIterator]();
 while (Date.now() < deadline && !quit) {
   if (renderer.destroyed) {
     // The 'q' handler's exit() destroyed the renderer — clean quit.
     quit = true;
     break;
   }
-  try {
-    renderer.pollEvents(50);
-  } catch {
-    // The renderer was destroyed inside pollEvents (ctrl+c with
-    // exitOnCtrlC) — also a clean quit.
+  // Wait for the next pushed event, bounded by the deadline so a dead
+  // renderer fails the demo instead of hanging forever.
+  const next = await Promise.race([
+    events.next(),
+    new Promise<IteratorResult<TernEventJs, undefined>>((resolve) =>
+      setTimeout(() => resolve({ done: true, value: undefined }), Math.max(0, deadline - Date.now())),
+    ),
+  ]);
+  if (next.done) break; // stream closed (renderer destroyed) or deadline hit
+  if (renderer.destroyed) {
+    // Ctrl+C with exitOnCtrlC tore the renderer down after delivering the
+    // event — also a clean quit.
     quit = true;
     break;
   }
 }
+if (renderer.destroyed) quit = true;
 renderer.destroy();
 
 if (!quit) {
