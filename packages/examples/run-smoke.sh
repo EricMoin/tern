@@ -32,7 +32,13 @@ fi
 
 # macOS `script`: -q quiet, /dev/null discards the session transcript. The
 # child's exit status propagates through script (verified on macOS).
-PTY_CMD=(script -q /dev/null)
+#
+# `script` allocates a 0x0 PTY when launched without a controlling tty, which
+# makes the compositor's scene geometry queries (`Renderer.hit_test`) return
+# empty paths for every cell. The session pins a deterministic 80x24 viewport
+# (via `stty` inside the PTY) so the demos' mouse-routing assertions
+# (wheel scroll + click-to-focus) exercise the real hit-test gate.
+PTY_CMD=(script -q /dev/null sh -c 'stty rows 24 cols 80; exec "$@"' sh)
 
 # Deno-first; node only when deno is not installed. The addon-load fallback
 # (deno present but unable to load the native addon) is handled inside the

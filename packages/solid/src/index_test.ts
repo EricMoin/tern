@@ -6,19 +6,29 @@ import {
   StreamingText,
   subscribeStream,
   Input,
+  Textarea,
   Spinner,
   StatusBar,
   Panels,
   DiffView,
   ScrollView,
   Select,
+  Table,
+  Modal,
+  MODAL_Z_INDEX,
+  openModal,
+  closeModal,
   selectKey,
   subscribeInput,
   subscribeResize,
   subscribeFocus,
   subscribePanelDrag,
+  subscribeWheelScroll,
+  subscribeClickFocus,
   startSpinner,
   editKey,
+  editTextareaKey,
+  tableKey,
   tick,
   useFocus,
   FocusManager,
@@ -34,6 +44,7 @@ import {
   isStreamFollowing,
   syncStreamTail,
   scrollTo,
+  visibleTableRows,
   type Span,
   type Node,
   type KeyEvent,
@@ -66,6 +77,8 @@ import {
   DiffView as CoreDiffView,
   ScrollView as CoreScrollView,
   createRenderer,
+  focusAt,
+  wheelScroll,
   type TernEventJs,
 } from "@tern/core";
 import { setAddonForTesting } from "../../core/src/addon.ts";
@@ -508,15 +521,24 @@ class FakeStreamTuiRenderer {
     return pendingMouseEvents.splice(0);
   }
   hit_test(_col: number, _row: number): bigint[] {
-    // Every press lands on a painted cell (the routing gate in
-    // `subscribePanelDrag` consults this).
-    return [7n];
+    // The wheel/click wiring gates on this; `solidFakeHitPath` is overridden
+    // by the wheel/click tests (an empty path = off any painted cell).
+    return solidFakeHitPath;
   }
-  render(): void {}
+  render(): void {
+    solidFakeRenders.push(1);
+  }
   destroy(): void {
     this.destroyed = true;
   }
 }
+
+/** The path returned by the solid fake `hit_test` (override for the
+ * click-to-focus tests — an empty path models a press off any painted cell). */
+let solidFakeHitPath: bigint[] = [7n];
+
+/** Render calls recorded by the solid fake renderer's `render()`. */
+const solidFakeRenders: number[] = [];
 
 /** The size-aware fake addon injected through `setAddonForTesting`. */
 const streamFakeAddon = {
@@ -891,12 +913,100 @@ Deno.test("Input/Spinner/StatusBar/Panels factories materialize the core element
 
   // The renderer surface also maps the roadmap tags (as empty elements).
   if (createElement("input").type !== "input") throw new Error("createElement(input) mapping");
+  if (createElement("textarea").type !== "textarea") {
+    throw new Error("createElement(textarea) mapping");
+  }
   if (createElement("spinner").type !== "spinner") throw new Error("createElement(spinner) mapping");
   if (createElement("status_bar").type !== "status_bar") {
     throw new Error("createElement(status_bar) mapping");
   }
   if (createElement("panels").type !== "panels") throw new Error("createElement(panels) mapping");
   if (createElement("diff").type !== "diff") throw new Error("createElement(diff) mapping");
+});
+
+Deno.test("Textarea factory materializes the core element with per-line leaves", () => {
+  const textarea = Textarea({ lines: ["ab", "cd"], row: 1, col: 2, width: 10 });
+  if (textarea.type !== "textarea") throw new Error(`textarea type = ${textarea.type}`);
+  if (textarea.props.row !== 1 || textarea.props.col !== 2 || textarea.props.width !== 10) {
+    throw new Error(`textarea props = ${JSON.stringify(textarea.props)}`);
+  }
+  if (childCount(textarea) !== 2) throw new Error(`leaves = ${childCount(textarea)}`);
+  const first = textarea.children[0]!;
+  const second = textarea.children[1]!;
+  if (first.props.text !== "ab" || "caret" in first.props) {
+    throw new Error(`leaf 0 = ${JSON.stringify(first.props)}`);
+  }
+  if (second.props.text !== "cd" || second.props.caret !== 2) {
+    throw new Error(`leaf 1 = ${JSON.stringify(second.props)}`);
+  }
+  // The renderer surface maps the textarea tag (as an empty element).
+  if (createElement("textarea").type !== "textarea") {
+    throw new Error("createElement(textarea) mapping");
+  }
+});
+
+Deno.test("subscribeInput routes keys through the FocusManager to a focused textarea", () => {
+  const { renderer, keyHandlers } = mockRenderer();
+  const manager = new FocusManager();
+  const textarea = Textarea({ lines: ["hi"] });
+  const changes: Array<{ lines: string[]; row: number; col: number }> = [];
+  const submits: Array<{ lines: string[]; row: number; col: number }> = [];
+  // Length read through a function: TS narrows a const-typed empty array's
+  // `length` to 0 (the pushes happen inside closures it cannot see).
+  const changeCount = () => changes.length;
+  const submitCount = () => submits.length;
+
+  // Register the textarea node with the manager: routed keys edit it via the
+  // core `editTextareaKey`, firing onChange/onSubmit like React's
+  // <Textarea focusId>.
+  const focusHandle = useFocus("main", textarea, (event) => {
+    const before = textarea.props as { lines?: string[]; row?: number; col?: number };
+    const next = editTextareaKey(textarea, event);
+    const changed =
+      next.lines !== before.lines || next.row !== before.row || next.col !== before.col;
+    if (event.name === "enter") {
+      submits.push(next);
+    } else if (changed) {
+      changes.push(next);
+    }
+  }, manager);
+
+  // The tree-level key subscription: each key routes through the manager
+  // before falling back to its own (no-op) handler.
+  const dispose = subscribeInput(renderer, () => {}, { focusManager: manager });
+
+  if (keyHandlers.size !== 1) throw new Error(`expected 1 key handler, got ${keyHandlers.size}`);
+  if (!manager.has("main")) throw new Error("useFocus must register the id");
+
+  // Not focused: keys fall through to the tree handler (a no-op here).
+  for (const handler of keyHandlers) handler(keyEvent({ char: "a" }));
+  if (changeCount() !== 0) throw new Error("unfocused textarea must not receive keys");
+
+  // Focused: keys route to the textarea's handler and edit the node.
+  if (!manager.focus("main")) throw new Error("focus(main) must succeed");
+  for (const handler of keyHandlers) handler(keyEvent({ char: "a" }));
+  for (const handler of keyHandlers) handler(keyEvent({ char: "b" }));
+  if (changeCount() !== 2) throw new Error(`onChange count = ${changeCount()}`);
+  if (changes[0]!.lines.join(",") !== "ahi" || changes[1]!.lines.join(",") !== "abhi") {
+    throw new Error(`onChange lines = ${changes.map((c) => c.lines.join("")).join(",")}`);
+  }
+  if (changes[1]!.col !== 2) throw new Error(`col = ${changes[1]!.col}`);
+  // The routed edits land on the scene node itself.
+  if ((textarea.props as { lines?: string[] }).lines?.join(",") !== "abhi") {
+    throw new Error(`node edited = ${JSON.stringify(textarea.props)}`);
+  }
+
+  // Enter splits the line and routes to the submit path.
+  for (const handler of keyHandlers) handler(keyEvent({ name: "enter" }));
+  if (submitCount() !== 1 || submits[0]!.lines.join(",") !== "ab,hi") {
+    throw new Error(`onSubmit = ${JSON.stringify(submits)}`);
+  }
+
+  dispose();
+  if (keyHandlers.size >= 1) throw new Error("key handler must be detached on dispose");
+  focusHandle.dispose();
+  if (manager.has("main")) throw new Error("textarea must unregister on dispose");
+  if (manager.activeId !== null) throw new Error("active focus must clear on unregister");
 });
 
 Deno.test("DiffView factory materializes per-kind rows with gutter, markers, colors and scroll", () => {
@@ -1359,6 +1469,160 @@ Deno.test("Select floating mode sets a z_index prop", () => {
   if (layered.props.z_index !== 5) throw new Error(`z_index = ${layered.props.z_index}`);
 });
 
+// Modal: factory parity + focus save/restore through openModal/closeModal
+// ---------------------------------------------------------------------------
+
+Deno.test("Modal factory materializes the core element with a backdrop, content box and z_index", () => {
+  const body = Text({ text: "hi" });
+  const modal = Modal({ open: true, content: [body] });
+  if (modal.type !== "modal") throw new Error(`type = ${modal.type}`);
+  if (modal.props.z_index !== MODAL_Z_INDEX) throw new Error(`z_index = ${modal.props.z_index}`);
+  if (modal.props.position !== "absolute") throw new Error(`position = ${modal.props.position}`);
+  if (modal.props.open !== true) throw new Error(`open = ${modal.props.open}`);
+  // Composition: a dimmed backdrop fill + a centered content box holding the
+  // content nodes.
+  if (modal.children.length !== 2) throw new Error(`children = ${modal.children.length}`);
+  if (modal.children[0]?.props.position !== "absolute") {
+    throw new Error("backdrop must be an absolute fill");
+  }
+  if (modal.children[1]?.children[0] !== body) {
+    throw new Error("content must live inside the content box");
+  }
+  // The content node list is JS bookkeeping, never a scene prop.
+  if ("content" in modal.props) throw new Error("content must not reach the scene props");
+  // The universal renderer's createElement("modal") materializes a default
+  // (closed, empty) overlay without throwing.
+  if (createElement("modal").type !== "modal") throw new Error("createElement(modal) mapping");
+});
+
+Deno.test("Modal openModal/closeModal save and restore focus on solid", () => {
+  const modal = Modal({});
+  const manager = new FocusManager();
+  const inside = Box();
+  const outside = Box();
+  // The overlay's focusable registers first, so openModal's focusFirst()
+  // lands inside; the outside focusable is the prior focus closing restores.
+  const insideHandle = useFocus("s-modal-in", inside, () => {}, manager);
+  const outsideHandle = useFocus("s-modal-out", outside, () => {}, manager);
+  const activeId = (): string | null => manager.activeId;
+  const open = (): unknown => modal.props.open;
+  const hidden = (): unknown => modal.props.hidden;
+  try {
+    if (open() !== false || hidden() !== true) throw new Error("modal must start hidden");
+    manager.focus("s-modal-out");
+    openModal(modal, manager);
+    if (activeId() !== "s-modal-in") {
+      throw new Error(`open must focus the overlay's focusable, got ${activeId()}`);
+    }
+    if (open() !== true || hidden() !== false) throw new Error("openModal must show the overlay");
+    closeModal(modal, manager);
+    if (activeId() !== "s-modal-out") {
+      throw new Error(`close must restore the prior focus, got ${activeId()}`);
+    }
+    if (open() !== false || hidden() !== true) throw new Error("closeModal must hide the overlay");
+  } finally {
+    insideHandle.dispose();
+    outsideHandle.dispose();
+    manager.blur();
+  }
+});
+
+Deno.test("Table factory materializes the core element with a sticky header and rows", () => {
+  const table = Table({
+    columns: [
+      { key: "name", header: "Name", width: 10 },
+      { key: "score", header: "Score", width: 5, align: "right" },
+    ],
+    rows: [
+      ["Ada", 92],
+      ["Grace", 88],
+      ["Linus", 95],
+    ],
+    highlight: 1,
+    clip_height: 2,
+  });
+  if (table.type !== "table") throw new Error(`type = ${table.type}`);
+  if (table.props.highlight !== 1 || table.props.sticky_header !== true) {
+    throw new Error(`table props = ${JSON.stringify(table.props)}`);
+  }
+  if ("columns" in table.props || "rows" in table.props) {
+    throw new Error("columns/rows must not reach the scene props");
+  }
+  // Sticky structure: header row (child 0) + content region (child 1).
+  const header = table.children[0];
+  const region = table.children[1];
+  if (header?.props.flex_direction !== "row" || header?.props.z_index !== 1) {
+    throw new Error("the sticky header must be a row box above the content");
+  }
+  if (header?.children.length !== 2 || header?.children[0]?.props.text !== "Name".padEnd(10)) {
+    throw new Error(`header cells = ${JSON.stringify(header?.children.map((c) => c.props.text))}`);
+  }
+  if (region === undefined || region.children.length !== 3) {
+    throw new Error(`rows = ${region?.children.length}`);
+  }
+  // Per-column alignment: the score column is right-padded.
+  if (region.children[0]?.children[1]?.props.text !== "92".padStart(5)) {
+    throw new Error(`score cell = ${JSON.stringify(region.children[0]?.children[1]?.props.text)}`);
+  }
+  // The highlighted row (index 1) is reversed; the others are not.
+  if (region.children[1]?.children.every((cell) => cell.props.reversed === true) !== true) {
+    throw new Error("the highlighted row's cells must be reversed");
+  }
+  if (region.children[0]?.children.some((cell) => cell.props.reversed === true)) {
+    throw new Error("only the highlighted row may be reversed");
+  }
+  // The renderer surface maps the roadmap tag (as an empty table).
+  if (createElement("table").type !== "table") throw new Error("createElement(table) mapping");
+});
+
+Deno.test("tableKey moves the highlight and clamps the scroll window on a solid table", () => {
+  const table = Table({
+    columns: [
+      { key: "name", header: "Name", width: 10 },
+      { key: "score", header: "Score", width: 5, align: "right" },
+    ],
+    rows: [
+      ["Ada", 92],
+      ["Grace", 88],
+      ["Linus", 95],
+      ["Alan", 84],
+    ],
+    clip_height: 2,
+  });
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  // Accessors: tableKey mutates the node in place, which TS's control flow
+  // cannot see — reading through functions defeats the stale narrowing.
+  const highlightOf = () => table.props.highlight as number | undefined;
+  const liveRegion = () => table.children[1];
+  const regionScrollY = () => liveRegion()?.props.scroll_y as number | undefined;
+
+  const down1 = tableKey(table, { name: "down", ...base }); // highlight 1
+  if (down1.highlight !== 1) throw new Error(`down = ${down1.highlight}`);
+  const down2 = tableKey(table, { name: "down", ...base }); // highlight 2 -> scroll 1
+  if (down2.highlight !== 2 || down2.scroll_y !== 1) {
+    throw new Error(`down2 = ${JSON.stringify(down2)}`);
+  }
+  // Down to the last row: scroll_y clamps at rows.length - clip_height = 2.
+  let last = down2;
+  for (let i = 0; i < 4; i++) last = tableKey(table, { name: "down", ...base });
+  if (last.highlight !== 3 || last.scroll_y !== 2) {
+    throw new Error(`clamped = ${JSON.stringify(last)}`);
+  }
+  if (highlightOf() !== 3) throw new Error(`node highlight = ${highlightOf()}`);
+  if (regionScrollY() !== 2) throw new Error(`region scroll_y = ${regionScrollY()}`);
+  // The visible window under scroll: the last 2 rows.
+  const visible = visibleTableRows(table);
+  if (visible.length !== 2 || visible[0]?.[0] !== "Linus") {
+    throw new Error(`visible = ${JSON.stringify(visible.map((r) => r[0]))}`);
+  }
+  // Up back to the top clamps scroll_y at 0.
+  let up = last;
+  for (let i = 0; i < 6; i++) up = tableKey(table, { name: "up", ...base });
+  if (up.highlight !== 0 || up.scroll_y !== 0) {
+    throw new Error(`up = ${JSON.stringify(up)}`);
+  }
+});
+
 Deno.test("subscribeResize re-renders on resize events and detaches on dispose", () => {
   const { renderer, resizeHandlers, renderCalls } = mockRenderer();
   const sizes: Array<{ width: number; height: number }> = [];
@@ -1687,5 +1951,136 @@ Deno.test("getTheme returns a full Theme", () => {
   }
   if (theme.components.input === undefined) {
     throw new Error("input preset missing");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Mouse wheel scroll + click-to-focus (subscribeWheelScroll / subscribeClickFocus)
+//
+// The subscriptions wire a renderer's mouse events over the size-aware fake
+// addon (events flow through `poll_events`; `content_size` reads the
+// per-handle registry; `hit_test` reads the configurable `solidFakeHitPath`):
+// `subscribeWheelScroll` maps wheel events onto the given view's offsets
+// (clamped) and re-renders on a consumed wheel; `subscribeClickFocus` routes
+// a `down_left` on a painted cell to the topmost registered focusable via the
+// core `FocusManager`.
+// ---------------------------------------------------------------------------
+
+Deno.test("subscribeWheelScroll scrolls the view on wheel events and re-renders on a consumed wheel", () => {
+  setAddonForTesting(streamFakeAddon);
+  try {
+    const renderer = createRenderer();
+    const view = ScrollView({
+      width: 5,
+      height: 2,
+      children: [CoreText({ text: "aaaaaa\nbbbbb\ncc" })],
+    });
+    renderer.root.addChild(view);
+    // Viewport 5x2, content leaf 6x3 -> max offsets (1, 1).
+    fakeDragSizes.set(view.handle, { width: 5, height: 2 });
+    const leaf = view.children.find((child) => child.type === "text");
+    if (leaf === undefined) throw new Error("scroll view must compose a content leaf");
+    fakeDragSizes.set(leaf.handle, { width: 6, height: 3 });
+    solidFakeRenders.length = 0;
+
+    const dispose = subscribeWheelScroll(renderer, view);
+    const emit = (kind: string, column: number, row: number): void => {
+      pendingMouseEvents.push({
+        type: "mouse",
+        mouse: { kind, column, row, ctrl: false, alt: false, shift: false },
+      });
+      renderer.pollEvents(0);
+    };
+    const y = (): number => view.props.scroll_y as number;
+    const renderCount = (): number => solidFakeRenders.length;
+
+    emit("scroll_down", 0, 0);
+    if (y() !== 1) throw new Error(`scroll_down scroll_y = ${y()}`);
+    if (renderCount() !== 1) throw new Error(`a consumed wheel must re-render (renders = ${renderCount()})`);
+    emit("scroll_down", 0, 0); // clamps at max 1, still consumed
+    if (y() !== 1) throw new Error(`clamped scroll_y = ${y()}`);
+    if (renderCount() !== 2) {
+      throw new Error(`a wheel at the bound must stay consumed and re-render (renders = ${renderCount()})`);
+    }
+    emit("scroll_up", 0, 0);
+    if (y() !== 0) throw new Error(`scroll_up scroll_y = ${y()}`);
+    // A non-wheel event falls through: no scroll, no re-render.
+    const rendersBefore = renderCount();
+    emit("down_left", 0, 0);
+    if (y() !== 0) throw new Error(`a down_left must not scroll (scroll_y = ${y()})`);
+    if (renderCount() !== rendersBefore) throw new Error("an unconsumed event must not re-render");
+
+    // A direct wheelScroll call maps the same event on the same view.
+    if (wheelScroll(view, { kind: "scroll_right", column: 0, row: 0, ctrl: false, alt: false, shift: false }) !== true) {
+      throw new Error("scroll_right must be consumed");
+    }
+    if (view.props.scroll_x !== 1) throw new Error(`scroll_right scroll_x = ${view.props.scroll_x}`);
+
+    dispose();
+    const yAfterDispose = y();
+    emit("scroll_down", 0, 0);
+    if (y() !== yAfterDispose) throw new Error("a disposed subscription must not scroll");
+  } finally {
+    setAddonForTesting(null);
+    pendingMouseEvents.length = 0;
+    solidFakeHitPath = [7n];
+    solidFakeRenders.length = 0;
+    fakeDragSizes.clear();
+  }
+});
+
+Deno.test("subscribeClickFocus focuses the topmost registered node on a down_left and no-ops on an empty hit_test", () => {
+  setAddonForTesting(streamFakeAddon);
+  try {
+    const renderer = createRenderer();
+    const node = Box();
+    renderer.root.addChild(node);
+    // Register on the shared core manager — `focusAt` (and therefore
+    // `subscribeClickFocus`) routes through it by default.
+    const handle = useFocus("probe", node, () => {}, focusManager);
+    const dispose = subscribeClickFocus(renderer);
+    const emit = (kind: string, column: number, row: number): void => {
+      pendingMouseEvents.push({
+        type: "mouse",
+        mouse: { kind, column, row, ctrl: false, alt: false, shift: false },
+      });
+      renderer.pollEvents(0);
+    };
+
+    // A down_left on a painted cell (fake hit path non-empty) focuses the box.
+    emit("down_left", 3, 2);
+    if (focusManager.activeId !== "probe") throw new Error(`active after click = ${focusManager.activeId}`);
+
+    // The focused element now routes keys through subscribeInput: a char key
+    // reaches its handler.
+    const handled: string[] = [];
+    useFocus("probe2", node, (event) => {
+      if (event.name === "char") handled.push(event.char ?? "");
+    }, focusManager);
+    focusManager.blur();
+    const inputDispose = subscribeInput(renderer, () => {});
+    focusManager.focus("probe2");
+    pendingMouseEvents.push({ type: "key", key: { name: "char", char: "z", ctrl: false, alt: false, shift: false } });
+    renderer.pollEvents(0);
+    if (handled.join("") !== "z") throw new Error(`handled chars = ${handled.join("")}`);
+    inputDispose();
+
+    // A press off any painted cell (empty hit path) is a no-op.
+    solidFakeHitPath = [];
+    focusManager.blur();
+    emit("down_left", 0, 0);
+    if (focusManager.activeId !== null) throw new Error(`active after empty hit = ${focusManager.activeId}`);
+
+    dispose();
+    handle.dispose();
+    focusManager.blur();
+    focusManager.unregister("probe2");
+  } finally {
+    setAddonForTesting(null);
+    pendingMouseEvents.length = 0;
+    solidFakeHitPath = [7n];
+    solidFakeRenders.length = 0;
+    fakeDragSizes.clear();
+    focusManager.blur();
   }
 });

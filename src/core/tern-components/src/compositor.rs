@@ -22,12 +22,13 @@
 //!   true` (or unset) keeps the word-boundary soft-wrap.
 //! * **Root** — a plain container; paints nothing itself.
 //!
-//! The roadmap components ([`Input`](crate::Input), [`Spinner`](crate::Spinner),
+//! The roadmap components ([`Input`](crate::Input),
+//! [`Textarea`](crate::Textarea), [`Spinner`](crate::Spinner),
 //! [`Panels`](crate::Panels), [`StatusBar`](crate::StatusBar)) materialize as
 //! `Box`/`Text` subtrees and need no special paint handling; when one is
 //! painted as the tree root, its frame is promoted to the scene root so it
-//! fills the viewport (and a `StatusBar`/`Input` root is given the viewport
-//! row width for overflow trimming / horizontal scroll).
+//! fills the viewport (and a `StatusBar`/`Input`/`Textarea` root is given the
+//! viewport row width for overflow trimming / horizontal scroll / soft wrap).
 //!
 //! ## Clip and scroll regions
 //!
@@ -91,12 +92,12 @@ impl Compositor {
     ///
     /// Accepts a [`Renderable`], [`Box`](crate::Box), [`Text`](crate::Text),
     /// or any roadmap component ([`Input`](crate::Input),
-    /// [`Spinner`](crate::Spinner), [`Panels`](crate::Panels),
-    /// [`StatusBar`](crate::StatusBar)) root. A container root's frame is
-    /// promoted to the scene root, so it fills the viewport: a top-level
-    /// [`Box`](crate::Box) therefore puts its border glyphs at the edges of
-    /// the buffer, and a top-level [`StatusBar`](crate::StatusBar) spans the
-    /// whole bottom row.
+    /// [`Textarea`](crate::Textarea), [`Spinner`](crate::Spinner),
+    /// [`Panels`](crate::Panels), [`StatusBar`](crate::StatusBar)) root. A
+    /// container root's frame is promoted to the scene root, so it fills the
+    /// viewport: a top-level [`Box`](crate::Box) therefore puts its border
+    /// glyphs at the edges of the buffer, and a top-level
+    /// [`StatusBar`](crate::StatusBar) spans the whole bottom row.
     pub fn paint(&mut self, root: impl Into<Renderable>, viewport: Size) -> Buffer {
         let mut root: Renderable = root.into();
         let mut scene = Scene::new();
@@ -104,7 +105,9 @@ impl Compositor {
 
         // Strip/field components painted as the tree root span the viewport
         // row: give them the real row width so overflow trimming and
-        // horizontal scroll have something to work against.
+        // horizontal scroll have something to work against. A root Textarea
+        // wraps its lines at (and scrolls its window over) the viewport's
+        // content area.
         match &mut root {
             Renderable::StatusBar(sb) => {
                 sb.width = Some(viewport.width as usize);
@@ -114,6 +117,11 @@ impl Compositor {
                     (viewport.width as usize)
                         .saturating_sub(2 * (inp.padding as usize + inp.border as usize)),
                 );
+            }
+            Renderable::Textarea(ta) => {
+                let inset = 2 * (ta.padding as usize + ta.border as usize);
+                ta.width = Some((viewport.width as usize).saturating_sub(inset));
+                ta.height = Some((viewport.height as usize).saturating_sub(inset));
             }
             _ => {}
         }
