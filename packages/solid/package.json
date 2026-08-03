@@ -1,7 +1,7 @@
 {
   "name": "@tern/solid",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "license": "MIT",
   "description": "tern solid — SolidJS custom renderer for tern",
   "type": "module",
