@@ -38,7 +38,11 @@
  * `Panels`/`DiffView`/`Select`/`ScrollView`/`Table`/`Modal`) materialize
  * the @tern/core factories of the same name, matching what the `@tern/react`
  * host components map to (feature parity): same props -> same scene node
- * structure.
+ * structure. The `Textarea` factory additionally mirrors the `<Textarea>`
+ * host's focus wiring: a `focusId` prop registers the node with a
+ * `FocusManager` (routed keys edit it via `editTextareaKey`), firing
+ * `onChange` / `onSubmit` — the registration is disposed with
+ * `disposeTextareaFocus`.
  * `subscribeInput` wires a renderer's key events through the core
  * `FocusManager` (the Solid-flavored `useInput` equivalent — Solid has no
  * context, so the renderer is an explicit argument); `subscribeResize` wires
@@ -88,9 +92,11 @@ import {
   syncStreamTail,
   tableKey,
   tick,
+  useFocus,
   visibleTableRows,
   wheelScroll,
   type DiffViewProps,
+  type FocusHandle,
   type FocusHandler,
   type InputProps,
   type KeyHandler,
@@ -110,7 +116,7 @@ import {
   type TableColumn,
   type TableProps,
   type TableState,
-  type TextareaProps,
+  type TextareaProps as CoreTextareaProps,
   type TextareaState,
   type Theme,
   type ThemeOverrides,
@@ -150,7 +156,6 @@ export type {
   TableColumn,
   TableProps,
   TableState,
-  TextareaProps,
   TextareaState,
 } from "@tern/core";
 
@@ -538,16 +543,86 @@ export function Input(props: InputProps = {}): Node {
 }
 
 /**
+ * Props for the solid `Textarea` factory: the core textarea props plus the
+ * focus/callback wiring, mirroring the `@tern/react` `<Textarea>` host
+ * component. `focusId` / `focusManager` / `onChange` / `onSubmit` are
+ * consumed by the factory — they never reach the scene node; the remaining
+ * keys flow to the core `Textarea` factory (the `lines` / `row` / `col` /
+ * `width` / `height` / `scroll` edit-model props).
+ */
+export interface TextareaProps extends CoreTextareaProps {
+  /**
+   * Register the textarea with a `FocusManager` under this id so routed keys
+   * (via `subscribeInput`) edit it through the core `editTextareaKey`. Omit
+   * to leave the textarea inert to keys.
+   */
+  focusId?: string;
+  /** The `FocusManager` to register with (defaults to the core
+   *  `focusManager`). */
+  focusManager?: FocusManager;
+  /** Fired after a routed key changes the lines, row or col. */
+  onChange?: (state: TextareaState) => void;
+  /** Fired when the Enter key routes to this textarea (which also splits the
+   *  line). */
+  onSubmit?: (state: TextareaState) => void;
+}
+
+/** The focus handles of textareas registered by the {@link Textarea} factory
+ * (keyed by node, like the core `textareaVertical` map). The factory owns the
+ * registration; the caller owns the node's lifecycle, so it disposes the
+ * registration with {@link disposeTextareaFocus} when the node leaves the
+ * scene. */
+const textareaFocus = new WeakMap<Node, FocusHandle>();
+
+/**
+ * Dispose a textarea's focus registration. The {@link Textarea} factory
+ * registers the node with its `FocusManager` under `focusId` at creation; the
+ * registration is released here — unregistering the id and clearing the
+ * active focus — when the node is discarded. A node registered without a
+ * `focusId` (or already disposed) is a no-op.
+ */
+export function disposeTextareaFocus(node: Node): void {
+  textareaFocus.get(node)?.dispose();
+  textareaFocus.delete(node);
+}
+
+/**
  * Create a `textarea` scene node: the core `Textarea` factory materialized
  * with `props` — a framed box with one text leaf per visible display line
  * (soft-wrapped at `width`, vertically scrolled to keep the caret visible
  * within `height`), the caret's leaf carrying its `caret` display column. The
  * `textarea` component preset is resolved onto the framed box at
- * element-creation time. Edit it with `editTextareaKey` (the focused-element
- * handler wired by `useFocus` + `subscribeInput`).
+ * element-creation time.
+ *
+ * When `focusId` is given, the textarea registers with the `FocusManager`
+ * (the `focusManager` prop, defaulting to the core `focusManager`) — the
+ * Solid-flavored equivalent of the `@tern/react` `<Textarea focusId>`
+ * registration. Routed keys (via `subscribeInput`) edit it through the core
+ * `editTextareaKey`: `onChange` fires after the lines/row/col change and
+ * `onSubmit` on Enter (which splits the line). Dispose the registration with
+ * {@link disposeTextareaFocus} when the node leaves the scene.
  */
 export function Textarea(props: TextareaProps = {}): Node {
-  return TernTextarea(resolveTheme(getTheme(), { ...props, component: "textarea" }));
+  // The focus/callback keys are component-consumed (mirroring `@tern/react`'s
+  // `TEXTAREA_PROPS` stripping): they must never reach the core factory, or
+  // they would leak onto the scene node's props.
+  const { focusId, focusManager: manager, onChange, onSubmit, ...nodeProps } = props;
+  const node = TernTextarea(resolveTheme(getTheme(), { ...nodeProps, component: "textarea" }));
+  if (focusId !== undefined) {
+    const handle = useFocus(focusId, node, (event) => {
+      const before = node.props as TextareaProps;
+      const next = editTextareaKey(node, event);
+      const changed =
+        next.lines !== before.lines || next.row !== before.row || next.col !== before.col;
+      if (event.name === "enter") {
+        onSubmit?.(next);
+      } else if (changed) {
+        onChange?.(next);
+      }
+    }, manager);
+    textareaFocus.set(node, handle);
+  }
+  return node;
 }
 
 /**

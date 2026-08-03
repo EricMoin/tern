@@ -28,6 +28,7 @@ import {
   startSpinner,
   editKey,
   editTextareaKey,
+  disposeTextareaFocus,
   tableKey,
   tick,
   useFocus,
@@ -471,8 +472,24 @@ Deno.test("subscribeStream disposer stops further appends", async () => {
  * (keyed by the `FakeStreamNodeHandle` instance backing the node). */
 const fakeDragSizes = new Map<object, { width: number; height: number }>();
 
-/** Mouse events queued for the next `poll_events` call (consumed in order). */
-const pendingMouseEvents: TernEventJs[] = [];
+/** The push callback registered by the fake `start_event_stream` (the
+ * Renderer constructor registers it; the drag/wheel/click tests feed events
+ * through it, standing in for the native event loop). */
+let streamCallback: ((err: Error | null, event: TernEventJs) => void) | null = null;
+
+/** Dispatch a mouse event to the renderer's push stream callback. */
+function dispatchMouseEvent(kind: string, column: number, row: number): void {
+  dispatchEvent({
+    type: "mouse",
+    mouse: { kind, column, row, ctrl: false, alt: false, shift: false },
+  });
+}
+
+/** Dispatch a tagged event to the renderer's push stream callback. */
+function dispatchEvent(event: TernEventJs): void {
+  if (streamCallback === null) throw new Error("no stream callback registered");
+  streamCallback(null, event);
+}
 
 /** A size-aware fake native handle: `content_size` measures streamed spans. */
 class FakeStreamNodeHandle {
@@ -515,10 +532,8 @@ class FakeStreamTuiRenderer {
   root(): unknown {
     return new FakeStreamNodeHandle("box");
   }
-  poll_events(_timeoutMs: number): TernEventJs[] {
-    // The panel-drag tests dispatch mouse events through this queue; the
-    // streaming tests leave it empty (their events never come from here).
-    return pendingMouseEvents.splice(0);
+  start_event_stream(callback: (err: Error | null, event: TernEventJs) => void): void {
+    streamCallback = callback;
   }
   hit_test(_col: number, _row: number): bigint[] {
     // The wheel/click wiring gates on this; `solidFakeHitPath` is overridden
@@ -1007,6 +1022,76 @@ Deno.test("subscribeInput routes keys through the FocusManager to a focused text
   focusHandle.dispose();
   if (manager.has("main")) throw new Error("textarea must unregister on dispose");
   if (manager.activeId !== null) throw new Error("active focus must clear on unregister");
+});
+
+Deno.test("Textarea with a focusId registers with the FocusManager and fires onChange/onSubmit", () => {
+  const { renderer, keyHandlers } = mockRenderer();
+  const manager = new FocusManager();
+  const changes: Array<{ lines: string[]; row: number; col: number }> = [];
+  const submits: Array<{ lines: string[]; row: number; col: number }> = [];
+  // Length read through a function: TS narrows a const-typed empty array's
+  // `length` to 0 (the pushes happen inside closures it cannot see).
+  const changeCount = () => changes.length;
+  const submitCount = () => submits.length;
+
+  // The factory consumes focusId/focusManager/onChange/onSubmit like React's
+  // <Textarea focusId>: it registers the textarea with the manager under
+  // "main" at creation, and routed keys edit it via `editTextareaKey`, firing
+  // onChange/onSubmit. The component keys are consumed — never scene props.
+  const textarea = Textarea({
+    lines: ["hi"],
+    focusId: "main",
+    focusManager: manager,
+    onChange: (state) => changes.push(state),
+    onSubmit: (state) => submits.push(state),
+  });
+  for (const key of ["focusId", "focusManager", "onChange", "onSubmit"]) {
+    if (key in textarea.props) throw new Error(`component key leaked into scene props: ${key}`);
+  }
+
+  // The tree-level key subscription: each key routes through the manager
+  // before falling back to its own (no-op) handler.
+  const dispose = subscribeInput(renderer, () => {}, { focusManager: manager });
+
+  if (keyHandlers.size !== 1) throw new Error(`expected 1 key handler, got ${keyHandlers.size}`);
+  if (!manager.has("main")) throw new Error("textarea must register under focusId");
+
+  // Not focused: keys fall through to the tree handler (a no-op here).
+  for (const handler of keyHandlers) handler(keyEvent({ char: "a" }));
+  if (changeCount() !== 0) throw new Error("unfocused textarea must not receive keys");
+
+  // Focused: keys route to the textarea's handler and edit the node.
+  if (!manager.focus("main")) throw new Error("focus(main) must succeed");
+  for (const handler of keyHandlers) handler(keyEvent({ char: "a" }));
+  for (const handler of keyHandlers) handler(keyEvent({ char: "b" }));
+  if (changeCount() !== 2) throw new Error(`onChange count = ${changeCount()}`);
+  // The caret starts at col 0 (no col prop), so chars insert at the head.
+  if (changes[0]!.lines.join(",") !== "ahi" || changes[1]!.lines.join(",") !== "abhi") {
+    throw new Error(`onChange lines = ${changes.map((c) => c.lines.join("")).join(",")}`);
+  }
+  if (changes[1]!.col !== 2) throw new Error(`col = ${changes[1]!.col}`);
+  // The routed edits land on the scene node itself (one leaf per line).
+  if ((textarea.props as { lines?: string[] }).lines?.join(",") !== "abhi") {
+    throw new Error(`node lines = ${JSON.stringify(textarea.props)}`);
+  }
+  if (textarea.children.length !== 1 || textarea.children[0]?.props.text !== "abhi") {
+    throw new Error(`node leaves = ${textarea.children.map((c) => c.props.text).join(",")}`);
+  }
+
+  // Enter splits the line AND routes to onSubmit (the Input mirror).
+  for (const handler of keyHandlers) handler(keyEvent({ name: "enter" }));
+  if (submitCount() !== 1 || submits[0]!.lines.join(",") !== "ab,hi") {
+    throw new Error(`onSubmit = ${JSON.stringify(submits)}`);
+  }
+
+  dispose();
+  if (keyHandlers.size >= 1) throw new Error("key handler must be detached on dispose");
+  disposeTextareaFocus(textarea);
+  if (manager.has("main")) throw new Error("textarea must unregister on dispose");
+  if (manager.activeId !== null) throw new Error("active focus must clear on unregister");
+  // A second dispose is a no-op (the entry is already gone).
+  disposeTextareaFocus(textarea);
+  if (manager.has("main")) throw new Error("double dispose must stay a no-op");
 });
 
 Deno.test("DiffView factory materializes per-kind rows with gutter, markers, colors and scroll", () => {
@@ -1722,13 +1807,14 @@ Deno.test("startSpinner pauses ticks while unfocused and resumes on focus regain
 // and re-renders, and `up_left` ends it. The panels tree attaches under a
 // real core `Renderer` over the size-aware fake addon, so
 // `Node.contentSize()` reports the per-handle laid-out sizes and the mouse
-// events flow through the fake `poll_events`.
+// events flow through the fake push stream callback.
 // ---------------------------------------------------------------------------
 
 Deno.test("subscribePanelDrag resizes a panels split on gutter drags and clamps to the pane min", () => {
   setAddonForTesting(streamFakeAddon);
   try {
     const renderer = createRenderer();
+    renderer.startEventStream();
     const panels = Panels({
       panels: [
         { header: "A", body: Box() },
@@ -1749,11 +1835,7 @@ Deno.test("subscribePanelDrag resizes a panels split on gutter drags and clamps 
     const resultCount = (): number => results.length;
     const dispose = subscribePanelDrag(renderer, panels, (result) => results.push(result));
     const emit = (kind: string, column: number, row: number): void => {
-      pendingMouseEvents.push({
-        type: "mouse",
-        mouse: { kind, column, row, ctrl: false, alt: false, shift: false },
-      });
-      renderer.pollEvents(0);
+      dispatchMouseEvent(kind, column, row);
     };
 
     // down_left on gutter 0 starts the drag (results[0] = the handle).
@@ -1796,7 +1878,7 @@ Deno.test("subscribePanelDrag resizes a panels split on gutter drags and clamps 
     }
   } finally {
     setAddonForTesting(null);
-    pendingMouseEvents.length = 0;
+    streamCallback = null;
     fakeDragSizes.clear();
   }
 });
@@ -1958,7 +2040,7 @@ Deno.test("getTheme returns a full Theme", () => {
 // Mouse wheel scroll + click-to-focus (subscribeWheelScroll / subscribeClickFocus)
 //
 // The subscriptions wire a renderer's mouse events over the size-aware fake
-// addon (events flow through `poll_events`; `content_size` reads the
+// addon (events flow through the push stream callback; `content_size` reads the
 // per-handle registry; `hit_test` reads the configurable `solidFakeHitPath`):
 // `subscribeWheelScroll` maps wheel events onto the given view's offsets
 // (clamped) and re-renders on a consumed wheel; `subscribeClickFocus` routes
@@ -1970,6 +2052,7 @@ Deno.test("subscribeWheelScroll scrolls the view on wheel events and re-renders 
   setAddonForTesting(streamFakeAddon);
   try {
     const renderer = createRenderer();
+    renderer.startEventStream();
     const view = ScrollView({
       width: 5,
       height: 2,
@@ -1985,11 +2068,7 @@ Deno.test("subscribeWheelScroll scrolls the view on wheel events and re-renders 
 
     const dispose = subscribeWheelScroll(renderer, view);
     const emit = (kind: string, column: number, row: number): void => {
-      pendingMouseEvents.push({
-        type: "mouse",
-        mouse: { kind, column, row, ctrl: false, alt: false, shift: false },
-      });
-      renderer.pollEvents(0);
+      dispatchMouseEvent(kind, column, row);
     };
     const y = (): number => view.props.scroll_y as number;
     const renderCount = (): number => solidFakeRenders.length;
@@ -2022,7 +2101,7 @@ Deno.test("subscribeWheelScroll scrolls the view on wheel events and re-renders 
     if (y() !== yAfterDispose) throw new Error("a disposed subscription must not scroll");
   } finally {
     setAddonForTesting(null);
-    pendingMouseEvents.length = 0;
+    streamCallback = null;
     solidFakeHitPath = [7n];
     solidFakeRenders.length = 0;
     fakeDragSizes.clear();
@@ -2033,6 +2112,7 @@ Deno.test("subscribeClickFocus focuses the topmost registered node on a down_lef
   setAddonForTesting(streamFakeAddon);
   try {
     const renderer = createRenderer();
+    renderer.startEventStream();
     const node = Box();
     renderer.root.addChild(node);
     // Register on the shared core manager — `focusAt` (and therefore
@@ -2040,11 +2120,7 @@ Deno.test("subscribeClickFocus focuses the topmost registered node on a down_lef
     const handle = useFocus("probe", node, () => {}, focusManager);
     const dispose = subscribeClickFocus(renderer);
     const emit = (kind: string, column: number, row: number): void => {
-      pendingMouseEvents.push({
-        type: "mouse",
-        mouse: { kind, column, row, ctrl: false, alt: false, shift: false },
-      });
-      renderer.pollEvents(0);
+      dispatchMouseEvent(kind, column, row);
     };
 
     // A down_left on a painted cell (fake hit path non-empty) focuses the box.
@@ -2060,8 +2136,7 @@ Deno.test("subscribeClickFocus focuses the topmost registered node on a down_lef
     focusManager.blur();
     const inputDispose = subscribeInput(renderer, () => {});
     focusManager.focus("probe2");
-    pendingMouseEvents.push({ type: "key", key: { name: "char", char: "z", ctrl: false, alt: false, shift: false } });
-    renderer.pollEvents(0);
+    dispatchEvent({ type: "key", key: { name: "char", char: "z", ctrl: false, alt: false, shift: false } });
     if (handled.join("") !== "z") throw new Error(`handled chars = ${handled.join("")}`);
     inputDispose();
 
@@ -2077,7 +2152,7 @@ Deno.test("subscribeClickFocus focuses the topmost registered node on a down_lef
     focusManager.unregister("probe2");
   } finally {
     setAddonForTesting(null);
-    pendingMouseEvents.length = 0;
+    streamCallback = null;
     solidFakeHitPath = [7n];
     solidFakeRenders.length = 0;
     fakeDragSizes.clear();
