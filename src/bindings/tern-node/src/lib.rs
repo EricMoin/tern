@@ -5,10 +5,13 @@
 //!
 //! * **`TuiRenderer`** — owns the terminal lifecycle (raw mode + alternate
 //!   screen via tern-terminal), the scene, and the render loop: `root()`
-//!   returns a handle to the scene root, `poll_events(timeout_ms)` returns
-//!   the events since the last poll (keys, resizes, focus changes, and
-//!   mouse), `render()` paints the scene to the terminal, and `destroy()`
-//!   tears the terminal state back down.
+//!   returns a handle to the scene root, `start_event_stream(callback)`
+//!   pushes terminal events (keys, resizes, focus changes, and mouse) to the
+//!   JS thread through a napi `ThreadsafeFunction` fed by tern-terminal's
+//!   background event loop, `render()` paints the scene to the terminal, and
+//!   `destroy()` tears the terminal state back down. The pull-based
+//!   `poll_events` fallback remains available behind the `poll-fallback`
+//!   cargo feature (default build ships push delivery).
 //! * **Scene construction** — `create_node(type, props)` builds a node
 //!   handle (backed by the tern-components node model), and `NodeHandle`
 //!   methods (`add_child` / `remove` / `set_props`) mutate the shared scene
@@ -26,13 +29,33 @@
 //! All shared state lives behind `Arc<Mutex<_>>`, which keeps the napi class
 //! instances `Send + Sync` (required by napi-rs) and makes every method safe
 //! to call from the JS thread.
+//!
+//! ## Event delivery
+//!
+//! With the default `push-events` feature, [`TuiRenderer::start_event_stream`]
+//! builds a `ThreadsafeFunction<TernEventJs>` from the JS callback and spawns
+//! tern-terminal's event loop thread, which pushes every normalized event to
+//! the JS thread (unbounded queue — no event loss, no polling loop in the JS
+//! hot path). The loop stops when the renderer is destroyed, when a ctrl+c
+//! teardown is requested (`exit_on_ctrl_c`), or when the JS side releases the
+//! stream. With `exit_on_ctrl_c`, a Ctrl+C press is still delivered to JS so
+//! push-mode consumers observe it, and the renderer is torn down + marked
+//! destroyed right after. With the `poll-fallback` feature instead,
+//! `poll_events(timeout_ms)` returns event batches on demand (the pre-Phase-3
+//! pull path, for hosts that cannot host a napi JS thread).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(feature = "push-events")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "poll-fallback")]
 use std::time::Duration;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+
+#[cfg(feature = "push-events")]
+use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
 use tern_components::Compositor;
 use tern_core::buffer::{diff, Buffer};
@@ -40,7 +63,13 @@ use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene, Span};
 use tern_core::style::{BorderStyle, Modifiers, Style};
 use tern_core::{Color, Size};
 use tern_terminal::backend::Backend;
-use tern_terminal::event::{self, KeyName, MouseButton, MouseEventKind, TernEvent, TernKey, TernMouse};
+#[cfg(feature = "push-events")]
+use tern_terminal::event::{spawn_event_loop, EventLoopHandle};
+#[cfg(feature = "poll-fallback")]
+use tern_terminal::event as event_module;
+#[cfg(any(feature = "push-events", feature = "poll-fallback"))]
+use tern_terminal::event::{MouseButton, MouseEventKind, TernEvent, TernKey, TernMouse};
+use tern_terminal::event::KeyName;
 
 /// The one module-global scene tree. Both node construction and rendering
 /// operate on it (see module docs for the ownership rationale).
@@ -67,6 +96,28 @@ pub struct ContentSize {
     pub height: u32,
 }
 
+/// One token-highlighted span: the chunk's text plus the style keys lifted
+/// from the highlight style (`fg` as a `"#rrggbb"` hex string, and the boolean
+/// modifiers). The shape mirrors `Span` (the `append_span` style-key
+/// convention), so a JS consumer can feed a highlighted span straight into a
+/// `streaming_text` node.
+#[napi(object)]
+#[derive(Debug)]
+pub struct HighlightSpanJs {
+    /// The span's text content.
+    pub text: String,
+    /// The foreground color as `"#rrggbb"`, when the token carries one.
+    pub fg: Option<String>,
+    /// Whether the token is bold.
+    pub bold: bool,
+    /// Whether the token is italic.
+    pub italic: bool,
+    /// Whether the token is dim.
+    pub dim: bool,
+    /// Whether the token is underlined.
+    pub underline: bool,
+}
+
 /// A key event surfaced to JS as a plain object: `{ name, char, ctrl, alt,
 /// shift }`. `char` is the printable character for `"char"`-named keys
 /// (single-character string), `undefined` for named keys.
@@ -86,6 +137,7 @@ pub struct KeyEvent {
     pub shift: bool,
 }
 
+#[cfg(any(feature = "push-events", feature = "poll-fallback"))]
 impl KeyEvent {
     fn from_tern(key: TernKey) -> Self {
         Self {
@@ -123,6 +175,7 @@ pub struct MouseEventJs {
     pub shift: bool,
 }
 
+#[cfg(any(feature = "push-events", feature = "poll-fallback"))]
 impl MouseEventJs {
     fn from_tern(mouse: TernMouse) -> Self {
         let kind = match mouse.kind {
@@ -147,6 +200,7 @@ impl MouseEventJs {
 }
 
 /// The JS-facing name of a mouse button.
+#[cfg(any(feature = "push-events", feature = "poll-fallback"))]
 fn mouse_button_str(button: MouseButton) -> &'static str {
     match button {
         MouseButton::Left => "left",
@@ -178,6 +232,7 @@ pub struct TernEventJs {
     pub mouse: Option<MouseEventJs>,
 }
 
+#[cfg(any(feature = "push-events", feature = "poll-fallback"))]
 impl TernEventJs {
     fn from_tern(ev: TernEvent) -> Self {
         match ev {
@@ -235,8 +290,9 @@ pub struct TuiRendererOptions {
     pub exit_on_ctrl_c: Option<bool>,
 }
 
-/// The terminal-facing renderer: owns raw mode + alternate screen, polls
-/// input, and paints the shared scene to the terminal.
+/// The terminal-facing renderer: owns raw mode + alternate screen, pushes
+/// input to the JS thread via a threadsafe event stream (or polls it with the
+/// `poll-fallback` feature), and paints the shared scene to the terminal.
 #[napi]
 pub struct TuiRenderer {
     inner: Arc<Mutex<RendererInner>>,
@@ -247,15 +303,21 @@ struct RendererInner {
     compositor: Compositor,
     scene: Arc<Mutex<Scene>>,
     last: Option<Buffer>,
+    #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
     exit_on_ctrl_c: bool,
     destroyed: bool,
+    /// The background push event loop (`push-events` feature): stopped when
+    /// the renderer is destroyed so the loop thread exits and releases the
+    /// threadsafe function.
+    #[cfg(feature = "push-events")]
+    event_loop: Option<EventLoopHandle>,
 }
 
 #[napi]
 impl TuiRenderer {
     /// Enter raw mode + the alternate screen, ready to render. Mouse and
-    /// focus-change event delivery is enabled so `poll_events` can surface
-    /// them.
+    /// focus-change event delivery is enabled so the event stream (or
+    /// `poll_events`, with the fallback feature) can surface them.
     ///
     /// If any terminal transition fails the already-entered states are rolled
     /// back before the error is returned, so a failed constructor never leaves
@@ -285,8 +347,11 @@ impl TuiRenderer {
                 compositor: Compositor::new(),
                 scene: shared_scene().clone(),
                 last: None,
+                #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
                 exit_on_ctrl_c: options.exit_on_ctrl_c.unwrap_or(false),
                 destroyed: false,
+                #[cfg(feature = "push-events")]
+                event_loop: None,
             })),
         })
     }
@@ -298,36 +363,6 @@ impl TuiRenderer {
         let scene = inner.scene.clone();
         let id = scene.lock().expect("scene poisoned").root_id();
         NodeHandle::materialized(scene, id, NodeKind::Root, Style::new(), PropMap::new())
-    }
-
-    /// Block up to `timeout_ms` for input, returning every event that arrived
-    /// in that window (a burst of events comes back as one batch).
-    ///
-    /// Key, resize, focus, and mouse events are all surfaced (mouse and focus
-    /// delivery is enabled in the constructor). With `exit_on_ctrl_c` enabled,
-    /// a Ctrl+C press tears the renderer down instead of being returned;
-    /// subsequent calls error until a new renderer is constructed.
-    #[napi(js_name = "poll_events")]
-    pub fn poll_events(&self, timeout_ms: u32) -> Result<Vec<TernEventJs>> {
-        let mut inner = self.inner.lock().expect("renderer inner poisoned");
-        if inner.destroyed {
-            return Err(Error::from_reason("renderer is destroyed"));
-        }
-        let events = event::poll_events(Duration::from_millis(timeout_ms as u64))
-            .map_err(|e| Error::from_reason(format!("poll events: {e}")))?;
-        let mut out = Vec::new();
-        for ev in events {
-            let ctrl_c = matches!(&ev, TernEvent::Key(key) if key.ctrl && key.char == Some('c'));
-            if inner.exit_on_ctrl_c && ctrl_c {
-                let _ = inner.backend.disable_event_listening();
-                let _ = inner.backend.exit_alt_screen();
-                let _ = inner.backend.exit_raw_mode();
-                inner.destroyed = true;
-                return Ok(out);
-            }
-            out.push(TernEventJs::from_tern(ev));
-        }
-        Ok(out)
     }
 
     /// The scene node ids covering the cell at (`col`, `row`), innermost
@@ -394,13 +429,18 @@ impl TuiRenderer {
     }
 
     /// Leave the alternate screen and raw mode and stop event listening,
-    /// restoring the terminal. Safe to call more than once; a destroyed
-    /// renderer cannot render or poll.
+    /// restoring the terminal. Also stops the push event loop (with the
+    /// default `push-events` feature) so the loop thread exits. Safe to call
+    /// more than once; a destroyed renderer cannot render or poll.
     #[napi(js_name = "destroy")]
     pub fn destroy(&self) -> Result<()> {
         let mut inner = self.inner.lock().expect("renderer inner poisoned");
         if inner.destroyed {
             return Ok(());
+        }
+        #[cfg(feature = "push-events")]
+        if let Some(event_loop) = &inner.event_loop {
+            event_loop.stop();
         }
         let _ = inner.backend.disable_event_listening();
         let _ = inner.backend.exit_alt_screen();
@@ -414,6 +454,109 @@ impl TuiRenderer {
     #[napi(getter, js_name = "destroyed")]
     pub fn destroyed(&self) -> bool {
         self.inner.lock().expect("renderer inner poisoned").destroyed
+    }
+}
+
+/// The push-based event path (default `push-events` feature): a threadsafe
+/// event stream fed by tern-terminal's background loop.
+#[cfg(feature = "push-events")]
+#[napi]
+impl TuiRenderer {
+    /// Start push-based event delivery: spawn tern-terminal's background
+    /// event loop and deliver every normalized terminal event to `callback`
+    /// on the JS thread through a threadsafe function.
+    ///
+    /// Events arrive in arrival order and none are dropped (the threadsafe
+    /// queue is unbounded), so the JS renderer subscribes instead of polling.
+    /// Key, resize, focus, and mouse events are all delivered (mouse and
+    /// focus delivery is enabled in the constructor). With `exit_on_ctrl_c`
+    /// enabled, a Ctrl+C press is delivered and then tears the renderer down
+    /// (marked destroyed; the loop stops). Destroying the renderer also stops
+    /// the loop. Errors if the renderer is already destroyed or a stream was
+    /// already started.
+    #[napi(js_name = "start_event_stream")]
+    pub fn start_event_stream(&self, callback: ThreadsafeFunction<TernEventJs>) -> Result<()> {
+        let tsfn = Arc::new(callback);
+        let inner_for_loop = self.inner.clone();
+        let exit_on_ctrl_c = {
+            let inner = self.inner.lock().expect("renderer inner poisoned");
+            if inner.destroyed {
+                return Err(Error::from_reason("renderer is destroyed"));
+            }
+            if inner.event_loop.is_some() {
+                return Err(Error::from_reason("event stream already started"));
+            }
+            inner.exit_on_ctrl_c
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let loop_stop = stop.clone();
+        let sink = tsfn.clone();
+        let handle = spawn_event_loop(stop, move |event: TernEvent| {
+            let mut push = |js: TernEventJs| {
+                let status = sink.call(Ok(js), ThreadsafeFunctionCallMode::NonBlocking);
+                if status == Status::Closing {
+                    // The JS side released the stream: stop pushing.
+                    loop_stop.store(true, Ordering::Relaxed);
+                }
+            };
+            let teardown = push_event_batch(
+                std::slice::from_ref(&event),
+                exit_on_ctrl_c,
+                &mut push,
+            );
+            if teardown {
+                // Ctrl+C with exit_on_ctrl_c: restore the terminal and mark
+                // the renderer destroyed, exactly like the pull path did.
+                if let Ok(mut inner) = inner_for_loop.lock() {
+                    let _ = inner.backend.disable_event_listening();
+                    let _ = inner.backend.exit_alt_screen();
+                    let _ = inner.backend.exit_raw_mode();
+                    inner.destroyed = true;
+                }
+                loop_stop.store(true, Ordering::Relaxed);
+            }
+        })
+        .map_err(|e| Error::from_reason(format!("spawn event loop: {e}")))?;
+        let mut inner = self.inner.lock().expect("renderer inner poisoned");
+        inner.event_loop = Some(handle);
+        Ok(())
+    }
+}
+
+/// The pull-based event path (`poll-fallback` feature): `poll_events` returns
+/// event batches on demand for hosts that cannot host a napi JS thread to
+/// push into (the pre-Phase-3 behavior).
+#[cfg(feature = "poll-fallback")]
+#[napi]
+impl TuiRenderer {
+    /// Block up to `timeout_ms` for input, returning every event that arrived
+    /// in that window (a burst of events comes back as one batch).
+    ///
+    /// Key, resize, focus, and mouse events are all surfaced (mouse and focus
+    /// delivery is enabled in the constructor). With `exit_on_ctrl_c` enabled,
+    /// a Ctrl+C press tears the renderer down instead of being returned;
+    /// subsequent calls error until a new renderer is constructed.
+    #[napi(js_name = "poll_events")]
+    pub fn poll_events(&self, timeout_ms: u32) -> Result<Vec<TernEventJs>> {
+        let mut inner = self.inner.lock().expect("renderer inner poisoned");
+        if inner.destroyed {
+            return Err(Error::from_reason("renderer is destroyed"));
+        }
+        let events = event_module::poll_events(Duration::from_millis(timeout_ms as u64))
+            .map_err(|e| Error::from_reason(format!("poll events: {e}")))?;
+        let mut out = Vec::new();
+        for ev in events {
+            let ctrl_c = is_ctrl_c(&ev);
+            if inner.exit_on_ctrl_c && ctrl_c {
+                let _ = inner.backend.disable_event_listening();
+                let _ = inner.backend.exit_alt_screen();
+                let _ = inner.backend.exit_raw_mode();
+                inner.destroyed = true;
+                return Ok(out);
+            }
+            out.push(TernEventJs::from_tern(ev));
+        }
+        Ok(out)
     }
 }
 
@@ -647,6 +790,35 @@ impl NodeHandle {
     }
 }
 
+#[cfg(any(feature = "push-events", feature = "poll-fallback"))]
+/// Whether a key event is a Ctrl+C press (the `exit_on_ctrl_c` trigger).
+fn is_ctrl_c(event: &TernEvent) -> bool {
+    matches!(event, TernEvent::Key(key) if key.ctrl && key.char == Some('c'))
+}
+
+/// Deliver a batch of normalized terminal events to the JS thread through
+/// `push`, in arrival order, converting each to its JS form. Returns `true`
+/// when the batch contained a Ctrl+C press and `exit_on_ctrl_c` is enabled —
+/// the caller then tears the terminal down and stops the event loop.
+///
+/// The ctrl-c press itself is still delivered (push-mode consumers observe
+/// it; the renderer's `destroyed` flag reports the teardown that follows).
+#[cfg(feature = "push-events")]
+fn push_event_batch(
+    events: &[TernEvent],
+    exit_on_ctrl_c: bool,
+    push: &mut impl FnMut(TernEventJs),
+) -> bool {
+    let mut teardown = false;
+    for event in events {
+        if exit_on_ctrl_c && is_ctrl_c(event) {
+            teardown = true;
+        }
+        push(TernEventJs::from_tern(*event));
+    }
+    teardown
+}
+
 /// Create a detached node template of `type` (`"box"`, `"text"`, or
 /// `"streaming_text"`) with `props`. The handle is materialized into the scene
 /// when it is added to a bound parent via `NodeHandle.add_child`. See
@@ -676,6 +848,40 @@ pub fn create_node(
             props,
         })),
     })
+}
+
+/// Token-highlight `source` in `language` (a Markdown fence info string:
+/// `"rust"` / `"typescript"` / `"ts"` / `"tsx"` / `"javascript"` / `"js"` /
+/// `"json"` / `"bash"` / `"shell"` / `"sh"` / `"zsh"`) into a complete span
+/// stream for a code fence or a `streaming_text` node.
+///
+/// The returned spans cover every byte of `source` (gaps carry no style) and
+/// merge adjacent same-style runs, so concatenating their `text` reconstructs
+/// the source exactly — the compositor paints them in order. Unknown
+/// languages error; tree-sitter is error-tolerant, so half-open streaming
+/// input still highlights.
+#[napi(js_name = "highlight")]
+pub fn highlight(language: String, source: String) -> Result<Vec<HighlightSpanJs>> {
+    let Some(lang) = tern_highlight::Language::from_fence_name(&language) else {
+        return Err(Error::from_reason(format!(
+            "unknown highlight language {language:?}"
+        )));
+    };
+    Ok(tern_highlight::highlight(lang, &source)
+        .into_iter()
+        .map(|span| HighlightSpanJs {
+            text: span.text,
+            fg: span
+                .style
+                .fg
+                .rgb()
+                .map(|(r, g, b)| format!("#{r:02x}{g:02x}{b:02x}")),
+            bold: span.style.modifiers.contains(Modifiers::BOLD),
+            italic: span.style.modifiers.contains(Modifiers::ITALIC),
+            dim: span.style.modifiers.contains(Modifiers::DIM),
+            underline: span.style.modifiers.contains(Modifiers::UNDERLINE),
+        })
+        .collect())
 }
 
 /// Split a JS props object into a tern style (style keys) and a tern property
@@ -972,6 +1178,31 @@ mod tests {
         assert_eq!(parse_color("default"), _Color::Default);
         assert_eq!(parse_color("garbage"), _Color::Default);
         assert_eq!(parse_color("#12"), _Color::Default); // too short
+    }
+
+    #[test]
+    fn highlight_returns_styled_spans_for_rust() {
+        // The full source is reconstructed by the span stream, with the token
+        // styles surfaced as hex fg + modifiers (the JS span style keys).
+        let spans = highlight("rust".to_string(), "fn main() {\n    let x = 42; // hi\n}\n".to_string())
+            .expect("rust highlight succeeds");
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, "fn main() {\n    let x = 42; // hi\n}\n");
+
+        let keyword = spans.iter().find(|s| s.text == "fn").expect("fn span");
+        assert_eq!(keyword.fg.as_deref(), Some("#c678dd"));
+        assert!(!keyword.italic);
+        let number = spans.iter().find(|s| s.text == "42").expect("42 span");
+        assert_eq!(number.fg.as_deref(), Some("#d19a66"));
+        let comment = spans.iter().find(|s| s.text == "// hi").expect("comment span");
+        assert_eq!(comment.fg.as_deref(), Some("#7f848e"));
+        assert!(comment.italic);
+    }
+
+    #[test]
+    fn highlight_errors_on_unknown_language() {
+        let err = highlight("ruby".to_string(), "x".to_string()).expect_err("unknown language errors");
+        assert!(err.to_string().contains("unknown highlight language"));
     }
 
     #[test]
@@ -1338,5 +1569,93 @@ mod tests {
         };
         assert!(err.to_string().contains("not attached"), "{err}");
         assert_eq!(child_ids(&scene, &root), vec![attached_id(&a)]);
+    }
+
+    /// A synthetic tern event of the given index, cycling the event kinds so
+    /// every payload shape is exercised.
+    fn synthetic_event(i: usize) -> TernEvent {
+        match i % 4 {
+            0 => TernEvent::Key(TernKey::new(KeyName::Char, Some('a'), false, false, false)),
+            1 => TernEvent::Resize { w: 80, h: (i + 1) as u16 },
+            2 => TernEvent::FocusGained,
+            _ => TernEvent::Mouse(TernMouse {
+                kind: MouseEventKind::Moved,
+                column: (i % 100) as u16,
+                row: 0,
+                ctrl: false,
+                alt: false,
+                shift: false,
+            }),
+        }
+    }
+
+    #[cfg(feature = "push-events")]
+    #[test]
+    fn push_event_batch_delivers_all_synthetic_events_without_loss() {
+        // The push path's batch converter: N synthetic events in, N JS events
+        // out, in order, each mapping to the right tagged union shape.
+        let n = 40;
+        let events: Vec<TernEvent> = (0..n).map(synthetic_event).collect();
+        let mut delivered: Vec<TernEventJs> = Vec::new();
+        let teardown = push_event_batch(&events, false, &mut |js| delivered.push(js));
+        assert!(!teardown, "no ctrl+c in the batch");
+        assert_eq!(delivered.len(), n, "all {n} events delivered, none lost");
+        for (i, (event, js)) in events.iter().zip(&delivered).enumerate() {
+            match event {
+                TernEvent::Key(_key) => {
+                    assert_eq!(js.r#type, "key", "event {i} tagged key");
+                    let js_key = js.key.as_ref().expect("key payload present");
+                    assert_eq!(js_key.name, "char");
+                    assert_eq!(js_key.char.as_deref(), Some("a"));
+                }
+                TernEvent::Resize { w, h } => {
+                    assert_eq!(js.r#type, "resize", "event {i} tagged resize");
+                    assert_eq!(js.width, Some(*w));
+                    assert_eq!(js.height, Some(*h));
+                }
+                TernEvent::FocusGained => {
+                    assert_eq!(js.r#type, "focus", "event {i} tagged focus");
+                    assert_eq!(js.focus_gained, Some(true));
+                }
+                TernEvent::FocusLost => unreachable!("synthetic events never focus-lost"),
+                TernEvent::Mouse(_) => {
+                    assert_eq!(js.r#type, "mouse", "event {i} tagged mouse");
+                    assert_eq!(js.mouse.as_ref().expect("mouse payload present").kind, "moved");
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "push-events")]
+    #[test]
+    fn push_event_batch_flags_ctrl_c_teardown_and_still_delivers() {
+        // Ctrl+C with exit_on_ctrl_c: the batch reports a teardown (the caller
+        // restores the terminal and stops the loop) and the press is still
+        // delivered so push-mode consumers observe it.
+        let events = vec![
+            TernEvent::Key(TernKey::new(KeyName::Char, Some('c'), true, false, false)),
+            TernEvent::Key(TernKey::new(KeyName::Char, Some('q'), false, false, false)),
+        ];
+        let mut delivered: Vec<TernEventJs> = Vec::new();
+        let teardown = push_event_batch(&events, true, &mut |js| delivered.push(js));
+        assert!(teardown, "ctrl+c with exit_on_ctrl_c must request teardown");
+        assert_eq!(delivered.len(), 2, "both events still delivered");
+        assert_eq!(delivered[0].r#type, "key");
+        assert_eq!(delivered[0].key.as_ref().expect("key").char.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn is_ctrl_c_matches_ctrl_char_c_only() {
+        let ctrl_c = TernEvent::Key(TernKey::new(KeyName::Char, Some('c'), true, false, false));
+        assert!(is_ctrl_c(&ctrl_c));
+        // Not ctrl: a plain 'c'.
+        let plain_c = TernEvent::Key(TernKey::new(KeyName::Char, Some('c'), false, false, false));
+        assert!(!is_ctrl_c(&plain_c));
+        // Ctrl but not 'c'.
+        let ctrl_q = TernEvent::Key(TernKey::new(KeyName::Char, Some('q'), true, false, false));
+        assert!(!is_ctrl_c(&ctrl_q));
+        // Non-key events are never ctrl+c.
+        assert!(!is_ctrl_c(&TernEvent::Resize { w: 80, h: 24 }));
+        assert!(!is_ctrl_c(&TernEvent::FocusGained));
     }
 }

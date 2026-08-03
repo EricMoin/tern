@@ -17,6 +17,7 @@ import process from "node:process";
 // this also resolves under Node's type stripping.
 import type {
   ContentSize,
+  HighlightSpanJs,
   KeyEvent,
   NodeHandle as NativeNodeHandle,
   TuiRenderer as NativeTuiRenderer,
@@ -25,6 +26,7 @@ import type {
 
 export type {
   ContentSize,
+  HighlightSpanJs,
   KeyEvent,
   NodeHandle,
   TuiRenderer,
@@ -36,6 +38,8 @@ export interface TernAddon {
   TuiRenderer: typeof NativeTuiRenderer;
   NodeHandle: typeof NativeNodeHandle;
   create_node: (type: string, props?: Record<string, unknown> | null) => NativeNodeHandle;
+  /** Token-highlight `source` in `language` (a fence info string). */
+  highlight: (language: string, source: string) => HighlightSpanJs[];
 }
 
 /** Relative from this file (`packages/core/src/`) up to the binding dir. */

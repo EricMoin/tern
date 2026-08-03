@@ -17,8 +17,8 @@
  *   tail vs the `clip_height` viewport, a manual scroll above the tail
  *   detaches, and `followTail` re-attaches.
  * - `Input` / `Spinner` / `StatusBar` / `Panels` / `DiffView` / `Select` /
- *   `ScrollView` / `Table` / `Modal` are roadmap element factories that
- *   compose the primitive kinds into richer widgets (all
+ *   `ScrollView` / `Table` / `Modal` / `MarkdownView` are roadmap element
+ *   factories that compose the primitive kinds into richer widgets (all
  *   editing/caret/selection/scroll math stays in the element, the Rust
  *   compositor paints it), and a
  *   `FocusManager`
@@ -44,10 +44,13 @@
  *   napi surface is introduced (constitution). The `@tern/react` /
  *   `@tern/solid` hosts resolve automatically; raw `@tern/core` users call
  *   `resolveTheme` explicitly at element-creation time.
- * - `Renderer` owns the render/input loop: `render()`, `pollEvents()`,
- *   `onKey(cb)`, `onResize(cb)`, `onFocus(cb)`, `onMouse(cb)` and
- *   `destroy()`. `pollEvents()` returns the native events as a tagged
- *   `TernEventJs` union (`"key"` / `"resize"` / `"focus"` / `"mouse"`).
+ * - `Renderer` owns the render/input loop: `render()`, `events` (an
+ *   `AsyncIterable` of tagged `TernEventJs` events pushed from the native
+ *   thread), `onKey(cb)`, `onResize(cb)`, `onFocus(cb)`, `onMouse(cb)` and
+ *   `destroy()`. Event delivery is push-based (roadmap Phase 3): the native
+ *   binding runs a background event loop and delivers every event to the JS
+ *   thread through a `ThreadsafeFunction`, so the reconciler subscribes with
+ *   `for await (const event of renderer.events)` instead of polling.
  * - Scene geometry queries: `Renderer.hit_test(col, row)` returns the
  *   topmost z-ordered path of scene node ids covering a cell (for mouse
  *   routing), and `Node.contentSize()` returns a node's laid-out content
@@ -69,6 +72,7 @@
 export { loadAddon } from "./addon.ts";
 export type {
   ContentSize,
+  HighlightSpanJs,
   KeyEvent,
   MouseEventJs,
   NodeHandle,
@@ -82,6 +86,7 @@ export const version = "0.1.0";
 
 import type {
   ContentSize,
+  HighlightSpanJs,
   KeyEvent,
   MouseEventJs,
   NodeHandle as NativeNodeHandle,
@@ -93,9 +98,9 @@ import { loadAddon } from "./addon.ts";
 /**
  * The scene node kinds. `box`/`text`/`streaming_text` are materialized by the
  * binding; `input`/`textarea`/`spinner`/`status_bar`/`panels`/`diff`/`select`/
- * `scroll_view`/`table` are JS-only element kinds that materialize as
- * compositions over the primitive kinds (their root primitive is fixed by
- * {@link NATIVE_KIND}).
+ * `scroll_view`/`table`/`modal`/`markdown` are JS-only element kinds that
+ * materialize as compositions over the primitive kinds (their root primitive
+ * is fixed by {@link NATIVE_KIND}).
  */
 export type NodeType =
   | "box"
@@ -110,7 +115,8 @@ export type NodeType =
   | "select"
   | "scroll_view"
   | "table"
-  | "modal";
+  | "modal"
+  | "markdown";
 
 /**
  * The native scene node kind each JS element kind materializes as. The
@@ -118,7 +124,8 @@ export type NodeType =
  * kinds are pure JS compositions over those primitives (constitution: no new
  * engine kinds in the binding), so each maps to the root primitive of its
  * composition: an `input` is a framed box, a `spinner` is a text leaf, a
- * `status_bar` / `panels` / `diff` / `select` / `table` is a flex box.
+ * `status_bar` / `panels` / `diff` / `select` / `table` / `markdown` is a
+ * flex box.
  */
 const NATIVE_KIND: Record<NodeType, NodeType> = {
   box: "box",
@@ -134,6 +141,7 @@ const NATIVE_KIND: Record<NodeType, NodeType> = {
   scroll_view: "box",
   table: "box",
   modal: "box",
+  markdown: "box",
 };
 
 /**
@@ -1241,6 +1249,13 @@ function toSegment(segment: StatusBarSegment): Node {
  * The segment keys are lifted out of the strip's props — `left`/`right` are
  * absolute-position inset keywords in tern-layout, so they must never reach
  * the layout engine.
+ *
+ * The strip is stamped `status_bar: true`: the compositor reads that marker
+ * to reserve the bottom viewport row for the strip (docs/components.md
+ * "StatusBar — Reserved row") — panels lay out one row shorter and the strip
+ * pins to the reserved row. Like `z_index` / `wrap`, the marker is
+ * compositor-consumed (it flows through the binding into the scene prop map)
+ * and never reaches the layout engine.
  */
 export function StatusBar(props: StatusBarProps = {}): Node {
   const segments: Node[] = [];
@@ -1252,6 +1267,11 @@ export function StatusBar(props: StatusBarProps = {}): Node {
     flex_direction: "row",
     justify_content: "space-between",
     height: props.height ?? 1,
+    // Compositor-consumed marker (docs/components.md "StatusBar — Reserved
+    // row"): the strip owns the bottom viewport row, so no panel/scroll
+    // region overlaps it. Mirrors the Rust renderable's stamp in
+    // src/core/tern-components/src/statusbar.rs.
+    status_bar: true,
   };
   const plain = strip as Record<string, unknown>;
   delete plain.left;
@@ -2735,6 +2755,438 @@ export function closeModal(modal: Node, manager: FocusManager = focusManager): v
 }
 
 // ---------------------------------------------------------------------------
+// Syntax highlighting (roadmap Phase 4)
+//
+// `highlightCode` token-highlights a code string in a Markdown fence
+// language through the napi binding's `highlight` (tree-sitter in the Rust
+// `tern-highlight` crate). It returns a complete span stream — every byte of
+// the source is covered, adjacent same-style runs merge — whose `text`
+// concatenation reconstructs the input exactly, so the spans are ready for
+// `StreamingText.appendSpan` or for the MarkdownView code-fence composer.
+// The native call is lazy and fallible: when the addon is unavailable (plain
+// `deno test`, a browser host) or the language is unknown, it returns `[]`
+// and callers fall back to unstyled rendering. The engine logic stays in Rust
+// (constitution) — JS only maps the returned tokens onto scene styles.
+// ---------------------------------------------------------------------------
+
+/** The Markdown fence languages `highlightCode` recognizes (aliases map to
+ * the same grammar). */
+const HIGHLIGHT_LANGUAGES = new Set([
+  "rust",
+  "rs",
+  "typescript",
+  "ts",
+  "tsx",
+  "javascript",
+  "js",
+  "jsx",
+  "json",
+  "bash",
+  "shell",
+  "sh",
+  "zsh",
+]);
+
+/**
+ * Token-highlight `code` in `language` (a Markdown fence info string such as
+ * `"rust"`, `"ts"`, `"json"`, `"bash"`). Returns a complete span stream whose
+ * `text` concatenation reconstructs `code` exactly; spans carry `fg` (hex)
+ * and modifier style keys ready for `Node.appendSpan` or a `Text` leaf.
+ * Returns `[]` for unknown languages or when the native addon cannot be
+ * loaded — callers fall back to unstyled rendering.
+ */
+export function highlightCode(language: string, code: string): Span[] {
+  const lang = language.trim().toLowerCase();
+  if (!HIGHLIGHT_LANGUAGES.has(lang) || code === "") return [];
+  try {
+    const addon = loadAddon();
+    if (typeof addon.highlight !== "function") return [];
+    return addon.highlight(lang, code).map((raw: HighlightSpanJs): Span => {
+      const style: NodeProps = {};
+      if (raw.fg !== undefined && raw.fg !== null) style.fg = raw.fg;
+      if (raw.bold) style.bold = true;
+      if (raw.italic) style.italic = true;
+      if (raw.dim) style.dim = true;
+      if (raw.underline) style.underline = true;
+      return { text: raw.text, style };
+    });
+  } catch {
+    // The addon is not available (no --allow-ffi, browser host) — unstyled.
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MarkdownView
+//
+// A `markdown` element renders a Markdown source as a flex column of styled
+// `Text`/`Box` leaves. The block parser (line-based, CommonMark-flavored)
+// recognizes headings, lists (bulleted + ordered, 2-space nesting), block
+// quotes, horizontal rules, code fences (backtick/tilde) and paragraphs; the
+// inline parser recognizes `**bold**`, `*italic*`, `` `code` ``, and
+// `[links](url)` — including nested combos (`**a *b* c**`) and links inside
+// other styles. Parsing is best-effort and streaming-friendly: a half-open
+// code fence (the closing marker has not arrived yet) renders its collected
+// lines as the fenced block — a box with the single fence `bg` and, for a
+// recognized fence language, tree-sitter token colors (`highlightCode`); an
+// unclosed inline marker styles the rest of its line. Plain lines compose as
+// a single `Text` leaf (soft-wrapping at the `width` prop); a line with mixed
+// inline styles composes as one unwrapped flex row of per-span leaves. No new
+// napi node kind: the `markdown` element materializes as a `box`
+// (constitution).
+// ---------------------------------------------------------------------------
+
+/** The fg of an inline `` `code` `` span (One-Dark red — inline code reads as
+ * a keyword accent against the default text). */
+export const MARKDOWN_CODE_FG = "#e06c75";
+/** The fg of a `[link](url)` span (One-Dark blue — links read as the
+ * `primary` role; the underline is the link affordance). */
+export const MARKDOWN_LINK_FG = "#61afef";
+/** The bg of a code fence block — the default theme's panel background. The
+ * single fence style stands in for token colors until tree-sitter
+ * highlighting lands (roadmap Phase 4). */
+export const MARKDOWN_FENCE_BG = "#21252b";
+/** The glyph of a horizontal rule. */
+export const MARKDOWN_HR_CHAR = "─";
+/** The default width of a horizontal rule in cells (when no `width` prop is
+ * set). */
+export const MARKDOWN_HR_WIDTH = 40;
+
+/** Props for the `MarkdownView` element. `source` is consumed by the factory
+ * (the parsed block model is JS bookkeeping — it never reaches the scene
+ * props, mirroring `Panels`' `panels`); the remaining style/layout props flow
+ * to the root box, which is a flex column of the composed block nodes. */
+export interface MarkdownViewProps extends NodeProps {
+  /** The Markdown source to render. */
+  source: string;
+  /**
+   * The soft-wrap width in cells (default unset — lines stay unwrapped and
+   * the compositor trims overflow at the right edge). Plain paragraph /
+   * heading / list / blockquote leaves soft-wrap at this width (mirroring
+   * `Textarea`), and the horizontal rule spans it.
+   */
+  width?: number;
+}
+
+/** One styled text segment of a parsed inline line: the literal text plus the
+ * style keys the inline parser derived (`bold` / `italic` / `fg` /
+ * `underline`). */
+interface MarkdownSpan {
+  text: string;
+  style: NodeProps;
+}
+
+/** A parsed markdown block, before node composition. */
+type MarkdownBlock =
+  | { kind: "heading"; level: number; text: string }
+  | { kind: "paragraph"; text: string }
+  | { kind: "list"; prefix: string; text: string }
+  | { kind: "blockquote"; text: string }
+  | { kind: "hr" }
+  | { kind: "code"; lines: string[]; lang: string };
+
+/** A heading marker: 1-6 `#` followed by whitespace. */
+const MARKDOWN_HEADING_RE = /^ {0,3}(#{1,6})[ \t]+(.*)$/;
+/** A bullet list item: `-` / `*` / `+` after any leading indent (each 2-space
+ * step is one nesting level). */
+const MARKDOWN_ULIST_RE = /^ *([-*+])[ \t]+(.*)$/;
+/** An ordered list item: a number plus `.` / `)` after any leading indent. */
+const MARKDOWN_OLIST_RE = /^ *(\d+[.)])[ \t]+(.*)$/;
+/** A block quote line: `>` (with an optional following space). */
+const MARKDOWN_QUOTE_RE = /^ {0,3}>[ \t]?(.*)$/;
+/** A thematic break: 3+ of the same `-` / `*` / `_`, spaces allowed between
+ * (checked before the list patterns — `- - -` is a rule, not an item). */
+const MARKDOWN_HR_RE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+/** A code fence opener: 3+ backticks or 3+ tildes, plus an ignored info
+ * string (the language — consumed here and fed to `highlightCode`). */
+const MARKDOWN_FENCE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/;
+
+/** Whether `line` closes the fence opened with fence char `char` (3+ of the
+ * same char, trailing spaces only). */
+function markdownFenceClose(line: string, char: string): boolean {
+  const match = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+  return match !== null && match[1]![0] === char;
+}
+
+/**
+ * Parse a Markdown source into its block model. Line-based and best-effort: a
+ * half-open code fence (no closing marker before the end of the source) still
+ * yields a `code` block with the lines collected so far, so a streaming
+ * document renders progressively and settles when the fence closes.
+ */
+function parseMarkdown(source: string): MarkdownBlock[] {
+  const lines = source.split("\n");
+  const blocks: MarkdownBlock[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i]!;
+    const fence = MARKDOWN_FENCE_RE.exec(line);
+    if (fence !== null) {
+      const char = fence[1]![0]!;
+      const codeLines: string[] = [];
+      i += 1;
+      while (i < lines.length && !markdownFenceClose(lines[i]!, char)) {
+        codeLines.push(lines[i]!);
+        i += 1;
+      }
+      if (i < lines.length) i += 1; // consume the closing marker line
+      // The fence info string's first whitespace/brace-delimited token is the
+      // language (e.g. `rust` in ```rust) — consumed, never rendered.
+      const info = (fence[2] ?? "").trim().split(/[\s{]/)[0]!.toLowerCase();
+      blocks.push({ kind: "code", lines: codeLines, lang: info });
+      continue;
+    }
+    const heading = MARKDOWN_HEADING_RE.exec(line);
+    if (heading !== null) {
+      blocks.push({ kind: "heading", level: heading[1]!.length, text: heading[2]! });
+      i += 1;
+      continue;
+    }
+    if (MARKDOWN_HR_RE.test(line)) {
+      blocks.push({ kind: "hr" });
+      i += 1;
+      continue;
+    }
+    const quote = MARKDOWN_QUOTE_RE.exec(line);
+    if (quote !== null) {
+      blocks.push({ kind: "blockquote", text: `> ${quote[1]!}` });
+      i += 1;
+      continue;
+    }
+    const ulist = MARKDOWN_ULIST_RE.exec(line);
+    if (ulist !== null) {
+      const indent = line.length - line.trimStart().length;
+      blocks.push({ kind: "list", prefix: "  ".repeat(Math.min(6, Math.floor(indent / 2))) + "• ", text: ulist[2]! });
+      i += 1;
+      continue;
+    }
+    const olist = MARKDOWN_OLIST_RE.exec(line);
+    if (olist !== null) {
+      const indent = line.length - line.trimStart().length;
+      blocks.push({ kind: "list", prefix: "  ".repeat(Math.min(6, Math.floor(indent / 2))) + `${olist[1]!} `, text: olist[2]! });
+      i += 1;
+      continue;
+    }
+    if (line.trim() === "") {
+      i += 1; // blank lines separate blocks — nothing to render
+      continue;
+    }
+    blocks.push({ kind: "paragraph", text: line });
+    i += 1;
+  }
+  return blocks;
+}
+
+/** Whether two inline span styles carry the same derived keys (the parser
+ * only produces `bold` / `italic` / `fg` / `underline`). */
+function markdownSpanStyleEqual(a: NodeProps, b: NodeProps): boolean {
+  return a.bold === b.bold && a.italic === b.italic && a.fg === b.fg && a.underline === b.underline;
+}
+
+/**
+ * Parse a line's inline styles into styled spans. A small state machine over
+ * the markers `**` (bold), `*` (italic), `` ` `` (code — markers inside a
+ * code span stay literal), and `[label](url)` (a link: the label is re-parsed
+ * recursively and stamped with `underline` + {@link MARKDOWN_LINK_FG}).
+ * Nesting works because each marker toggles its flag (`**a *b* c**`); an
+ * unclosed marker styles the rest of the line (best-effort while streaming).
+ * Adjacent spans with identical styles are merged.
+ */
+function parseInline(text: string): MarkdownSpan[] {
+  const spans: MarkdownSpan[] = [];
+  let buf = "";
+  let bold = false;
+  let italic = false;
+  let code = false;
+
+  const push = (span: MarkdownSpan): void => {
+    const last = spans[spans.length - 1];
+    if (last !== undefined && markdownSpanStyleEqual(last.style, span.style)) {
+      last.text += span.text;
+    } else {
+      spans.push(span);
+    }
+  };
+
+  const flush = (): void => {
+    if (buf === "") return;
+    const style: NodeProps = {};
+    if (bold) style.bold = true;
+    if (italic) style.italic = true;
+    if (code) style.fg = MARKDOWN_CODE_FG;
+    push({ text: buf, style });
+    buf = "";
+  };
+
+  let i = 0;
+  while (i < text.length) {
+    const rest = text.slice(i);
+    if (rest.startsWith("`")) {
+      flush();
+      code = !code;
+      i += 1;
+      continue;
+    }
+    if (code) {
+      // Inside a code span only the closing backtick is a marker — every
+      // other character (asterisks, brackets) is literal.
+      buf += text[i]!;
+      i += 1;
+      continue;
+    }
+    if (rest.startsWith("**")) {
+      flush();
+      bold = !bold;
+      i += 2;
+      continue;
+    }
+    if (rest.startsWith("*")) {
+      flush();
+      italic = !italic;
+      i += 1;
+      continue;
+    }
+    if (rest.startsWith("[")) {
+      const close = rest.indexOf("](");
+      if (close !== -1) {
+        const paren = rest.indexOf(")", close + 2);
+        if (paren !== -1) {
+          flush();
+          // The link's label is parsed inline and stamped with the link
+          // style; the surrounding bold/italic carry into the link spans.
+          for (const span of parseInline(rest.slice(1, close))) {
+            const style: NodeProps = { ...span.style, underline: true, fg: MARKDOWN_LINK_FG };
+            if (bold) style.bold = true;
+            if (italic) style.italic = true;
+            push({ text: span.text, style });
+          }
+          i += paren + 1;
+          continue;
+        }
+      }
+    }
+    buf += text[i]!;
+    i += 1;
+  }
+  flush();
+  return spans;
+}
+
+/**
+ * Compose one markdown text line into scene nodes: a single `Text` leaf when
+ * the line parses to one span (the common case — it soft-wraps at `width`),
+ * or a flex row of per-span `Text` leaves when the line mixes inline styles.
+ * `base` is the block style (e.g. `dim` for a block quote); span styles
+ * override it.
+ */
+function markdownLineNode(text: string, base: NodeProps, width: number | null): Node {
+  const spans = parseInline(text);
+  if (spans.length === 1) {
+    const span = spans[0]!;
+    const props: NodeProps = { ...base, text: span.text, ...span.style };
+    if (width !== null) props.width = width;
+    return Text(props);
+  }
+  const leaves = spans.map((span) => Text({ ...base, text: span.text, ...span.style }));
+  return Box({ flex_direction: "row" }, ...leaves);
+}
+
+/** Compose one highlighted code line into a scene node: a single `Text` leaf
+ * when the line parses to one span (the common case), or a flex row of
+ * per-span `Text` leaves when it mixes token styles. */
+function markdownSpanRow(spans: Span[]): Node {
+  if (spans.length === 1) {
+    const span = spans[0]!;
+    return Text({ text: span.text, ...span.style });
+  }
+  return Box(
+    { flex_direction: "row" },
+    ...spans.map((span) => Text({ text: span.text, ...span.style })),
+  );
+}
+
+/** Compose one parsed markdown block into its scene node(s). */
+function buildMarkdownBlock(block: MarkdownBlock, width: number | null): Node {
+  switch (block.kind) {
+    case "heading": {
+      // Headings render bold at every level; an H1 additionally underlines
+      // (terminal markdown renderers have no font sizes — weight/underline
+      // carry the hierarchy).
+      const style: NodeProps = { bold: true };
+      if (block.level === 1) style.underline = true;
+      return markdownLineNode(block.text, style, width);
+    }
+    case "paragraph":
+      return markdownLineNode(block.text, {}, width);
+    case "list":
+      return markdownLineNode(block.prefix + block.text, {}, width);
+    case "blockquote":
+      return markdownLineNode(block.text, { dim: true }, width);
+    case "hr":
+      return Text({ text: MARKDOWN_HR_CHAR.repeat(width ?? MARKDOWN_HR_WIDTH), dim: true });
+    case "code": {
+      // The fenced block: a box with the fence `bg`. With a recognized fence
+      // language the whole code text is token-highlighted and composed as one
+      // node per line — a single `Text` leaf when the line is uniform, a flex
+      // row of per-span leaves when it mixes styles (mirroring
+      // `markdownLineNode`); otherwise (unknown language, or the addon is not
+      // available) one plain text leaf per line. Fence marker lines are
+      // consumed — a half-open fence renders exactly like a closed one
+      // (best-effort streaming).
+      const spans = highlightCode(block.lang, block.lines.join("\n"));
+      if (spans.length === 0) {
+        return Box(
+          { flex_direction: "column", bg: MARKDOWN_FENCE_BG },
+          ...block.lines.map((line) => Text({ text: line })),
+        );
+      }
+      const rows: Node[] = [];
+      let rowSpans: Span[] = [];
+      // The span stream reconstructs the joined source exactly, so splitting
+      // each span's text on newlines regroups it per code line.
+      for (const span of spans) {
+        const parts = span.text.split("\n");
+        parts.forEach((part, i) => {
+          if (i > 0) {
+            rows.push(markdownSpanRow(rowSpans));
+            rowSpans = [];
+          }
+          rowSpans.push(span.style === undefined ? { text: part } : { text: part, style: span.style });
+        });
+      }
+      if (rowSpans.length > 0) rows.push(markdownSpanRow(rowSpans));
+      return Box({ flex_direction: "column", bg: MARKDOWN_FENCE_BG }, ...rows);
+    }
+  }
+}
+
+/**
+ * Create a `markdown` element: a flex column of block nodes rendering the
+ * Markdown `source` — headings (bold, H1 underlined), paragraphs, bulleted /
+ * ordered lists (`•` items, 2-space nesting), block quotes (dimmed `> `),
+ * horizontal rules (a `─` run) and code fences (a `bg` box, one leaf per
+ * line) — with `**bold**` / `*italic*` / `` `code` `` / `[links](url)` inline
+ * styles parsed into per-span `Text` leaves. Parsing is best-effort and
+ * streaming-friendly: a half-open code fence renders its collected lines as
+ * the fenced block, and an unclosed inline marker styles the rest of its
+ * line. The `source` key is consumed (JS bookkeeping — never a scene prop);
+ * the `width` prop soft-wraps plain lines and spans the horizontal rule. No
+ * new napi node kind: the `markdown` element materializes as a `box`
+ * (constitution).
+ */
+export function MarkdownView(props: MarkdownViewProps): Node {
+  const width =
+    typeof props.width === "number" && Number.isFinite(props.width) && props.width > 0
+      ? Math.floor(props.width)
+      : null;
+  const blocks = parseMarkdown(props.source ?? "").map((block) => buildMarkdownBlock(block, width));
+  const rootProps: NodeProps = { ...props, flex_direction: "column" };
+  const plain = rootProps as Record<string, unknown>;
+  delete plain.source;
+  return Node.create("markdown", rootProps, blocks);
+}
+
+// ---------------------------------------------------------------------------
 // StreamingText auto-scroll
 //
 // A `streaming_text` node can pin its `scroll_y` to the content tail as the
@@ -2846,6 +3298,7 @@ export const THEME_COMPONENTS = [
   "select",
   "scroll_view",
   "table",
+  "markdown",
 ] as const;
 
 /** A themeable component kind ("input", "diff", ...). */
@@ -2924,6 +3377,7 @@ export const defaultTheme: Theme = {
     select: {},
     scroll_view: {},
     table: {},
+    markdown: {},
   },
 };
 
@@ -3343,9 +3797,69 @@ function topmostFocusId(root: Node, manager: FocusManager): string | null {
 }
 
 /**
+ * An async event queue fed by the native push stream. `push` enqueues an
+ * event on the JS thread (called by the native `ThreadsafeFunction`
+ * callback); `[Symbol.asyncIterator]` yields events in arrival order until
+ * `close`. No events are dropped: a consumer that is slow to `next()` simply
+ * accumulates the queue.
+ *
+ * The iterator is safe against the classic missed-wakeup race: it re-checks
+ * the queue after registering its waiter, so an event pushed between the
+ * length check and the waiter registration still wakes it.
+ */
+class TernEventStream implements AsyncIterable<TernEventJs> {
+  #queue: TernEventJs[] = [];
+  #waiters: Array<() => void> = [];
+  #closed = false;
+
+  /** Enqueue an event delivered from the native event loop. */
+  push(event: TernEventJs): void {
+    this.#queue.push(event);
+    this.#wakeWaiters();
+  }
+
+  /** Stop the stream: pending and future `next()` calls resolve as done. */
+  close(): void {
+    this.#closed = true;
+    this.#wakeWaiters();
+  }
+
+  #wakeWaiters(): void {
+    while (this.#waiters.length > 0) this.#waiters.shift()!();
+  }
+
+  async *[Symbol.asyncIterator](): AsyncIterator<TernEventJs> {
+    while (true) {
+      if (this.#queue.length > 0) {
+        yield this.#queue.shift()!;
+        continue;
+      }
+      if (this.#closed) return;
+      await new Promise<void>((resolve) => {
+        this.#waiters.push(resolve);
+        // Re-check after registering: an event (or a close) may have arrived
+        // between the checks above and the waiter registration.
+        if (this.#queue.length > 0 || this.#closed) {
+          const index = this.#waiters.indexOf(resolve);
+          if (index >= 0) this.#waiters.splice(index, 1);
+          resolve();
+        }
+      });
+    }
+  }
+}
+
+/**
  * A terminal-facing renderer. Constructing one enters raw mode + the
  * alternate screen; `destroy()` (or Ctrl+C with `exitOnCtrlC`) restores the
- * terminal. A destroyed renderer cannot render or poll.
+ * terminal and stops the event stream. A destroyed renderer cannot render or
+ * poll.
+ *
+ * Input delivery is push-based but **explicit**: `startEventStream()` begins
+ * the native event loop (and with it the delivery of terminal events to
+ * `events` and the `on*` handlers). Call it once the scene is ready — before
+ * it, the terminal buffers input untouched, so an app that asserts its scene
+ * first is not racing early input.
  */
 export class Renderer {
   #native: NativeTuiRenderer;
@@ -3353,6 +3867,9 @@ export class Renderer {
   #resizeHandlers = new Set<ResizeHandler>();
   #focusHandlers = new Set<FocusHandler>();
   #mouseHandlers = new Set<MouseHandler>();
+  #events = new TernEventStream();
+  #streamStarted = false;
+  #destroyed = false;
 
   /** The scene root. Attach content under it with `Node.addChild`. */
   readonly root: Node;
@@ -3365,45 +3882,67 @@ export class Renderer {
     this.root = Node.wrapRoot(this.#native.root());
   }
 
-  /** Paint the shared scene to the terminal (minimal diff vs the last frame). */
-  render(): void {
-    this.#native.render();
+  /**
+   * The live stream of terminal events (`TernEventJs` tagged union), pushed
+   * from the native event loop after `startEventStream()`. Subscribe with
+   * `for await (const event of renderer.events)` — the reconciler's
+   * replacement for the old `pollEvents` loop. The stream yields every
+   * delivered event in order, without loss, and closes when the renderer is
+   * destroyed.
+   */
+  get events(): AsyncIterable<TernEventJs> {
+    return this.#events;
   }
 
   /**
-   * Block up to `timeoutMs` for input, dispatching each event to the handlers
-   * registered with `onKey` / `onResize` / `onFocus` / `onMouse`, and return
-   * the tagged events. A burst of events arrives as one batch.
+   * Begin push-based input delivery (roadmap Phase 3): the native binding
+   * spawns its background event loop and delivers every terminal event to
+   * the JS thread through a ThreadsafeFunction — following Node's error-first
+   * callback convention, so the callback's first argument is always null —
+   * feeding the `events` iterable and the `on*` handler sets. Idempotent; a
+   * no-op once started. A no-op on a destroyed renderer.
    */
-  pollEvents(timeoutMs: number = 50): TernEventJs[] {
-    const events = this.#native.poll_events(timeoutMs);
-    for (const event of events) {
-      switch (event.type) {
-        case "key":
-          if (event.key !== undefined) {
-            for (const handler of this.#keyHandlers) handler(event.key);
-          }
-          break;
-        case "resize":
-          if (event.width !== undefined && event.height !== undefined) {
-            const size = { width: event.width, height: event.height };
-            for (const handler of this.#resizeHandlers) handler(size);
-          }
-          break;
-        case "focus":
-          if (event.focus_gained !== undefined) {
-            const focus = { focus_gained: event.focus_gained };
-            for (const handler of this.#focusHandlers) handler(focus);
-          }
-          break;
-        case "mouse":
-          if (event.mouse !== undefined) {
-            for (const handler of this.#mouseHandlers) handler(event.mouse);
-          }
-          break;
-      }
+  startEventStream(): void {
+    if (this.#streamStarted || this.#destroyed) return;
+    this.#native.start_event_stream((_err, event) => {
+      if (event !== undefined) this.#onNativeEvent(event);
+    });
+    this.#streamStarted = true;
+  }
+
+  /** The native push callback: enqueue + dispatch to the `on*` handlers. */
+  #onNativeEvent(event: TernEventJs): void {
+    if (this.#destroyed) return;
+    this.#events.push(event);
+    switch (event.type) {
+      case "key":
+        if (event.key !== undefined) {
+          for (const handler of this.#keyHandlers) handler(event.key);
+        }
+        break;
+      case "resize":
+        if (event.width !== undefined && event.height !== undefined) {
+          const size = { width: event.width, height: event.height };
+          for (const handler of this.#resizeHandlers) handler(size);
+        }
+        break;
+      case "focus":
+        if (event.focus_gained !== undefined) {
+          const focus = { focus_gained: event.focus_gained };
+          for (const handler of this.#focusHandlers) handler(focus);
+        }
+        break;
+      case "mouse":
+        if (event.mouse !== undefined) {
+          for (const handler of this.#mouseHandlers) handler(event.mouse);
+        }
+        break;
     }
-    return events;
+  }
+
+  /** Paint the shared scene to the terminal (minimal diff vs the last frame). */
+  render(): void {
+    this.#native.render();
   }
 
   /**
@@ -3420,9 +3959,9 @@ export class Renderer {
   }
 
   /**
-   * Register a handler invoked for every key event returned by `pollEvents`.
-   * The handler receives the `KeyEvent` payload. Returns an unsubscribe
-   * function.
+   * Register a handler invoked for every key event delivered by the push
+   * event stream. The handler receives the `KeyEvent` payload. Returns an
+   * unsubscribe function.
    */
   onKey(handler: KeyHandler): () => void {
     this.#keyHandlers.add(handler);
@@ -3450,23 +3989,29 @@ export class Renderer {
   }
 
   /**
-   * Register a handler invoked for every mouse event returned by `pollEvents`.
-   * The handler receives the `MouseEventJs` payload. Returns an unsubscribe
-   * function.
+   * Register a handler invoked for every mouse event delivered by the push
+   * event stream. The handler receives the `MouseEventJs` payload. Returns an
+   * unsubscribe function.
    */
   onMouse(handler: MouseHandler): () => void {
     this.#mouseHandlers.add(handler);
     return () => this.#mouseHandlers.delete(handler);
   }
 
-  /** Leave the alternate screen and raw mode, restoring the terminal. */
+  /**
+   * Leave the alternate screen and raw mode, restoring the terminal, and stop
+   * the push event stream. Safe to call more than once.
+   */
   destroy(): void {
+    if (this.#destroyed) return;
+    this.#destroyed = true;
+    this.#events.close();
     this.#native.destroy();
   }
 
   /** Whether the renderer has been destroyed (explicitly or via Ctrl+C). */
   get destroyed(): boolean {
-    return this.#native.destroyed;
+    return this.#destroyed || this.#native.destroyed;
   }
 }
 
@@ -3479,7 +4024,9 @@ export class Renderer {
  *   Box({ border_style: "rounded" }, Text({ text: "Hello" })),
  * );
  * renderer.render();
- * renderer.pollEvents(50); // feeds the on* handlers, returns tagged events
+ * for await (const event of renderer.events) {
+ *   // push-delivered tagged TernEventJs events (no polling loop)
+ * }
  * renderer.destroy();
  * ```
  */

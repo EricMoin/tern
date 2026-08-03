@@ -9,6 +9,18 @@ description = "tern napi binding: Deno/Node.js -> tern-core bridge"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# Push-based event delivery (roadmap Phase 3): the renderer's event loop
+# pushes normalized events into a napi `ThreadsafeFunction`, and the JS
+# renderer subscribes instead of polling. This is the default event path.
+default = ["push-events"]
+# Push delivery via `TuiRenderer::start_event_stream` (napi ThreadsafeFunction
+# + a background tern-terminal event loop).
+push-events = []
+# Pull-based `poll_events` fallback for hosts without a napi JS thread to
+# push into (e.g. wasm builds of the bindings).
+poll-fallback = []
+
 [dependencies]
 # `dyn-symbols` (a napi-rs default, restored here) resolves N-API symbols
 # through a runtime function table with link-time stubs, so the crate's unit
@@ -19,6 +31,7 @@ napi-derive = "3"
 serde_json = "1"
 tern-core = { path = "../../core/tern-core" }
 tern-components = { path = "../../core/tern-components" }
+tern-highlight = { path = "../../core/tern-highlight" }
 tern-terminal = { path = "../../core/tern-terminal" }
 
 [build-dependencies]
