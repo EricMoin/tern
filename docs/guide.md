@@ -305,23 +305,31 @@ subscribeClickFocus(renderer);          // click-to-focus, per app
 
 ## Event model
 
-Events are **pull-based**: `renderer.pollEvents(timeoutMs)` blocks up to the
-timeout for native input and returns the tagged `TernEventJs` union
-(`"key"` / `"resize"` / `"focus"` / `"mouse"`), dispatching each event to the
-handlers registered with:
+Events are **push-based** (roadmap Phase 3): `renderer.startEventStream()`
+starts the native binding's background event loop, which delivers every
+terminal event to the JS thread through a `ThreadsafeFunction` — no polling
+loop in the app. Each event is a tagged `TernEventJs` union (`"key"` /
+`"resize"` / `"focus"` / `"mouse"`) and is:
 
-- `onKey(event)` — a `KeyEvent` (a `name` like `"char"` / `"enter"` /
-  `"escape"` / `"left"` / `"right"` / `"up"` / `"down"` / `"backspace"` /
-  `"home"` / `"end"`, plus optional `char` and the `ctrl` / `alt` / `shift`
-  modifiers).
-- `onResize({ width, height })` — the new terminal size.
-- `onFocus({ focus_gained })` — `true` on focus gained, `false` on lost.
-- `onMouse(event)` — a `MouseEventJs` payload (`down_left`, `drag_left`,
-  `up_*`, ... with `column` / `row`).
+- yielded by the `renderer.events` async iterable, so the app loop subscribes
+  with `for await (const event of renderer.events)` — events arrive in order
+  and none are dropped (the queue is unbounded); the stream closes when the
+  renderer is destroyed; and
+- dispatched to the handlers registered with:
+  - `onKey(event)` — a `KeyEvent` (a `name` like `"char"` / `"enter"` /
+    `"escape"` / `"left"` / `"right"` / `"up"` / `"down"` / `"backspace"` /
+    `"home"` / `"end"`, plus optional `char` and the `ctrl` / `alt` / `shift`
+    modifiers).
+  - `onResize({ width, height })` — the new terminal size.
+  - `onFocus({ focus_gained })` — `true` on focus gained, `false` on lost.
+  - `onMouse(event)` — a `MouseEventJs` payload (`down_left`, `drag_left`,
+    `up_*`, ... with `column` / `row`).
 
-The app loop is a `while` around `pollEvents` that exits when the renderer is
-destroyed (the `q` handler's `exit()` / `renderer.destroy()`, or Ctrl+C with
-`exitOnCtrlC: true`).
+Call `startEventStream()` once the scene is ready — before it, the terminal
+buffers input untouched. The app loop exits when the renderer is destroyed
+(the `q` handler's `exit()` / `renderer.destroy()`, or Ctrl+C with
+`exitOnCtrlC: true`; with `exitOnCtrlC`, the Ctrl+C press is still delivered
+so the loop observes it and sees `renderer.destroyed`).
 
 ### Key routing and focus
 

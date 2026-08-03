@@ -26,6 +26,7 @@ import {
   type Node,
   type Renderer,
   type Span,
+  type TernEventJs,
 } from "@tern/core";
 import { Box, StreamingText, Text, render, useApp, useInput } from "@tern/react";
 import process from "node:process";
@@ -167,23 +168,33 @@ console.log(
 // Event loop: quit on 'q' (via useInput → exit()), or on ctrl+c auto-destroy
 // ---------------------------------------------------------------------------
 
+renderer.startEventStream();
 let quit = false;
 const deadline = Date.now() + 5000;
+const events = renderer.events[Symbol.asyncIterator]();
 while (Date.now() < deadline && !quit) {
   if (renderer.destroyed) {
     // The 'q' handler's exit() destroyed the renderer — clean quit.
     quit = true;
     break;
   }
-  try {
-    renderer.pollEvents(50);
-  } catch {
-    // The renderer was destroyed inside pollEvents (ctrl+c with
-    // exitOnCtrlC) — also a clean quit.
+  // Wait for the next pushed event, bounded by the deadline so a dead
+  // renderer fails the demo instead of hanging forever.
+  const next = await Promise.race([
+    events.next(),
+    new Promise<IteratorResult<TernEventJs, undefined>>((resolve) =>
+      setTimeout(() => resolve({ done: true, value: undefined }), Math.max(0, deadline - Date.now())),
+    ),
+  ]);
+  if (next.done) break; // stream closed (renderer destroyed) or deadline hit
+  if (renderer.destroyed) {
+    // Ctrl+C with exitOnCtrlC tore the renderer down after delivering the
+    // event — also a clean quit.
     quit = true;
     break;
   }
 }
+if (renderer.destroyed) quit = true;
 renderer.destroy();
 
 if (!quit) {

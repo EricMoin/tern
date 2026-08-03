@@ -31,9 +31,12 @@ below is current — the shipped rows reflect what runs today.
 ## Event model
 
 Terminal events reach the scene through `@tern/core`'s `Renderer`:
-`pollEvents()` blocks up to a timeout for native input and returns the tagged
-`TernEventJs` union (`"key"` / `"resize"` / `"focus"` / `"mouse"`), feeding the
-`onKey` / `onResize` / `onFocus` / `onMouse` handlers the renderer exposes:
+`startEventStream()` starts push-based delivery (roadmap Phase 3 — shipped):
+the native binding's background event loop pushes every terminal event to the
+JS thread through a `ThreadsafeFunction`, yielding the tagged `TernEventJs`
+union (`"key"` / `"resize"` / `"focus"` / `"mouse"`) on the `renderer.events`
+async iterable and feeding the `onKey` / `onResize` / `onFocus` / `onMouse`
+handlers the renderer exposes:
 
 - `onKey(event)` — a `KeyEvent` (key name plus optional `char` / modifiers).
 - `onResize({ width, height })` — the new terminal size.
@@ -59,12 +62,12 @@ handler.
 | Component | Status | Needs |
 |-----------|--------|-------|
 | [StreamingText](#streamingtext) | ✅ Shipped | — |
-| [MarkdownView](#markdownview) | 🧭 Later | tree-sitter highlighting |
+| [MarkdownView](#markdownview) | ✅ Shipped | — |
 | [DiffView](#diffview) | ✅ Shipped | — |
 | [Input](#input) | ✅ Shipped | — |
 | [Spinner](#spinner) | ✅ Shipped | — |
 | [Panels / split layouts](#panels--split-layouts) | ✅ Shipped | — |
-| [StatusBar](#statusbar) | ✅ Shipped | reserved viewport row |
+| [StatusBar](#statusbar) | ✅ Shipped | — |
 | [Select](#select) | ✅ Shipped | — |
 | [ScrollView](#scrollview) | ✅ Shipped | — |
 | [Table](#table) | ✅ Shipped | — |
@@ -142,9 +145,13 @@ half-open while tokens are still arriving. The view must render best-effort
 - **Block styles:** headings, lists, blockquotes, horizontal rules, code
   fences, paragraphs. Rendered as styled spans over `Text`/`Box`.
 - **Inline styles:** `**bold**`, `` `code` ``, `[links](url)`, `*italic*`.
-- **Syntax highlighting** inside code fences via tree-sitter (Phase 4 in
-  [roadmap.md](roadmap.md)); before that lands, fences render with a single
-  fence style and no token colors.
+- **Syntax highlighting** inside code fences via tree-sitter (roadmap
+  Phase 4 — shipped): the `tern-highlight` crate maps tree-sitter captures
+  to style spans (keywords, strings, comments, types) over the whole fence;
+  `@tern/core`'s `highlightCode` feeds them into the fence's leaves (a
+  fence with a recognized language renders one styled leaf per line with
+  token colors, falling back to the single fence style for unknown
+  languages or when the native addon is unavailable).
 - **Layout:** reuses tern-layout over block-level boxes; code blocks get a
   distinct background and optional box border.
 
@@ -160,6 +167,19 @@ half-open while tokens are still arriving. The view must render best-effort
 
 **Acceptance:** a streamed Markdown answer renders progressively (fence closes
 correctly at the end); inline/block styles match a golden buffer test.
+
+**Shipped:** `MarkdownView` in `@tern/core` builds the `markdown` element — a
+flex column of block nodes rendering the `source` (headings bold, H1
+underlined; paragraphs; bulleted/ordered lists; dimmed block quotes; `─`
+horizontal rules; and code fences as a `bg` box with one leaf per line,
+tree-sitter-highlighted for recognized languages) with `**bold**` /
+`*italic*` / `` `code` `` / `[links](url)` inline styles parsed into
+per-span `Text` leaves. Parsing is best-effort and streaming-friendly: a
+half-open code fence renders its collected lines as the fenced block, and an
+unclosed inline marker styles the rest of its line. The `source` key is
+consumed (JS bookkeeping — never a scene prop); the `width` prop soft-wraps
+plain lines. No new napi node kind: the `markdown` element materializes as a
+`box` (constitution).
 
 ---
 
@@ -334,8 +354,10 @@ keyboard resize sequence changes pane widths and a golden buffer matches.
 `@tern/solid`) exposes `collapsePanel` / `expandPanel` / `togglePanel` /
 `focusPanel`. Mouse drag-resize ships as `startPanelDrag` / `dragPanels` /
 `endPanelDrag` in `@tern/core`, wired by `usePanelMouseDrag` (`@tern/react`)
-and `subscribePanelDrag` (`@tern/solid`); the flex-basis reflow of a drag into
-the layout engine is tracked in [roadmap.md](roadmap.md).
+and `subscribePanelDrag` (`@tern/solid`); the flex-basis reflow of a drag
+into the layout engine ships — tern-layout maps the `flex_basis` prop into
+taffy's flex-basis, so a drag reflows the pane split (roadmap Phase 2,
+shipped).
 
 ---
 
@@ -375,10 +397,18 @@ left/center/right `Segment`s and `trimmed()` drops lowest-priority segments
 (rightmost-first on ties) against a row width. The JS element (`StatusBar` in
 `@tern/core`; `<StatusBar>` in `@tern/react`, `StatusBar` in `@tern/solid`)
 materializes as a single-row `space-between` strip (height 1) whose children
-are the left/center/right segment `Text` nodes. The reserved viewport row
-(the compositor subtracting the bottom row before laying out panels, see
-**Design** above) does not ship yet — a `StatusBar` is currently laid out as
-an ordinary node in the scene.
+are the left/center/right segment `Text` nodes.
+
+**Reserved row (shipped):** the strip frame is stamped `status_bar: true`
+(the Rust renderable stamps it at materialization; the JS `StatusBar` factory
+stamps the same prop on the strip node). The compositor reads the marker and
+reserves the bottom viewport row for the strip (roadmap Phase 2 — shipped):
+the layout viewport handed to the engine is one row shorter, so every panel
+and scroll region lays out entirely above the row, and the strip frame — with
+its whole subtree — is pinned to that row. A scene without a `StatusBar` is
+laid out against the full viewport exactly as before. The reserved-row
+behavior is asserted by the compositor golden test
+(`golden_panels_and_status_bar_reserve_bottom_row`).
 
 ---
 
@@ -575,8 +605,11 @@ editing keys (char insert, backspace/delete with line joins, left/right/
 home/end, `enter` splits, up/down across display lines preserving a preferred
 column) and returns the new `{ lines, row, col }`. `<Textarea>` in
 `@tern/react` adds `focusId` / `focusManager` / `onChange` / `onSubmit`
-(focus registration plus callbacks); `Textarea` in `@tern/solid` is the plain
-factory.
+(focus registration plus callbacks); `Textarea` in `@tern/solid` mirrors the
+same focus wiring — a `focusId` prop registers the node with a `FocusManager`
+(routed keys edit it via `editTextareaKey`), firing `onChange` / `onSubmit`,
+with the registration disposed via `disposeTextareaFocus` (feature parity
+with the React host component).
 
 ---
 
