@@ -6,6 +6,11 @@
 //! the strip never wraps. The component materializes into a scene as a full-
 //! width row [`Box`](crate::Box) with `justify_content: space-between`
 //! holding one group box per alignment.
+//!
+//! The strip frame is stamped `status_bar: true` when it materializes; the
+//! compositor reads that marker to reserve the bottom viewport row for the
+//! strip — laying panels out one row shorter and pinning the strip to the
+//! reserved row (docs/components.md "StatusBar — Reserved row").
 
 use std::cmp::Reverse;
 
@@ -161,12 +166,17 @@ impl StatusBar {
     // --- Rendering -------------------------------------------------------
 
     /// The strip frame as a bare box (style + layout props, no children).
+    ///
+    /// The frame is a single-row (`height 1`) `space-between` row: the strip
+    /// occupies exactly one viewport row wherever it sits, which is what lets
+    /// the compositor pin it to the reserved bottom row.
     pub(crate) fn frame(&self) -> Box {
         Box::new(self.style, vec![])
             .row()
             .justify_content("space-between")
             .align_items("center")
             .gap(self.gap as i64)
+            .height(1)
     }
 
     /// Materialize one alignment group (a row box of styled segment texts).
@@ -188,6 +198,12 @@ impl StatusBar {
 
     /// Materialize the trimmed segments as left/center/right group boxes.
     pub(crate) fn materialize_content(&self, scene: &mut Scene, parent: NodeId) {
+        // Stamp the frame so the compositor can identify the strip node and
+        // reserve the bottom viewport row for it (docs/components.md
+        // "StatusBar — Reserved row"): panels lay out one row shorter and the
+        // strip pins to the reserved row, so no panel/scroll region overlaps
+        // it. The marker is compositor-consumed (like `z_index` / `wrap`).
+        scene.set_prop(parent, "status_bar", PropValue::Bool(true));
         let trimmed = self.trimmed();
         for align in [SegmentAlign::Left, SegmentAlign::Center, SegmentAlign::Right] {
             let segs: Vec<&Segment> = trimmed.iter().filter(|s| s.align == align).collect();
