@@ -24,8 +24,8 @@ panels, status, selection).
 | Package | What it is |
 |---------|------------|
 | [`@tern/core`](packages/core/README.md) | TypeScript bindings over the tern-node napi addon: renderer, scene nodes, element factories, focus, theme |
-| [`@tern/react`](packages/react/README.md) | react-reconciler custom renderer — host components, `render`/`createRoot`, `useApp`/`useInput`/`useFocus`/`useResize` |
-| [`@tern/solid`](packages/solid/README.md) | SolidJS universal custom renderer — element factories, `render`, `subscribeInput`/`subscribeStream`/`subscribeResize` |
+| [`@tern/react`](packages/react/README.md) | react-reconciler custom renderer — host components, `render`/`createRoot`, `useApp`/`useInput`/`useFocus`/`useResize`/`useWheelScroll`/`useClickToFocus` |
+| [`@tern/solid`](packages/solid/README.md) | SolidJS universal custom renderer — element factories, `render`, `subscribeInput`/`subscribeStream`/`subscribeResize`/`subscribeWheelScroll`/`subscribeClickFocus` |
 | [`@tern/examples`](packages/examples/README.md) | Runnable demos (React/Solid + kitchen sinks) with a PTY smoke harness |
 
 ## Quick start — @tern/react
@@ -66,9 +66,10 @@ while (!renderer.destroyed) {
 
 The scene is a plain React tree of host components — `<Box>`, `<Text>`,
 `<StreamingText>`, and the roadmap elements `<Input>`, `<Spinner>`,
-`<StatusBar>`, `<Panels>`, `<DiffView>`, `<Select>`, `<ScrollView>`. Every
-commit paints the terminal through `renderer.render()`. Bare string children
-are rejected — text lives in an explicit `<Text text="..." />` element.
+`<StatusBar>`, `<Panels>`, `<DiffView>`, `<Select>`, `<ScrollView>`,
+`<Table>`, `<Textarea>`, `<Modal>`. Every commit paints the terminal through
+`renderer.render()`. Bare string children are rejected — text lives in an
+explicit `<Text text="..." />` element.
 
 ## Quick start — @tern/solid
 
@@ -105,10 +106,11 @@ renderer.destroy();
 ```
 
 The `@tern/solid` factories (`Box`, `Text`, `StreamingText`, `Input`,
-`Spinner`, `StatusBar`, `Panels`, `DiffView`, `Select`, `ScrollView`) build
-the same scene node structures as the `@tern/react` host components — same
-props, same scene. `subscribeStream` feeds a `streaming_text` node from an
-`AsyncIterable<Span>`; `startSpinner` drives a spinner's frame ticks.
+`Spinner`, `StatusBar`, `Panels`, `DiffView`, `Select`, `ScrollView`,
+`Table`, `Textarea`, `Modal`) build the same scene node structures as the
+`@tern/react` host components — same props, same scene. `subscribeStream`
+feeds a `streaming_text` node from an `AsyncIterable<Span>`;
+`startSpinner` drives a spinner's frame ticks.
 
 ## Building the native addon
 
