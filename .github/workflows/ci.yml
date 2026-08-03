@@ -78,11 +78,86 @@ jobs:
 
       # Build the tern-node napi addon (full script chain: napi build
       # --platform && node fix-dts.mjs) so the demos can load it.
+      # npm install (not npm ci): the tern-node-<platform> optional
+      # dependencies declared for the release strategy are not yet on the
+      # registry, so the lockfile cannot pin them; npm install tolerates
+      # their absence as optional.
       - name: Build tern-node addon
         working-directory: src/bindings/tern-node
         run: |
-          npm ci
+          npm install
           npm run build
 
       - name: PTY smoke (script harness)
         run: bash packages/examples/run-smoke.sh
+
+  napi-build:
+    # Multi-platform native addon strategy (napi-rs distribution model):
+    # build tern-node for every target in `napi.targets` (tern-node
+    # package.json). Each row uploads its <platform>-<arch>.node binary;
+    # publish.yml wires the per-platform binaries via optionalDependencies
+    # as tern-node-<platform> packages. Cross-compiled rows skip the native
+    # load-check because the binary arch differs from the runner arch.
+    name: napi addon — ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            build: npm run build
+            load_check: true
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            build: npm run build -- --target aarch64-unknown-linux-gnu --use-napi-cross
+            load_check: false
+          - host: macos-latest
+            target: x86_64-apple-darwin
+            build: npm run build -- --target x86_64-apple-darwin
+            load_check: false
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: npm run build
+            load_check: true
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: npm run build
+            load_check: true
+    steps:
+      - uses: actions/checkout@v7
+
+      # napi build compiles via cargo, so the pinned Rust toolchain is
+      # required; rustflags is cleared to match a local build. The target
+      # triple is registered via rustup for the cross-compiled rows.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+          targets: ${{ matrix.settings.target }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: src/bindings/tern-node/package-lock.json
+
+      - name: Install addon dependencies
+        working-directory: src/bindings/tern-node
+        run: npm install
+
+      - name: Build addon (${{ matrix.settings.target }})
+        working-directory: src/bindings/tern-node
+        run: ${{ matrix.settings.build }}
+
+      # Native load check on rows where the runner arch matches the target.
+      - name: Load check (native)
+        working-directory: src/bindings/tern-node
+        if: ${{ matrix.settings.load_check }}
+        run: node load-check.mjs
+
+      - name: Upload addon binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: tern-node-${{ matrix.settings.target }}
+          path: src/bindings/tern-node/tern-node.*.node
+          if-no-files-found: error
