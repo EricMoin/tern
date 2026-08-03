@@ -21,6 +21,7 @@
 //! | `width` / `height`| `Int` \| `Float` (cells)                                             | auto   |
 //! | `min_width` / `min_height` | `Int` \| `Float` (cells)                                      | auto   |
 //! | `max_width` / `max_height` | `Int` \| `Float` (cells)                                      | auto   |
+//! | `flex_basis`      | `Int` \| `Float` (cells) — the item's initial main-axis size; flex grow/shrink resolves from it | auto   |
 //! | `position`        | `Str("relative"\|"absolute")`                                       | `"relative"` |
 //! | `top` / `right` / `bottom` / `left` | `Int` \| `Float` (cells, inset edges)                       | auto   |
 //! | `text`            | `Str` — content of a `Text` leaf                                     | —      |
@@ -342,6 +343,10 @@ fn props_to_style(props: &PropMap) -> TaffyStyle {
             width: prop_number(props, "max_width").map(dimension).unwrap_or(Dimension::Auto),
             height: prop_number(props, "max_height").map(dimension).unwrap_or(Dimension::Auto),
         },
+        // The item's initial main-axis size: taffy's flex algorithm grows or
+        // shrinks the item from this basis (the pane-side half of a split
+        // resize — `dragPanels` in @tern/core sets it as absolute cells).
+        flex_basis: prop_number(props, "flex_basis").map(dimension).unwrap_or(Dimension::Auto),
         position,
         inset,
         ..TaffyStyle::default()
@@ -781,6 +786,32 @@ mod tests {
         assert_eq!(rect_of(&out, b), Rect::new(20, 0, 30, 10));
         assert_eq!(rect_of(&out, c), Rect::new(50, 0, 10, 20));
         assert_eq!(rect_of(&out, d), Rect::new(60, 0, 10, 30));
+    }
+
+    #[test]
+    fn flex_basis_splits_panes_proportionally_to_viewport() {
+        // A 60/40 `flex_basis` split with no explicit sizes anywhere: the
+        // pane widths come entirely from taffy's flex-basis resolution (the
+        // same prop `dragPanels` in @tern/core sets on a pane during a split
+        // resize). In a 100-cell viewport the two bases sum to the container
+        // (zero free space) so the panes land at exactly 60/40; halving the
+        // viewport shrinks them proportionally — the flex-shrink algorithm
+        // scales each item's shrink by its basis — to 30/20.
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        let a = add_box(&mut scene, root);
+        let b = add_box(&mut scene, root);
+        set_prop(&mut scene, a, "flex_basis", PropValue::Int(60));
+        set_prop(&mut scene, b, "flex_basis", PropValue::Int(40));
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 10));
+        assert_eq!(rect_of(&out, a), Rect::new(0, 0, 60, 10));
+        assert_eq!(rect_of(&out, b), Rect::new(60, 0, 40, 10));
+
+        // Half-width viewport: the same split stays proportional (30/20).
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(50, 10));
+        assert_eq!(rect_of(&out, a), Rect::new(0, 0, 30, 10));
+        assert_eq!(rect_of(&out, b), Rect::new(30, 0, 20, 10));
     }
 
     #[test]
