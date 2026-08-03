@@ -3,15 +3,37 @@
   "version": "0.1.0",
   "description": "tern napi binding: Deno/Node.js -> tern-core bridge (native addon)",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EricMoin/tern"
+  },
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {
     "build": "napi build --platform && node fix-dts.mjs",
     "build:release": "napi build --platform --release && node fix-dts.mjs",
+    "create-npm-dirs": "napi create-npm-dirs",
+    "artifacts": "napi artifacts",
+    "prepublishOnly": "napi prepublish -t npm",
     "smoke:deno": "printf 'q' | script -q /dev/null deno run --allow-all smoke.mjs"
   },
   "napi": {
-    "binaryName": "tern-node"
+    "binaryName": "tern-node",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "optionalDependencies": {
+    "tern-node-linux-x64-gnu": "0.1.0",
+    "tern-node-linux-arm64-gnu": "0.1.0",
+    "tern-node-darwin-x64": "0.1.0",
+    "tern-node-darwin-arm64": "0.1.0",
+    "tern-node-win32-x64-msvc": "0.1.0"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.8.2"
