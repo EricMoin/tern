@@ -34,20 +34,21 @@
  * package import map (deno.json) to the client build, so signal-driven
  * updates actually reach the scene ops.
  *
- * The roadmap element factories (`Input`/`Spinner`/`StatusBar`/`Panels`/
- * `DiffView`/`Select`/`ScrollView`) materialize the @tern/core factories of
- * the same name, matching what the `@tern/react` host components map to
- * (feature parity): same props -> same scene node structure. `subscribeInput`
- * wires a renderer's key events through the core `FocusManager` (the
- * Solid-flavored `useInput` equivalent — Solid has no context, so the
- * renderer is an explicit argument); `subscribeResize` wires a renderer's
- * terminal resize events to a handler, re-invoking `renderer.render()` after
- * each so the compositor re-lays out at the new terminal size (the
- * Solid-flavored `useResize` equivalent). `subscribeFocus` wires a renderer's
- * terminal focus events (`{ focus_gained }`) to a handler, and `startSpinner`
- * drives a spinner node's frame ticks with a focus-aware timer — pausing
- * while the terminal is unfocused, resuming on regain (the `@tern/react`
- * `<Spinner>` effect equivalent, roadmap Phase 2).
+ * The roadmap element factories (`Input`/`Textarea`/`Spinner`/`StatusBar`/
+ * `Panels`/`DiffView`/`Select`/`ScrollView`/`Table`/`Modal`) materialize
+ * the @tern/core factories of the same name, matching what the `@tern/react`
+ * host components map to (feature parity): same props -> same scene node
+ * structure.
+ * `subscribeInput` wires a renderer's key events through the core
+ * `FocusManager` (the Solid-flavored `useInput` equivalent — Solid has no
+ * context, so the renderer is an explicit argument); `subscribeResize` wires
+ * a renderer's terminal resize events to a handler, re-invoking
+ * `renderer.render()` after each so the compositor re-lays out at the new
+ * terminal size (the Solid-flavored `useResize` equivalent). `subscribeFocus`
+ * wires a renderer's terminal focus events (`{ focus_gained }`) to a handler,
+ * and `startSpinner` drives a spinner node's frame ticks with a focus-aware
+ * timer — pausing while the terminal is unfocused, resuming on regain (the
+ * `@tern/react` `<Spinner>` effect equivalent, roadmap Phase 2).
  */
 
 import {
@@ -58,16 +59,21 @@ import {
   Box as TernBox,
   DiffView as TernDiffView,
   Input as TernInput,
+  Modal as TernModal,
   Panels as TernPanels,
   ScrollView as TernScrollView,
   Select as TernSelect,
   Spinner as TernSpinner,
   StatusBar as TernStatusBar,
   StreamingText as TernStreamingText,
+  Table as TernTable,
   Text as TernText,
+  Textarea as TernTextarea,
   defaultTheme,
   dragPanels,
+  editTextareaKey,
   endPanelDrag,
+  focusAt,
   focusManager,
   followTail,
   isStreamFollowing,
@@ -80,11 +86,15 @@ import {
   scrollTop,
   setStreamAutoScroll,
   syncStreamTail,
+  tableKey,
   tick,
+  visibleTableRows,
+  wheelScroll,
   type DiffViewProps,
   type FocusHandler,
   type InputProps,
   type KeyHandler,
+  type ModalProps,
   type Node,
   type NodeProps,
   type PanelDragHandle,
@@ -97,6 +107,11 @@ import {
   type Span,
   type SpinnerProps,
   type StatusBarProps,
+  type TableColumn,
+  type TableProps,
+  type TableState,
+  type TextareaProps,
+  type TextareaState,
   type Theme,
   type ThemeOverrides,
 } from "@tern/core";
@@ -115,6 +130,7 @@ export type {
   InputProps,
   KeyEvent,
   KeyHandler,
+  ModalProps,
   Node,
   NodeProps,
   PanelDragHandle,
@@ -131,25 +147,36 @@ export type {
   SpinnerProps,
   StatusBarProps,
   StatusBarSegment,
+  TableColumn,
+  TableProps,
+  TableState,
+  TextareaProps,
+  TextareaState,
 } from "@tern/core";
 
 // The @tern/core values behind the roadmap elements and the focus wiring:
 // element edit/drive helpers, the scroll helpers (including the streaming
 // auto-scroll `followTail` / `syncStreamTail` / `isStreamFollowing`), the
-// panel drag-resize helpers, the focus machinery, and the theme surface.
+// panel drag-resize helpers, the modal helpers, the focus machinery, and the
+// theme surface.
 export {
+  closeModal,
   collapsePanel,
   defaultTheme,
   dragPanels,
   editKey,
+  editTextareaKey,
   endPanelDrag,
   expandPanel,
+  focusAt,
   followTail,
   focusManager,
   focusPanel,
   isStreamFollowing,
   FocusManager,
   mergeTheme,
+  MODAL_Z_INDEX,
+  openModal,
   resolveTheme,
   scrollBy,
   scrollTo,
@@ -157,9 +184,12 @@ export {
   selectKey,
   startPanelDrag,
   syncStreamTail,
+  tableKey,
   tick,
   togglePanel,
   useFocus,
+  visibleTableRows,
+  wheelScroll,
 } from "@tern/core";
 
 // The @tern/core theme types, re-exported so consumers can type themes
@@ -250,6 +280,8 @@ const options: RendererOptions<Node> = {
         return TernStreamingText();
       case "input":
         return TernInput();
+      case "textarea":
+        return TernTextarea();
       case "spinner":
         return TernSpinner();
       case "status_bar":
@@ -268,9 +300,16 @@ const options: RendererOptions<Node> = {
         return TernSelect({ options: [] });
       case "scroll_view":
         return TernScrollView({});
+      case "table":
+        // `columns` / `rows` are required props of the core factory; empty
+        // model lists yield a valid, empty table.
+        return TernTable({ columns: [], rows: [] });
+      case "modal":
+        // No required props; the default yields a closed, empty overlay.
+        return TernModal({});
       default:
         throw new Error(
-          `@tern/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "spinner", "status_bar", "panels", "diff", "select", or "scroll_view")`,
+          `@tern/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "textarea", "spinner", "status_bar", "panels", "diff", "select", "scroll_view", "table", or "modal")`,
         );
     }
   },
@@ -499,6 +538,19 @@ export function Input(props: InputProps = {}): Node {
 }
 
 /**
+ * Create a `textarea` scene node: the core `Textarea` factory materialized
+ * with `props` — a framed box with one text leaf per visible display line
+ * (soft-wrapped at `width`, vertically scrolled to keep the caret visible
+ * within `height`), the caret's leaf carrying its `caret` display column. The
+ * `textarea` component preset is resolved onto the framed box at
+ * element-creation time. Edit it with `editTextareaKey` (the focused-element
+ * handler wired by `useFocus` + `subscribeInput`).
+ */
+export function Textarea(props: TextareaProps = {}): Node {
+  return TernTextarea(resolveTheme(getTheme(), { ...props, component: "textarea" }));
+}
+
+/**
  * Create a `spinner` scene node: the core `Spinner` factory materialized with
  * `props` — a text leaf rendering a determinate `'▓'`/`'░'` progress bar
  * (from `value`/`max`/`width`) or an indeterminate frame glyph (from
@@ -570,6 +622,32 @@ export function Select(props: SelectProps): Node {
  */
 export function ScrollView(props: ScrollViewProps = {}): Node {
   return TernScrollView(resolveTheme(getTheme(), { ...props, component: "scroll_view" }) as ScrollViewProps);
+}
+
+/**
+ * Create a `table` scene node: the core `Table` factory materialized with
+ * `props` — a flex column of box/text leaves (a sticky header row painted
+ * above a scrollable content region, and one row leaf per data row with
+ * per-column width/alignment; the highlighted row reversed). The `table`
+ * component preset is resolved onto the root box at element-creation time.
+ * Drive it with `tableKey` (up/down move the highlight and auto-scroll the
+ * content region); read the visible window with `visibleTableRows`.
+ */
+export function Table(props: TableProps): Node {
+  return TernTable(resolveTheme(getTheme(), { ...props, component: "table" }) as TableProps);
+}
+
+/**
+ * Create a `modal` scene node: the core `Modal` factory materialized with
+ * `props` — a full-bleed overlay (a dimmed backdrop box plus a centered
+ * content box holding the `content` nodes) stamped with a high `z_index` so
+ * it paints above in-flow content. The visible state starts from `open`
+ * (default `false` — hidden); drive it with `openModal` / `closeModal`,
+ * which also move focus into/out of the overlay through the
+ * `FocusManager`.
+ */
+export function Modal(props: ModalProps = {}): Node {
+  return TernModal(resolveTheme(getTheme(), props) as ModalProps);
 }
 
 /**
@@ -761,6 +839,44 @@ export function subscribePanelDrag(
     } else if (event.kind.startsWith("up_")) {
       handler?.(endPanelDrag(panels));
     }
+  });
+}
+
+/**
+ * Subscribe a scrollable view (a `ScrollView`, a `Table`, a `DiffView`, or
+ * any node carrying the engine's clip/scroll region props) to a renderer's
+ * mouse wheel events — the Solid-flavored `useWheelScroll` equivalent.
+ *
+ * Each wheel event (`scroll_up` / `scroll_down` / `scroll_left` /
+ * `scroll_right`) is mapped by the core `wheelScroll` helper onto the view's
+ * scroll offsets (clamped to the content bounds); a consumed wheel re-invokes
+ * `renderer.render()` so the compositor reflects the new offset (a `table`
+ * scrolls its scrollable content region, keeping the sticky header pinned).
+ * Non-wheel events and wheels on non-scrollable nodes fall through untouched.
+ *
+ * Returns a disposer that unsubscribes.
+ */
+export function subscribeWheelScroll(renderer: Renderer, view: Node): () => void {
+  return renderer.onMouse((event) => {
+    if (wheelScroll(view, event)) renderer.render();
+  });
+}
+
+/**
+ * Subscribe a renderer's mouse events to click-to-focus — the Solid-flavored
+ * `useClickToFocus` equivalent. Every `down_left` press on a painted cell
+ * focuses the topmost registered focusable node under the cursor (the core
+ * `focusAt` helper — `Renderer.hit_test` gates the press to a painted cell,
+ * then the live scene tree is walked for the first node the `FocusManager`
+ * has registered, focused via its id). Elements registered with the core
+ * `useFocus` — e.g. an `Input` / `Select` node registered with a focus id —
+ * become click targets. Presses off any painted cell are a no-op.
+ *
+ * Returns a disposer that unsubscribes.
+ */
+export function subscribeClickFocus(renderer: Renderer): () => void {
+  return renderer.onMouse((event) => {
+    focusAt(renderer, event);
   });
 }
 

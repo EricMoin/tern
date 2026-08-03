@@ -9,15 +9,22 @@
  *   Bare string children are rejected at render time — text lives in an
  *   explicit `<Text text="..." />` element.
  * - The roadmap host components `<Input>` / `<Spinner>` / `<StatusBar>` /
- *   `<Panels>` / `<DiffView>` / `<Select>` / `<ScrollView>` materialize the
- *   core factories of the same name. `<Spinner>` runs its tick timer while
- *   mounted (cleared on unmount); `<Input>` / `<Select>` with a `focusId`
- *   register with a `FocusManager` so routed keys edit them (`onChange` /
- *   `onSubmit`, `onChange` / `onConfirm` / `onDismiss`). `<ScrollView>` is a
- *   clip/scroll region box (the engine's `clip_*` / `scroll_*` props); the
- *   core `scrollTo` / `scrollBy` / `scrollTop` helpers drive its offsets
- *   (clamped against `Node.contentSize()`), optionally with a track + thumb
- *   scrollbar leaf.
+ *   `<Panels>` / `<DiffView>` / `<Select>` / `<ScrollView>` / `<Table>` /
+ *   `<Modal>`
+ *   materialize the core factories of the same name. `<Spinner>` runs its
+ *   tick timer while mounted (cleared on unmount); `<Input>` / `<Select>`
+ *   with a `focusId` register with a `FocusManager` so routed keys edit them
+ *   (`onChange` / `onSubmit`, `onChange` / `onConfirm` / `onDismiss`).
+ *   `<ScrollView>` is a clip/scroll region box (the engine's `clip_*` /
+ *   `scroll_*` props); the core `scrollTo` / `scrollBy` / `scrollTop`
+ *   helpers drive its offsets (clamped against `Node.contentSize()`),
+ *   optionally with a track + thumb scrollbar leaf. `<Table>` composes a
+ *   sticky header row above a scrollable content region of per-column rows;
+ *   the core `tableKey` / `visibleTableRows` helpers drive its highlight and
+ *   scroll window. `<Modal>` is a full-bleed overlay (dimmed backdrop +
+ *   centered content box) stamped with a high `z_index`; the core
+ *   `openModal` / `closeModal` helpers toggle it and move focus into/out of
+ *   the overlay through the `FocusManager`.
  * - `render(element, renderer)` / `createRoot(renderer)` mount a tree onto a
  *   core renderer's scene root; every commit paints the scene via
  *   `renderer.render()`.
@@ -47,7 +54,9 @@ import {
   defaultTheme,
   dragPanels,
   editKey,
+  editTextareaKey,
   endPanelDrag,
+  focusAt,
   focusManager,
   mergeTheme,
   resolveTheme,
@@ -58,8 +67,11 @@ import {
   setStreamAutoScroll,
   startPanelDrag,
   syncStreamTail,
+  tableKey,
   tick,
   useFocus as coreUseFocus,
+  visibleTableRows,
+  wheelScroll,
   FocusManager,
   type DiffLine,
   type FocusHandle,
@@ -69,11 +81,15 @@ import {
   type PanelDragHandle,
   type PanelDragResult,
   type PanelSpec,
+  type Renderer,
   type ResizeHandler,
   type SelectOption,
   type SelectState,
   type Span,
   type StatusBarSegment,
+  type TableColumn,
+  type TableState,
+  type TextareaState,
   type Theme,
   type ThemeComponent,
   type ThemeOverrides,
@@ -300,12 +316,15 @@ export function StreamingText(props: StreamingTextProps): ReactElement<Streaming
 // Host tags for the roadmap elements — again widened to `string` so
 // `createElement` routes through the generic component overload.
 const HOST_INPUT: string = "input";
+const HOST_TEXTAREA: string = "textarea";
 const HOST_SPINNER: string = "spinner";
 const HOST_STATUS_BAR: string = "status_bar";
 const HOST_PANELS: string = "panels";
 const HOST_DIFF: string = "diff";
 const HOST_SELECT: string = "select";
 const HOST_SCROLL_VIEW: string = "scroll_view";
+const HOST_TABLE: string = "table";
+const HOST_MODAL: string = "modal";
 
 /** The state reported by `<Input>` callbacks after a routed key. */
 export interface InputState {
@@ -498,6 +517,83 @@ export function Input(props: InputProps): ReactElement<InputProps> {
 }
 
 /**
+ * Props for `<Textarea>`: the tern node props plus the multi-line edit model
+ * and the focus/callback wiring. `lines` / `row` / `col` / `width` / `height`
+ * / `scroll` flow to the core `Textarea` factory; the remaining keys are
+ * consumed by the component.
+ */
+export interface TextareaProps extends TernNodeProps {
+  /** The logical lines of text (default `[""]`). */
+  lines?: string[];
+  /** The cursor row — an index into `lines` (default 0). */
+  row?: number;
+  /** The cursor column — a char index into `lines[row]` (default 0). */
+  col?: number;
+  /** The soft-wrap width in cells; unset keeps each line on one display row. */
+  width?: number;
+  /** The visible window in display rows; unset shows every display line. */
+  height?: number;
+  /** The top visible display row (vertical scroll, default 0). */
+  scroll?: number;
+  /**
+   * Register the textarea with a `FocusManager` under this id so routed keys
+   * (via `useInput`) edit it through the core `editTextareaKey`. Omit to
+   * leave the textarea inert to keys.
+   */
+  focusId?: string;
+  /** The `FocusManager` to register with (defaults to the core
+   *  `focusManager`). */
+  focusManager?: FocusManager;
+  /** Fired after a routed key changes the lines, row or col. */
+  onChange?: (state: TextareaState) => void;
+  /** Fired when the Enter key routes to this textarea (which also splits the
+   *  line). */
+  onSubmit?: (state: TextareaState) => void;
+}
+
+/**
+ * The `<Textarea>` host component: a framed box with one text leaf per
+ * visible display line (core `Textarea` factory). When `focusId` is given,
+ * the textarea registers with a `FocusManager` on mount and routed keys (via
+ * `useInput`) edit it through the core `editTextareaKey` — `onChange` fires
+ * after the lines/row/col change and `onSubmit` on Enter (which splits the
+ * line). The textarea's ref is managed internally (like `<Input>`); the
+ * element takes no React children — its composition is fixed by the factory.
+ */
+export function Textarea(props: TextareaProps): ReactElement<TextareaProps> {
+  const theme = useTheme();
+  const nodeRef = useRef<Node | null>(null);
+  const manager = props.focusManager ?? focusManager;
+  // The callbacks are read through refs so a parent re-render with new
+  // callbacks is picked up without re-registering the element.
+  const onChangeRef = useRef(props.onChange);
+  onChangeRef.current = props.onChange;
+  const onSubmitRef = useRef(props.onSubmit);
+  onSubmitRef.current = props.onSubmit;
+
+  useEffect(() => {
+    const node = nodeRef.current;
+    if (node === null || props.focusId === undefined) return;
+    return coreUseFocus(props.focusId, node, (event) => {
+      const before = node.props as TextareaProps;
+      const next = editTextareaKey(node, event);
+      const changed =
+        next.lines !== before.lines || next.row !== before.row || next.col !== before.col;
+      if (event.name === "enter") {
+        onSubmitRef.current?.(next);
+      } else if (changed) {
+        onChangeRef.current?.(next);
+      }
+    }, manager).dispose;
+  }, [props.focusId, manager]);
+
+  return createElement(HOST_TEXTAREA, {
+    ...(resolveTheme(theme, { ...props, component: "textarea" }) as TextareaProps),
+    ref: nodeRef,
+  });
+}
+
+/**
  * The `<Spinner>` host component: a text leaf rendering a determinate bar or
  * an indeterminate frame glyph (core `Spinner` factory). While mounted, an
  * interval (`interval` prop, default 100ms) advances the frame via the core
@@ -681,6 +777,80 @@ export function ScrollView(props: ScrollViewProps): ReactElement<ScrollViewProps
   );
 }
 
+/**
+ * Props for `<Table>`: the tern node props plus the column/row model and the
+ * interactive state, forwarded verbatim to the core `Table` factory (`columns`
+ * / `rows` are JS bookkeeping — the model becomes composed text leaves and
+ * never reaches the scene props).
+ */
+export interface TableProps extends TernNodeProps {
+  /** The columns, in display order (left to right). */
+  columns: TableColumn[];
+  /** The data rows, in display order (top to bottom); one cell per column. */
+  rows: (string | number)[][];
+  /** The horizontal scroll offset in cells (default 0). */
+  scroll_x?: number;
+  /** The vertical scroll offset in cells (default 0). */
+  scroll_y?: number;
+  /** The highlighted data-row index (default 0). */
+  highlight?: number;
+  /** Keep the header pinned above the content region (default `true`). */
+  sticky_header?: boolean;
+  /** The content region's viewport height in rows (default unset). */
+  clip_height?: number;
+}
+
+/**
+ * The `<Table>` host component: a flex column of box/text leaves — a header
+ * row (sticky by default, painted above the content region) and one row leaf
+ * per data row with per-column width/alignment (core `Table` factory). The
+ * `table` component preset is resolved onto the root box's props at
+ * element-creation time. Drive it with the core `tableKey` (up/down move the
+ * highlight and auto-scroll) and read the visible window with
+ * `visibleTableRows`. Takes no React children.
+ */
+export function Table(props: TableProps): ReactElement<TableProps> {
+  const theme = useTheme();
+  return createElement(
+    HOST_TABLE,
+    resolveTheme(theme, { ...props, component: "table" }) as TableProps,
+  );
+}
+
+/**
+ * Props for `<Modal>`: the tern node props plus the overlay state and the
+ * content node list. `open` / `backdrop` / `z_index` flow to the core
+ * `Modal` factory (the overlay's paint z-order and visible state); `content`
+ * is JS bookkeeping — the core `Node`s wrapped into the centered content
+ * box (mirroring `<Panels>`' `panels`; the element takes no React children).
+ */
+export interface ModalProps extends TernNodeProps {
+  /** Whether the modal is open (default `false` — hidden). The core
+   *  `openModal` / `closeModal` toggle it. */
+  open?: boolean;
+  /** Whether the dimmed backdrop box is composed (default `true`). */
+  backdrop?: boolean;
+  /** The overlay's paint z-order (default `MODAL_Z_INDEX`). */
+  z_index?: number;
+  /** The core `Node`s wrapped into the modal's centered content box. */
+  content?: Node[];
+}
+
+/**
+ * The `<Modal>` host component: a full-bleed overlay — a dimmed backdrop box
+ * plus a centered content box holding `content`, stamped with a high
+ * `z_index` so it paints above in-flow content (core `Modal` factory). The
+ * element takes no React children; the content is the core `Node[]` from the
+ * `content` prop (mirroring `<Panels>`). Open/close it with the core
+ * `openModal` / `closeModal` on the modal node (the `ref` forwards to the
+ * scene node), which also move focus into/out of the overlay through the
+ * `FocusManager`. The `modal` host tag is mapped in `./reconciler.ts`.
+ */
+export function Modal(props: ModalProps): ReactElement<ModalProps> {
+  const theme = useTheme();
+  return createElement(HOST_MODAL, resolveTheme(theme, props) as ModalProps);
+}
+
 // ---------------------------------------------------------------------------
 // Focus hooks
 // ---------------------------------------------------------------------------
@@ -797,6 +967,51 @@ export function usePanelMouseDrag(panelsRef: RefObject<Node | null>): void {
   }, [renderer, panelsRef]);
 }
 
+/**
+ * Wire mouse wheel scroll for a scrollable element (a `<ScrollView>`, a
+ * `<Table>`, a `<DiffView>`, or any node carrying the engine's clip/scroll
+ * region props). The element's scene node must be read from `viewRef` (e.g.
+ * `<ScrollView ref={viewRef} ... />` — refs populate after commit, so the
+ * subscription is established in an effect and torn down on unmount).
+ *
+ * Each wheel event (`scroll_up` / `scroll_down` / `scroll_left` /
+ * `scroll_right`) is mapped by the core `wheelScroll` helper onto the view's
+ * scroll offsets (clamped to the content bounds); a consumed wheel repaints
+ * the scene so the compositor reflects the new offset (a `table` scrolls its
+ * scrollable content region, keeping the sticky header pinned). Non-wheel
+ * events and wheels on non-scrollable nodes fall through untouched.
+ */
+export function useWheelScroll(viewRef: RefObject<Node | null>): void {
+  const { renderer } = useApp();
+
+  useEffect(() => {
+    return renderer.onMouse((event) => {
+      const view = viewRef.current;
+      if (view === null) return;
+      if (wheelScroll(view, event)) renderer.render();
+    });
+  }, [renderer, viewRef]);
+}
+
+/**
+ * Wire click-to-focus for the current tree: every `down_left` press on a
+ * painted cell focuses the topmost registered focusable node under the
+ * cursor (the core `focusAt` helper — `Renderer.hit_test` gates the press to
+ * a painted cell, then the live scene tree is walked for the first node the
+ * `FocusManager` has registered, focused via its id). Elements registered
+ * with `useFocus` — including `<Input focusId=...>`, `<Textarea focusId=...>`
+ * and `<Select focusId=...>` — become click targets. Presses off any painted
+ * cell are a no-op. The subscription is torn down when the component
+ * unmounts.
+ */
+export function useClickToFocus(renderer: Renderer): void {
+  useEffect(() => {
+    return renderer.onMouse((event) => {
+      focusAt(renderer, event);
+    });
+  }, [renderer]);
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -834,21 +1049,29 @@ export type {
   SelectState,
   Span,
   StatusBarSegment,
+  TableColumn,
+  TableState,
+  TextareaState,
 } from "@tern/core";
 // Core values re-exported: the focus machinery, the element edit helpers
 // used by the roadmap host components, the scroll helpers (including the
 // streaming auto-scroll `followTail` / `syncStreamTail` / `isStreamFollowing`),
-// the panel drag-resize helpers, and the theme surface.
+// the panel drag-resize helpers, the modal helpers, and the theme surface.
 export {
+  closeModal,
   defaultTheme,
   dragPanels,
   editKey,
+  editTextareaKey,
   endPanelDrag,
+  focusAt,
   focusManager,
   followTail,
   FocusManager,
   isStreamFollowing,
   mergeTheme,
+  MODAL_Z_INDEX,
+  openModal,
   resolveTheme,
   scrollBy,
   scrollTo,
@@ -856,7 +1079,10 @@ export {
   selectKey,
   startPanelDrag,
   syncStreamTail,
+  tableKey,
   tick,
+  visibleTableRows,
+  wheelScroll,
 } from "@tern/core";
 // Core theme types re-exported so consumers can type themes without
 // importing @tern/core directly.

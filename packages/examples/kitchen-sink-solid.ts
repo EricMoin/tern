@@ -29,23 +29,40 @@ import {
 import {
   Box,
   DiffView,
+  Input,
+  Modal,
+  MODAL_Z_INDEX,
   Panels,
   ScrollView,
   Select,
   Spinner,
   StatusBar,
   StreamingText,
+  Table,
   Text,
+  Textarea,
+  closeModal,
   dragPanels,
+  editKey,
+  editTextareaKey,
   endPanelDrag,
+  focusAt,
+  focusManager,
   isStreamFollowing,
+  openModal,
   render as solidRender,
   scrollTo,
   selectKey,
   setTheme,
   startPanelDrag,
+  subscribeClickFocus,
   subscribeStream,
+  subscribeWheelScroll,
+  tableKey,
   tick,
+  useFocus,
+  visibleTableRows,
+  wheelScroll,
   type KeyEvent,
   type Node,
   type Renderer,
@@ -98,6 +115,30 @@ const SELECT_OPTIONS = [
   { value: "cherry", label: "Cherry" },
 ];
 
+/** The columns of the `Table`: a left-aligned name, a left-aligned role and
+ * a right-aligned score (mixed alignment exercises the per-column cell
+ * padding). */
+const TABLE_COLUMNS = [
+  { key: "name", header: "Name", width: 12 },
+  { key: "role", header: "Role", width: 10 },
+  { key: "score", header: "Score", width: 6, align: "right" as const },
+];
+
+/** 10 data rows (3+ columns, 10+ rows per the roadmap): enough to scroll a
+ * 5-row viewport (`clip_height`) with the highlight. */
+const TABLE_ROWS = [
+  ["Ada", "dev", 92],
+  ["Grace", "dev", 88],
+  ["Linus", "maintainer", 95],
+  ["Alan", "researcher", 84],
+  ["Margaret", "flight", 91],
+  ["Dennis", "systems", 87],
+  ["Ken", "systems", 90],
+  ["Barbara", "ui", 86],
+  ["Edsger", "algorithms", 89],
+  ["Donald", "typesetting", 93],
+];
+
 // ---------------------------------------------------------------------------
 // Runtime setup (Deno-first, node fallback)
 // ---------------------------------------------------------------------------
@@ -122,6 +163,20 @@ try {
   console.error("[kitchen-sink-solid]", message);
   process.exit(1);
 }
+
+// ---------------------------------------------------------------------------
+// Modal demo (overlay + focus isolation)
+// ---------------------------------------------------------------------------
+
+/** The modal's content: an input the overlay focuses on open (registered
+ * first, so `openModal`'s `focusFirst()` lands inside the overlay). */
+const modalBody = Input({ value: "modal", width: 20 });
+const modalInsideFocus = useFocus("modal-inside", modalBody, (event: KeyEvent) => editKey(modalBody, event));
+
+/** The outside focusable — the previously-active focus `closeModal` restores
+ * (registered after the overlay's focusable). */
+const modalOutside = Box();
+const modalOutsideFocus = useFocus("modal-outside", modalOutside, () => {});
 
 // ---------------------------------------------------------------------------
 // Scene, built through the @tern/solid factories
@@ -165,6 +220,20 @@ box.addChild(DiffView({ hunks: DIFF_HUNKS }));
 const select = Select({ options: SELECT_OPTIONS });
 box.addChild(select);
 
+// Table: a sticky header above a scrollable content region; the highlight
+// moves with tableKey (auto-scrolling the 5-row viewport).
+const table = Table({
+  columns: TABLE_COLUMNS,
+  rows: TABLE_ROWS,
+  highlight: 2,
+  clip_height: 5,
+});
+box.addChild(table);
+
+// Textarea: a multi-line editor — one text leaf per line, enter splits.
+const textarea = Textarea({ lines: ["line one", "line two"], row: 1, col: 8, width: 12 });
+box.addChild(textarea);
+
 // Spinner: a determinate progress bar (tick is a no-op on it).
 box.addChild(Spinner({ value: 5, max: 10, width: 4 }));
 
@@ -180,8 +249,19 @@ setTheme({
 box.addChild(Box({ role: "primary" }));
 box.addChild(Box({ component: "input" }));
 
+// Modal: a full-bleed overlay (dimmed backdrop + centered content box) stamped
+// with a high z_index. Mounted as a scene-root sibling of the app box, so its
+// absolute insets resolve against the full terminal. 'm' toggles it through
+// openModal/closeModal (which move focus into/out of the overlay).
+const modal = Modal({ open: false, content: [modalBody] });
+
+/** The modal's open state for the 'm' key toggle (the assertions above leave
+ * it closed, matching this initial state). */
+let modalOpen = false;
+
 // Mount the scene through the solid renderer's universal `render()`.
 const dispose = solidRender(() => box, renderer.root);
+renderer.root.addChild(modal);
 renderer.render();
 
 // Feed the streaming node through the solid streaming API: the pump appends
@@ -218,19 +298,31 @@ function mouse(kind: string, column: number, row: number): MouseEventJs {
 
 const rootBox: Node | undefined = renderer.root.children[0];
 const kids: readonly Node[] = rootBox?.children ?? [];
-const [panels, scrollView, streamNode2, diff, select2, spinner, statusBar, themedPrimary, themedInput] = kids;
+const [panels, scrollView, streamNode2, diff, select2, table2, textarea2, spinner, statusBar, themedPrimary, themedInput] = kids;
+
+// Register the Select and the Textarea with the shared focus manager so the
+// click-to-focus wiring can resolve clicks to them.
+const selectFocus = useFocus("sel", select2!, () => {});
+const areaFocus = useFocus("area", textarea2!, () => {});
+
+// Wire the mouse subscriptions: wheel scrolls the ScrollView region; a
+// `down_left` on a painted cell focuses the topmost registered focusable.
+const disposeWheel = subscribeWheelScroll(renderer, scrollView!);
+const disposeClick = subscribeClickFocus(renderer);
 
 // --- scene structure --------------------------------------------------------
 assert(rootBox?.type === "box", "app root is a box");
-assert(kids.length === 9, `scene holds 9 widget nodes (got ${kids.length})`);
+assert(kids.length === 11, `scene holds 11 widget nodes (got ${kids.length})`);
 assert(
   kids[0]?.type === "panels" &&
     kids[1]?.type === "scroll_view" &&
     kids[2]?.type === "streaming_text" &&
     kids[3]?.type === "diff" &&
     kids[4]?.type === "select" &&
-    kids[5]?.type === "spinner" &&
-    kids[6]?.type === "status_bar",
+    kids[5]?.type === "table" &&
+    kids[6]?.type === "textarea" &&
+    kids[7]?.type === "spinner" &&
+    kids[8]?.type === "status_bar",
   "widget element types materialize in scene order",
 );
 
@@ -310,6 +402,98 @@ const typeaheadKey: KeyEvent = { name: "char", char: "b", ctrl: false, alt: fals
 const afterTypeahead = selectKey(select2!, typeaheadKey);
 assert(afterTypeahead.filter === "b", "typeahead appends to the filter query");
 
+// --- Table ---------------------------------------------------------------------
+assert(table2?.type === "table", "table element materializes");
+assert(table2?.props.highlight === 2, "table starts with highlight 2");
+assert(
+  !("columns" in (table2?.props ?? {})) && !("rows" in (table2?.props ?? {})),
+  "the column/row model is JS bookkeeping, never scene props",
+);
+const headerRow2 = table2?.children[0];
+const contentRegion2 = table2?.children[1];
+assert(
+  headerRow2?.type === "box" &&
+    headerRow2?.props.flex_direction === "row" &&
+    headerRow2?.props.z_index === 1,
+  "the sticky header row is pinned above the content region (z_index 1)",
+);
+assert(
+  headerRow2?.children.length === TABLE_COLUMNS.length &&
+    headerRow2?.children.map((cell) => cell.props.text).join("|") ===
+      `${"Name".padEnd(12)}|${"Role".padEnd(10)}|${"Score".padStart(6)}`,
+  "the header row lays out one padded cell per column",
+);
+assert(
+  contentRegion2?.type === "box" && contentRegion2?.props.flex_direction === "column",
+  "the content region is the scrollable column of row leaves",
+);
+assert(
+  contentRegion2?.children.length === TABLE_ROWS.length,
+  `the content region holds one row leaf per data row (${contentRegion2?.children.length})`,
+);
+assert(
+  (contentRegion2?.children[2]?.children.every((cell) => cell.props.reversed === true) ?? false),
+  "the highlighted row's cells are reversed",
+);
+const nameCell2 = contentRegion2?.children[0]?.children[0]?.props.text;
+const scoreCell2 = contentRegion2?.children[0]?.children[2]?.props.text;
+assert(
+  nameCell2 === "Ada".padEnd(12) && scoreCell2 === String(92).padStart(6),
+  "cells align per column (left name, right score)",
+);
+const afterDown5 = tableKey(table2!, downKey);
+assert(afterDown5.highlight === 3, "down moves the highlight to row 3");
+let last2 = tableKey(table2!, downKey);
+last2 = tableKey(table2!, downKey);
+last2 = tableKey(table2!, downKey);
+last2 = tableKey(table2!, downKey);
+last2 = tableKey(table2!, downKey);
+assert(last2.highlight === 8, `down x6 lands on highlight 8 (got ${last2.highlight})`);
+assert(
+  last2.scroll_y === 4,
+  `the highlight auto-scrolls the viewport (scroll_y clamped to 4, got ${last2.scroll_y})`,
+);
+// tableKey rebuilds the composition, so re-read the live content region (the
+// pre-move reference was replaced by the rebuild).
+const liveRegion2 = table2?.children[1];
+assert(
+  liveRegion2?.props.scroll_y === 4,
+  "the content region's scroll_y prop carries the clamped offset",
+);
+assert(
+  visibleTableRows(table2!).map((row) => row[0]).join(",") ===
+    "Margaret,Dennis,Ken,Barbara,Edsger",
+  `visibleTableRows returns the 5-row window under scroll (got ${visibleTableRows(table2!).map((r) => r[0]).join(",")})`,
+);
+
+// --- Textarea ------------------------------------------------------------------
+assert(textarea2?.type === "textarea", "textarea element materializes");
+assert(
+  textarea2?.children.length === 2 &&
+    textarea2?.children[0]?.props.text === "line one" &&
+    textarea2?.children[1]?.props.text === "line two",
+  "textarea composes one text leaf per line",
+);
+assert(
+  textarea2?.children[1]?.props.caret === 8,
+  "the caret rides the last line's leaf at its display column",
+);
+// Enter splits the line at the caret and rebuilds the leaves.
+const afterSplit = editTextareaKey(textarea2!, {
+  name: "enter",
+  ctrl: false,
+  alt: false,
+  shift: false,
+});
+assert(
+  afterSplit.row === 2 && afterSplit.col === 0,
+  `enter splits the line (row ${afterSplit.row}/col ${afterSplit.col})`,
+);
+assert(
+  textarea2?.children.length === 3 && textarea2?.children[2]?.props.text === "",
+  "the split tail becomes a new (empty) leaf",
+);
+
 // --- Spinner (determinate) -------------------------------------------------------
 assert(spinner?.props.text === "▓▓░░", "determinate spinner renders 2 of 4 cells filled");
 assert(tick(spinner!) === "▓▓░░", "tick is a no-op on a determinate spinner");
@@ -327,12 +511,114 @@ assert(!("left" in (statusBar?.props ?? {})), "segment keys are lifted out of th
 assert(themedPrimary?.props.fg === "#123456", "role=primary resolves the custom palette fg");
 assert(themedInput?.props.border_style === "double", "component=input resolves the preset border_style");
 
+// --- Mouse wheel scroll -------------------------------------------------------------
+// A wheel event on the Table scrolls its content region (the sticky header
+// stays pinned): scroll_y was 4 (auto-scrolled by tableKey); content 10 rows
+// vs the 5-row clip => max 5.
+const tableRegion2b = table2?.children[1];
+const regionScrollY = (): number => tableRegion2b?.props.scroll_y as number;
+assert(
+  wheelScroll(table2!, mouse("scroll_down", 0, 0)) === true && regionScrollY() === 5,
+  `wheel scroll_down pans the table content region (scroll_y 4 -> ${regionScrollY()})`,
+);
+assert(
+  wheelScroll(table2!, mouse("scroll_down", 0, 0)) === true && regionScrollY() === 5,
+  `a wheel at the content bound clamps but stays consumed (scroll_y ${regionScrollY()})`,
+);
+assert(
+  wheelScroll(table2!, mouse("scroll_up", 0, 0)) === true && regionScrollY() === 4,
+  `wheel scroll_up pans the table content region back (scroll_y 5 -> ${regionScrollY()})`,
+);
+// A wheel event on the ScrollView pans its offsets (scroll_y was 1 from the
+// earlier scrollTo; content 3 rows vs the 2-row viewport => max 1).
+assert(
+  wheelScroll(scrollView!, mouse("scroll_up", 0, 0)) === true &&
+    scrollView?.props.scroll_y === 0,
+  "wheel scroll_up pans the ScrollView region (scroll_y 1 -> 0)",
+);
+assert(
+  wheelScroll(scrollView!, mouse("scroll_down", 0, 0)) === true &&
+    scrollView?.props.scroll_y === 1,
+  "wheel scroll_down pans the ScrollView region back (scroll_y 0 -> 1)",
+);
+// A non-wheel event is not consumed; a wheel on a plain (non-scrollable)
+// box is not consumed either.
+assert(
+  wheelScroll(scrollView!, mouse("down_left", 0, 0)) === false,
+  "a down_left is not a wheel event and falls through",
+);
+assert(
+  wheelScroll(themedPrimary!, mouse("scroll_down", 0, 0)) === false,
+  "a wheel on a non-scrollable box is not consumed",
+);
+
+// --- Click-to-focus -----------------------------------------------------------------
+// A `down_left` on a painted cell focuses the topmost registered focusable:
+// the Select (registered as "sel"). Cell (0, 0) is inside the panels region —
+// a painted cell at any terminal height — so the press routes through the
+// real `hit_test` gate.
+assert(
+  focusAt(renderer, mouse("down_left", 0, 0)) === true && focusManager.activeId === "sel",
+  "clicking the Select focuses it (topmost registered focusable)",
+);
+focusManager.blur();
+// A press off any painted cell is a no-op.
+assert(
+  focusAt(renderer, mouse("down_left", 9999, 9999)) === false,
+  "a press off any painted cell is a no-op",
+);
+assert(focusManager.activeId === null, "an unmatched press leaves focus untouched");
+// With the Select's registration dropped, the same click pipeline resolves to
+// the Textarea (registered as "area") — clicking an Input-like focusable
+// focuses it.
+focusManager.unregister("sel");
+assert(
+  focusAt(renderer, mouse("down_left", 0, 0)) === true && focusManager.activeId === "area",
+  "clicking the Textarea focuses it (topmost registered focusable)",
+);
+focusManager.blur();
+
+// --- Modal (overlay + focus isolation) ----------------------------------------
+assert(modal.type === "modal", "modal element materializes as a scene sibling");
+assert(
+  modal.props.z_index === MODAL_Z_INDEX,
+  `modal paints above in-flow content (z_index = ${modal.props.z_index})`,
+);
+assert(modal.children.length === 2, "modal composes the backdrop + a content box");
+assert(modal.children[0]?.props.position === "absolute", "the backdrop is an absolute full-bleed layer");
+assert(modal.children[1]?.children[0] === modalBody, "the content box holds the modal content");
+// Fresh reads per assertion: TS narrows a const-typed property access to its
+// first-checked literal (openModal/closeModal mutate the node's props).
+const modalOpenState = (): unknown => modal.props.open;
+const modalHidden = (): unknown => modal.props.hidden;
+assert(modalOpenState() === false && modalHidden() === true, "modal starts hidden (open: false)");
+// Focus isolation: opening records the prior focus and moves into the overlay;
+// closing restores it.
+focusManager.focus("modal-outside");
+openModal(modal);
+assert(modalOpenState() === true && modalHidden() === false, "openModal shows the overlay");
+assert(focusManager.activeId === "modal-inside", "openModal focuses the overlay's first registered focusable");
+closeModal(modal);
+assert(modalOpenState() === false && modalHidden() === true, "closeModal hides the overlay");
+assert(focusManager.activeId === "modal-outside", "closeModal restores the previously-active focus");
+
 // ---------------------------------------------------------------------------
 // Event loop: quit on 'q' (core onKey), or on ctrl+c auto-destroy
 // ---------------------------------------------------------------------------
 
 let quit = false;
 renderer.onKey((event: KeyEvent) => {
+  // 'm' toggles the modal: openModal moves focus into the overlay
+  // (focusFirst), closeModal restores the previously-active focus.
+  if (event.name === "char" && event.char === "m") {
+    if (!modalOpen) {
+      openModal(modal);
+      modalOpen = true;
+    } else {
+      closeModal(modal);
+      modalOpen = false;
+    }
+  }
   if (event.name === "char" && event.char === "q") quit = true;
 });
 
@@ -348,6 +634,13 @@ while (Date.now() < deadline && !quit) {
   }
 }
 unsubscribe();
+disposeWheel();
+disposeClick();
+modalOutsideFocus.dispose();
+modalInsideFocus.dispose();
+selectFocus.dispose();
+areaFocus.dispose();
+focusManager.blur();
 dispose?.();
 renderer.destroy();
 

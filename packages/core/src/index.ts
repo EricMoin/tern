@@ -17,9 +17,11 @@
  *   tail vs the `clip_height` viewport, a manual scroll above the tail
  *   detaches, and `followTail` re-attaches.
  * - `Input` / `Spinner` / `StatusBar` / `Panels` / `DiffView` / `Select` /
- *   `ScrollView` are roadmap element factories that compose the primitive
- *   kinds into richer widgets (all editing/caret/selection/scroll math stays
- *   in the element, the Rust compositor paints it), and a `FocusManager`
+ *   `ScrollView` / `Table` / `Modal` are roadmap element factories that
+ *   compose the primitive kinds into richer widgets (all
+ *   editing/caret/selection/scroll math stays in the element, the Rust
+ *   compositor paints it), and a
+ *   `FocusManager`
  *   (with a `useFocus` helper) routes key events to the focused element's
  *   key handler. `Panels` lays its panels out with a 1-cell gutter between
  *   them; `startPanelDrag` / `dragPanels` / `endPanelDrag` implement mouse
@@ -27,7 +29,13 @@
  *   pane, clamped to the pane's min size — roadmap Phase 2). `ScrollView`
  *   is a clip/scroll region box whose offsets are driven by `scrollTo` /
  *   `scrollBy` / `scrollTop` (clamped against `Node.contentSize()` vs the
- *   viewport) with an optional track + thumb scrollbar text leaf.
+ *   viewport) with an optional track + thumb scrollbar text leaf. Mouse
+ *   interaction helpers map terminal mouse events onto the widgets:
+ *   `wheelScroll(view, event)` maps wheel events (`scroll_up` /
+ *   `scroll_down` / `scroll_left` / `scroll_right`) to `scrollBy` on the
+ *   given scrollable node, and `focusAt(renderer, event)` routes a
+ *   `down_left` press on a painted cell to the topmost registered focusable
+ *   node via the `FocusManager`.
  * - A theme system: `Theme` (a named palette of fg/bg per semantic role plus
  *   per-component style presets), `defaultTheme`, `mergeTheme(base, overrides)`
  *   and `resolveTheme(theme, props)`. Resolution consumes semantic hints
@@ -84,9 +92,9 @@ import { loadAddon } from "./addon.ts";
 
 /**
  * The scene node kinds. `box`/`text`/`streaming_text` are materialized by the
- * binding; `input`/`spinner`/`status_bar`/`panels`/`diff`/`select`/
- * `scroll_view` are JS-only element kinds that materialize as compositions
- * over the primitive kinds (their root primitive is fixed by
+ * binding; `input`/`textarea`/`spinner`/`status_bar`/`panels`/`diff`/`select`/
+ * `scroll_view`/`table` are JS-only element kinds that materialize as
+ * compositions over the primitive kinds (their root primitive is fixed by
  * {@link NATIVE_KIND}).
  */
 export type NodeType =
@@ -94,12 +102,15 @@ export type NodeType =
   | "text"
   | "streaming_text"
   | "input"
+  | "textarea"
   | "spinner"
   | "status_bar"
   | "panels"
   | "diff"
   | "select"
-  | "scroll_view";
+  | "scroll_view"
+  | "table"
+  | "modal";
 
 /**
  * The native scene node kind each JS element kind materializes as. The
@@ -107,19 +118,22 @@ export type NodeType =
  * kinds are pure JS compositions over those primitives (constitution: no new
  * engine kinds in the binding), so each maps to the root primitive of its
  * composition: an `input` is a framed box, a `spinner` is a text leaf, a
- * `status_bar` / `panels` / `diff` / `select` is a flex box.
+ * `status_bar` / `panels` / `diff` / `select` / `table` is a flex box.
  */
 const NATIVE_KIND: Record<NodeType, NodeType> = {
   box: "box",
   text: "text",
   streaming_text: "streaming_text",
   input: "box",
+  textarea: "box",
   spinner: "text",
   status_bar: "box",
   panels: "box",
   diff: "box",
   select: "box",
   scroll_view: "box",
+  table: "box",
+  modal: "box",
 };
 
 /**
@@ -656,6 +670,487 @@ function applyEditKey(
   if (name === "home") return { value, caret: 0 };
   if (name === "end") return { value, caret: indexToColumn(value, value.length) };
   return { value, caret };
+}
+
+// --- Textarea --------------------------------------------------------------
+
+/**
+ * Props for the `Textarea` element. Style/layout keys flow to the framed box;
+ * `lines`/`row`/`col`/`scroll` are the edit model (JS bookkeeping on the
+ * node, the source of truth for `editTextareaKey` — the lines array never
+ * reaches the scene, mirroring `Panels`' `panels`); `width` soft-wraps long
+ * lines into display rows, `height` sets the visible window.
+ */
+export interface TextareaProps extends NodeProps {
+  /** The logical lines of text (default `[""]`). */
+  lines?: string[];
+  /** The cursor row — an index into `lines` (default 0). */
+  row?: number;
+  /** The cursor column — a char (code-unit) index into `lines[row]` (default
+   * 0). */
+  col?: number;
+  /**
+   * The soft-wrap width in cells; unset keeps each logical line on one
+   * display row. When set, long lines wrap into display rows at this width
+   * (token-aware, mirroring the Rust `wrap_line`), and each leaf is sized to
+   * the width.
+   */
+  width?: number;
+  /** The visible window in display rows; unset shows every display line.
+   * When set, only the window around the caret is composed (vertical
+   * scroll-to-caret). */
+  height?: number;
+  /** The top visible display row (vertical scroll, default 0). */
+  scroll?: number;
+}
+
+/** The state reported by {@link editTextareaKey} (and the `<Textarea>`
+ * callbacks). */
+export interface TextareaState {
+  /** The logical lines after the key. */
+  lines: string[];
+  /** The cursor row (index into `lines`). */
+  row: number;
+  /** The cursor column (char index into `lines[row]`). */
+  col: number;
+}
+
+/**
+ * The per-textarea vertical-move state: the display column preserved across a
+ * run of up/down moves (keyed by node, like `Panels`' drag state).
+ */
+interface TextareaVerticalState {
+  /** The display column kept across consecutive up/down moves. */
+  preferredCol: number;
+  /** Whether the previous key was a vertical move (the column is only
+   * re-captured on the first move of a run). */
+  sticky: boolean;
+}
+
+/** The vertical-move state per textarea node (JS bookkeeping — never scene
+ * props, mirroring `Panels`' `panelDrags`). */
+const textareaVertical = new WeakMap<Node, TextareaVerticalState>();
+
+/** The wrap width of a textarea's props, or `null` when no width is set. */
+function textareaWidth(props: TextareaProps): number | null {
+  const w = props.width;
+  return typeof w === "number" && Number.isFinite(w) && w > 0 ? Math.floor(w) : null;
+}
+
+/** The visible window of a textarea's props (rows), or `null` when unset. */
+function textareaHeight(props: TextareaProps): number | null {
+  const h = props.height;
+  return typeof h === "number" && Number.isFinite(h) && h > 0 ? Math.floor(h) : null;
+}
+
+/** The total display width of a string in terminal columns. */
+function textWidth(text: string): number {
+  let width = 0;
+  for (const ch of text) width += charWidth(ch);
+  return width;
+}
+
+/**
+ * Soft-wrap `line` into display lines of at most `width` columns plus the
+ * code-unit index (within `line`) where each display line starts. The JS
+ * mirror of the Rust `wrap_line` (token-aware greedy wrap): a whitespace-free
+ * token that does not fit on the current display line wraps whole to the next
+ * when it can fit there; a token wider than the width hard-breaks across
+ * rows; a trailing space at a full display line is dropped (the wrap would
+ * collapse it anyway); an embedded `\n` ends the display line. The offsets
+ * are exact — a character dropped by the wrap belongs to no display line, so
+ * caret navigation stays consistent with what is composed.
+ */
+function wrapLineWithOffsets(
+  line: string,
+  width: number | null,
+): Array<{ text: string; start: number }> {
+  if (width === null) return [{ text: line, start: 0 }];
+  const limit = Math.max(1, Math.floor(width));
+  const rows: Array<{ text: string; start: number }> = [];
+  let row = "";
+  let rowWidth = 0;
+  let rowStart = 0;
+  let token = "";
+  let tokenStart = 0;
+  let idx = 0;
+
+  const flushToken = () => {
+    if (token === "") return;
+    const tokenWidth = textWidth(token);
+    if (row !== "" && rowWidth + tokenWidth > limit && tokenWidth <= limit) {
+      rows.push({ text: row, start: rowStart });
+      row = "";
+      rowWidth = 0;
+      rowStart = tokenStart;
+    }
+    // The code-unit index (within `line`) of the current token char.
+    let cur = tokenStart;
+    for (const ch of token) {
+      const w = charWidth(ch);
+      if (w === 0) {
+        cur += ch.length;
+        continue;
+      }
+      if (rowWidth + w > limit) {
+        rows.push({ text: row, start: rowStart });
+        row = "";
+        rowWidth = 0;
+        if (w > limit) {
+          cur += ch.length; // a glyph wider than a fresh row is dropped
+          rowStart = cur;
+          continue;
+        }
+        rowStart = cur; // the wrapped row starts at this char
+      }
+      row += ch;
+      rowWidth += w;
+      cur += ch.length;
+    }
+    token = "";
+  };
+
+  for (const ch of line) {
+    if (ch === "\n") {
+      flushToken();
+      rows.push({ text: row, start: rowStart });
+      row = "";
+      rowWidth = 0;
+      rowStart = idx + 1;
+    } else if (ch === " ") {
+      flushToken();
+      if (rowWidth + 1 <= limit) {
+        row += " ";
+        rowWidth += 1;
+      }
+    } else {
+      if (token === "") tokenStart = idx;
+      token += ch;
+    }
+    idx += ch.length;
+  }
+  flushToken();
+  rows.push({ text: row, start: rowStart });
+  if (rows.length === 0) rows.push({ text: "", start: 0 });
+  return rows;
+}
+
+/** The number of display rows `line` occupies at the wrap width (1 when no
+ * width is set). */
+function wrapCount(line: string, width: number | null): number {
+  return width === null ? 1 : wrapLineWithOffsets(line, width).length;
+}
+
+/** The display row where logical line `row` begins. */
+function displayBase(lines: string[], row: number, width: number | null): number {
+  let base = 0;
+  for (let i = 0; i < row; i++) base += wrapCount(lines[i]!, width);
+  return base;
+}
+
+/** The total number of display rows across all logical lines. */
+function totalDisplayRows(lines: string[], width: number | null): number {
+  return lines.reduce((sum, line) => sum + wrapCount(line, width), 0);
+}
+
+/** The display-line offset (within `line`'s wrapped lines) that contains the
+ * char index `col`. A char dropped by the wrap maps to the display line it
+ * trails. */
+function offsetOfCol(line: string, col: number, width: number | null): number {
+  const wrapped = wrapLineWithOffsets(line, width);
+  for (let i = 0; i < wrapped.length; i++) {
+    if (col <= wrapped[i]!.start + wrapped[i]!.text.length) return i;
+  }
+  return wrapped.length - 1;
+}
+
+/** The caret's display row across the whole wrapped text. */
+function caretDisplayRow(
+  lines: string[],
+  row: number,
+  col: number,
+  width: number | null,
+): number {
+  return displayBase(lines, row, width) + offsetOfCol(lines[row]!, col, width);
+}
+
+/** The display column of `col` within display-line `offset` of `line`, and
+ * the code-unit index where that display line starts. */
+function caretDisplayIn(
+  line: string,
+  col: number,
+  offset: number,
+  width: number | null,
+): { col: number; start: number } {
+  const wrapped = wrapLineWithOffsets(line, width);
+  const entry = wrapped[Math.min(offset, wrapped.length - 1)] ?? { text: "", start: 0 };
+  const local = Math.max(0, Math.min(col - entry.start, entry.text.length));
+  return { col: indexToColumn(entry.text, local), start: entry.start };
+}
+
+/** The caret's display column within its own display line. */
+function currentDisplayCol(
+  lines: string[],
+  row: number,
+  col: number,
+  width: number | null,
+): number {
+  const offset = offsetOfCol(lines[row]!, col, width);
+  return caretDisplayIn(lines[row]!, col, offset, width).col;
+}
+
+/** The `(logical row, display-line offset)` for display row `target`. */
+function logicalAtDisplayRow(
+  lines: string[],
+  target: number,
+  width: number | null,
+): { row: number; offset: number } {
+  let acc = 0;
+  for (let r = 0; r < lines.length; r++) {
+    const count = wrapCount(lines[r]!, width);
+    if (target < acc + count) return { row: r, offset: target - acc };
+    acc += count;
+  }
+  const last = Math.max(0, lines.length - 1);
+  return { row: last, offset: Math.max(0, wrapCount(lines[last]!, width) - 1) };
+}
+
+/** The char (code-unit) index into `line` at display column `targetCol`
+ * within display-line `offset` (clamped to the display line's end; a column
+ * inside a wide glyph snaps to that glyph's start). */
+function charAtDisplayCol(
+  line: string,
+  offset: number,
+  targetCol: number,
+  width: number | null,
+): number {
+  const wrapped = wrapLineWithOffsets(line, width);
+  const entry = wrapped[Math.min(offset, wrapped.length - 1)] ?? { text: "", start: 0 };
+  return entry.start + columnToIndex(entry.text, targetCol);
+}
+
+/** The scroll offset that keeps the caret's display row inside the visible
+ * window (no-op with no height set). */
+function visibleScroll(
+  lines: string[],
+  row: number,
+  col: number,
+  width: number | null,
+  height: number | null,
+  current: number,
+): number {
+  if (height === null) return 0;
+  const h = Math.max(1, height);
+  const caret = caretDisplayRow(lines, row, col, width);
+  if (caret < current) return caret;
+  if (caret >= current + h) return caret + 1 - h;
+  return current;
+}
+
+/** The text leaf props of one visible display row: its wrapped text, sized to
+ * the wrap width, plus the caret display column when the row holds the
+ * caret. */
+function textareaLeafProps(
+  text: string,
+  width: number | null,
+  caretCol: number | null,
+): NodeProps {
+  const props: NodeProps = { text };
+  if (width !== null) props.width = width;
+  if (caretCol !== null) props.caret = caretCol;
+  return props;
+}
+
+/** Rebuild a textarea's composition from its props: one text leaf per visible
+ * display row (the `scroll..scroll+height` window, or every row with no
+ * height), the caret's leaf carrying its `caret` display column. */
+function rebuildTextarea(textarea: Node): void {
+  const props = textarea.props as TextareaProps;
+  const lines = Array.isArray(props.lines) ? props.lines : [""];
+  const row = Math.max(0, Math.min(typeof props.row === "number" ? Math.floor(props.row) : 0, lines.length - 1));
+  const col = Math.max(0, Math.min(typeof props.col === "number" ? Math.floor(props.col) : 0, lines[row]!.length));
+  const width = textareaWidth(props);
+  const height = textareaHeight(props);
+  const scroll = visibleScroll(
+    lines,
+    row,
+    col,
+    width,
+    height,
+    typeof props.scroll === "number" ? props.scroll : 0,
+  );
+  const caretRow = caretDisplayRow(lines, row, col, width);
+  const total = totalDisplayRows(lines, width);
+  const first = Math.min(scroll, total);
+  const last = Math.min(scroll + (height === null ? total : height), total);
+  for (const child of [...textarea.children]) child.remove();
+  for (let displayRow = first; displayRow < last; displayRow++) {
+    const { row: lineRow, offset } = logicalAtDisplayRow(lines, displayRow, width);
+    const wrapped = wrapLineWithOffsets(lines[lineRow]!, width);
+    const entry = wrapped[Math.min(offset, wrapped.length - 1)] ?? { text: "", start: 0 };
+    let caretCol: number | null = null;
+    if (displayRow === caretRow) {
+      caretCol = caretDisplayIn(lines[lineRow]!, col, offset, width).col;
+    }
+    textarea.addChild(Text(textareaLeafProps(entry.text, width, caretCol)));
+  }
+}
+
+/**
+ * Create a `textarea` element: a framed box with one text leaf per visible
+ * display line (soft-wrapped at `width`, vertically scrolled to keep the
+ * caret visible within `height`), the caret's leaf carrying its `caret`
+ * display column. `lines`/`row`/`col`/`scroll` stay on the node as the edit
+ * model's source of truth. Edit it with {@link editTextareaKey}.
+ */
+export function Textarea(props: TextareaProps = {}): Node {
+  const node = Node.create("textarea", props, []);
+  textareaVertical.set(node, { preferredCol: 0, sticky: false });
+  rebuildTextarea(node);
+  return node;
+}
+
+/** The pure next-state computation shared by {@link editTextareaKey}.
+ * `up`/`down` navigate the soft-wrapped display lines with `preferredCol`;
+ * the other keys are the single-line edits generalized across lines. */
+function textareaKeyPosition(
+  lines: string[],
+  row: number,
+  col: number,
+  width: number | null,
+  preferredCol: number,
+  key: KeyEvent,
+): { lines: string[]; row: number; col: number; changed: boolean } {
+  const name = key.name;
+  const line = lines[row] ?? "";
+
+  if (name === "up" || name === "down") {
+    const caretRow = caretDisplayRow(lines, row, col, width);
+    const total = totalDisplayRows(lines, width);
+    const canMove = name === "up" ? caretRow > 0 : caretRow + 1 < total;
+    if (!canMove) return { lines, row, col, changed: false };
+    const target = name === "up" ? caretRow - 1 : caretRow + 1;
+    const at = logicalAtDisplayRow(lines, target, width);
+    const nextCol = charAtDisplayCol(lines[at.row]!, at.offset, preferredCol, width);
+    return { lines, row: at.row, col: nextCol, changed: at.row !== row || nextCol !== col };
+  }
+  if (name === "char" && !key.ctrl && !key.alt && key.char !== undefined) {
+    const next = line.slice(0, col) + key.char + line.slice(col);
+    const nextLines = [...lines];
+    nextLines[row] = next;
+    return { lines: nextLines, row, col: col + key.char.length, changed: true };
+  }
+  if (name === "backspace") {
+    if (col > 0) {
+      const prev = lastCodePointBefore(line, col);
+      if (prev === null) return { lines, row, col, changed: false };
+      const next = line.slice(0, prev.start) + line.slice(prev.start + prev.len);
+      const nextLines = [...lines];
+      nextLines[row] = next;
+      return { lines: nextLines, row, col: col - prev.len, changed: true };
+    }
+    if (row > 0) {
+      // Join into the previous line: the cursor lands at the join point (the
+      // previous line's end, before the appended tail).
+      const prevLen = lines[row - 1]!.length;
+      const nextLines = [...lines];
+      const tail = nextLines.splice(row, 1)[0] ?? "";
+      nextLines[row - 1] = nextLines[row - 1]! + tail;
+      return { lines: nextLines, row: row - 1, col: prevLen, changed: true };
+    }
+    return { lines, row, col, changed: false };
+  }
+  if (name === "delete") {
+    if (col < line.length) {
+      const code = line.codePointAt(col);
+      const len = code === undefined ? 1 : String.fromCodePoint(code).length;
+      const next = line.slice(0, col) + line.slice(col + len);
+      const nextLines = [...lines];
+      nextLines[row] = next;
+      return { lines: nextLines, row, col, changed: true };
+    }
+    if (row + 1 < lines.length) {
+      const nextLines = [...lines];
+      const tail = nextLines.splice(row + 1, 1)[0] ?? "";
+      nextLines[row] = nextLines[row]! + tail;
+      return { lines: nextLines, row, col, changed: true };
+    }
+    return { lines, row, col, changed: false };
+  }
+  if (name === "enter") {
+    // Split the line at the cursor: the tail becomes a new line below, and
+    // the caret moves to the start of it.
+    const nextLines = [...lines];
+    nextLines[row] = line.slice(0, col);
+    nextLines.splice(row + 1, 0, line.slice(col));
+    return { lines: nextLines, row: row + 1, col: 0, changed: true };
+  }
+  if (name === "left") {
+    if (col > 0) {
+      const prev = lastCodePointBefore(line, col);
+      return { lines, row, col: prev === null ? 0 : prev.start, changed: prev !== null };
+    }
+    if (row > 0) return { lines, row: row - 1, col: lines[row - 1]!.length, changed: true };
+    return { lines, row, col, changed: false };
+  }
+  if (name === "right") {
+    if (col < line.length) {
+      const code = line.codePointAt(col);
+      const len = code === undefined ? 1 : String.fromCodePoint(code).length;
+      return { lines, row, col: col + len, changed: true };
+    }
+    if (row + 1 < lines.length) return { lines, row: row + 1, col: 0, changed: true };
+    return { lines, row, col, changed: false };
+  }
+  if (name === "home") return { lines, row, col: 0, changed: col !== 0 };
+  if (name === "end") return { lines, row, col: line.length, changed: col !== line.length };
+  return { lines, row, col, changed: false };
+}
+
+/**
+ * Apply a key to a textarea node, mutating its lines/row/col (and vertical
+ * scroll) in place and rebuilding the composed line leaves — the Textarea
+ * counterpart of {@link editKey}. Handles `char` insert, `backspace` /
+ * `delete` (joining adjacent lines at the boundaries), `left`/`right` /
+ * `home`/`end`, `enter` (split), and `up`/`down` across the soft-wrapped
+ * display lines (preserving a preferred display column across a run of
+ * vertical moves). Any other key leaves the textarea unchanged. Returns the
+ * new `{ lines, row, col }`.
+ */
+export function editTextareaKey(textarea: Node, event: KeyEvent): TextareaState {
+  const props = textarea.props as TextareaProps;
+  const lines = Array.isArray(props.lines) ? [...props.lines] : [""];
+  const row = Math.max(0, Math.min(typeof props.row === "number" ? Math.floor(props.row) : 0, lines.length - 1));
+  const col = Math.max(0, Math.min(typeof props.col === "number" ? Math.floor(props.col) : 0, lines[row]!.length));
+  const width = textareaWidth(props);
+  const height = textareaHeight(props);
+  const vertical = textareaVertical.get(textarea) ?? { preferredCol: 0, sticky: false };
+  const verticalKey = event.name === "up" || event.name === "down";
+  // A vertical run keeps the column captured on its first move; the first
+  // move of a run (or any horizontal move / edit) re-captures it.
+  if (verticalKey && !vertical.sticky) {
+    vertical.preferredCol = currentDisplayCol(lines, row, col, width);
+    vertical.sticky = true;
+  }
+  const next = textareaKeyPosition(lines, row, col, width, vertical.preferredCol, event);
+  if (!verticalKey) {
+    vertical.sticky = false;
+    vertical.preferredCol = currentDisplayCol(next.lines, next.row, next.col, width);
+  }
+  if (next.changed) {
+    const scroll = visibleScroll(
+      next.lines,
+      next.row,
+      next.col,
+      width,
+      height,
+      typeof props.scroll === "number" ? props.scroll : 0,
+    );
+    textarea.setProps({ ...props, lines: next.lines, row: next.row, col: next.col, scroll });
+    rebuildTextarea(textarea);
+  }
+  textareaVertical.set(textarea, vertical);
+  return { lines: next.lines, row: next.row, col: next.col };
 }
 
 // --- Spinner --------------------------------------------------------------
@@ -1580,38 +2075,46 @@ function scrollableViewport(view: Node): ContentSize {
  * wrapped content (`Node.contentSize()` — the stream height in wrapped rows),
  * and the viewport is its clip rect (the `clip_height` / `clip_width` scene
  * props; a clip dimension that is unset falls back to the content size, so
- * nothing can scroll in that axis). A `scroll_view` (or any other container)
- * measures its children against its own laid-out size, as before.
+ * nothing can scroll in that axis). Any other node measures its children
+ * against the clip rect when the region declares one — a clip region's
+ * viewport is what the engine clips and pans, so offsets clamp against the
+ * `clip_height` / `clip_width` props, not the laid-out box (which can be
+ * taller than the visible window, e.g. a table's content region) — and
+ * against the node's own laid-out size otherwise.
  */
 function scrollGeometry(view: Node): { viewport: ContentSize; content: ContentSize } {
+  const content = view.contentSize();
+  const props = view.props;
+  const viewport: ContentSize = {
+    width: typeof props.clip_width === "number" ? props.clip_width : content.width,
+    height: typeof props.clip_height === "number" ? props.clip_height : content.height,
+  };
   if (view.type === "streaming_text") {
-    const content = view.contentSize();
-    const props = view.props;
-    const clipWidth = typeof props.clip_width === "number" ? props.clip_width : content.width;
-    const clipHeight = typeof props.clip_height === "number" ? props.clip_height : content.height;
-    return { viewport: { width: clipWidth, height: clipHeight }, content };
+    return { viewport, content };
   }
-  const viewport = scrollableViewport(view);
   return { viewport, content: scrollableContentSize(view, viewport) };
 }
 
 /**
- * The scrollable content size of a scroll view: the widest/tallest child's
- * laid-out content size, floored at the viewport size (so an empty view — or
- * content that fits — measures exactly the viewport and cannot scroll). The
- * scrollbar leaf is excluded: it is a viewport decoration, not content.
+ * The scrollable content size of a scroll view: the larger of the view's own
+ * laid-out size — a growing box measures its stacked content, e.g. a table's
+ * content region (one row leaf per data row) — and its children's extents —
+ * a fixed-size scroll view's content overflows its viewport-sized box —
+ * floored at the viewport size (so an empty view — or content that fits —
+ * measures exactly the viewport and cannot scroll). The scrollbar leaf is
+ * excluded: it is a viewport decoration, not content.
  */
 function scrollableContentSize(view: Node, viewport: ContentSize): ContentSize {
   const scrollbar = scrollbarLeaves.get(view);
-  let width = viewport.width;
-  let height = viewport.height;
+  let width = view.contentSize().width;
+  let height = view.contentSize().height;
   for (const child of view.children) {
     if (child === scrollbar) continue;
     const size = child.contentSize();
     width = Math.max(width, size.width);
     height = Math.max(height, size.height);
   }
-  return { width, height };
+  return { width: Math.max(width, viewport.width), height: Math.max(height, viewport.height) };
 }
 
 /** The current scroll offset of a scroll view (0 when unset). */
@@ -1751,6 +2254,487 @@ export function scrollTop(view: Node): { x: number; y: number } {
 }
 
 // ---------------------------------------------------------------------------
+// Table
+//
+// A `table` element is a flex column of box/text leaves: a header row (sticky
+// by default — a sibling painted above the scrollable content region, at a
+// higher `z_index` so scrolled rows pass beneath it) plus a content region
+// box holding one row leaf per data row. Per-column width/alignment is baked
+// into each cell's padded text (display-width aware, never mid-glyph), so
+// columns line up regardless of content length. The column/row model is JS
+// bookkeeping (never scene props, mirroring `Select`'s `options`); the
+// interactive state (`highlight`, `scroll_x`, `scroll_y`) lives on the node
+// props, and `tableKey` mutates it and rebuilds the composition in place
+// (mirroring `selectKey`). The scroll offsets are the engine's existing
+// scene props: `scroll_x` on the root pans header + rows together (so
+// columns stay aligned), `scroll_y` on the content region pans only the rows
+// (the sticky header does not scroll). No new napi node kind: the `table`
+// element materializes as a `box` (constitution).
+// ---------------------------------------------------------------------------
+
+/** One column of a `Table`: a `key`, the `header` label, a fixed cell
+ * `width` in cells, and an optional `align` for the cell content (default
+ * `"left"`). */
+export interface TableColumn {
+  /** The column's key (bookkeeping — identifies the column). */
+  key: string;
+  /** The header label painted in the header row. */
+  header: string;
+  /** The column's fixed width in cells. */
+  width: number;
+  /** The cell content alignment (default `"left"`). */
+  align?: "left" | "right" | "center";
+}
+
+/** The state reported by {@link tableKey} after a routed key. */
+export interface TableState {
+  /** The highlighted data-row index (clamped into the rows). */
+  highlight: number;
+  /** The horizontal scroll offset in cells. */
+  scroll_x: number;
+  /** The vertical scroll offset in cells (data rows scrolled past). */
+  scroll_y: number;
+}
+
+/**
+ * Props for the `Table` element. `columns` / `rows` are consumed by the
+ * factory (the model is JS bookkeeping — it never reaches the scene props,
+ * mirroring `Panels` / `Select`); the remaining state/layout props flow to
+ * the root box, which is a flex column of the header row and the scrollable
+ * content region.
+ */
+export interface TableProps extends NodeProps {
+  /** The columns, in display order (left to right). */
+  columns: TableColumn[];
+  /** The data rows, in display order (top to bottom); each row holds one
+   *  cell per column (missing cells render blank). */
+  rows: (string | number)[][];
+  /** The horizontal scroll offset in cells (default 0) — pans the header
+   *  row and the content region together, so columns stay aligned. */
+  scroll_x?: number;
+  /** The vertical scroll offset in cells (default 0) — the number of data
+   *  rows scrolled past inside the content region. The sticky header does
+   *  not scroll with them. */
+  scroll_y?: number;
+  /** The highlighted data-row index (default 0) — its row renders reversed.
+   *  {@link tableKey} moves it with up/down, clamping to the rows. */
+  highlight?: number;
+  /** Keep the header row pinned above the content region (default `true`);
+   *  `false` moves the header into the scrollable region, so it scrolls
+   *  away with the rows. */
+  sticky_header?: boolean;
+  /**
+   * The content region's viewport height in rows (default unset — the whole
+   * row list is the viewport). Drives {@link visibleTableRows} and the
+   * scroll clamping in {@link tableKey}: the visible window is
+   * `rows[scroll_y, scroll_y + clip_height)`.
+   */
+  clip_height?: number;
+}
+
+/** The sticky header's paint z-order (1). In-flow content stacks at z 0, so
+ * the header — pinned above the content region — paints over data rows that
+ * scroll up beneath it (compositor z-order, the same mechanism `Select`'s
+ * `floating` overlay and the `ScrollView` scrollbar use). */
+const TABLE_HEADER_Z_INDEX = 1;
+
+/** The normalized column list of a table node (JS bookkeeping — never scene
+ * props, mirroring `Select`'s `selectOptions`). */
+const tableColumns = new WeakMap<Node, TableColumn[]>();
+
+/** The normalized row list of a table node (JS bookkeeping — never scene
+ * props). */
+const tableRows = new WeakMap<Node, (string | number)[][]>();
+
+/** The content region box of a table node (JS bookkeeping — the scrollable
+ * sibling the sticky header is pinned above; its `scroll_y` / `clip_height`
+ * props are the vertical viewport state, mirroring `ScrollView`'s
+ * `scrollbarLeaves`). */
+const tableRegions = new WeakMap<Node, Node>();
+
+/** The display width of `text` in terminal columns (sum of `charWidth`). */
+function displayWidth(text: string): number {
+  let width = 0;
+  for (const ch of text) width += charWidth(ch);
+  return width;
+}
+
+/** Truncate `text` to `width` display columns, never splitting a wide glyph
+ * (a wide char that would straddle the boundary is dropped). */
+function truncateToWidth(text: string, width: number): string {
+  if (displayWidth(text) <= width) return text;
+  let out = "";
+  let used = 0;
+  for (const ch of text) {
+    const w = charWidth(ch);
+    if (w === 0) continue;
+    if (used + w > width) break;
+    out += ch;
+    used += w;
+  }
+  return out;
+}
+
+/** The padded cell text for `value` in a `width`-cell column: left-aligned
+ * (default), right-aligned, or centered; content wider than the column is
+ * truncated (never mid-glyph). The padded string's display width is exactly
+ * `width`, so every column lines up across rows. */
+function tableCellText(
+  value: string | number,
+  width: number,
+  align?: "left" | "right" | "center",
+): string {
+  const text = String(value);
+  const used = displayWidth(text);
+  if (used >= width) return truncateToWidth(text, width);
+  const pad = width - used;
+  if (align === "right") return " ".repeat(pad) + text;
+  if (align === "center") {
+    const left = Math.floor(pad / 2);
+    return " ".repeat(left) + text + " ".repeat(pad - left);
+  }
+  return text + " ".repeat(pad);
+}
+
+/** One cell of a table: a `width`-pinned text leaf carrying the padded,
+ * aligned content; `reversed` marks a cell of the highlighted row. The
+ * `width` prop fixes the leaf's laid-out width, so the compositor trims any
+ * residual overflow at the column edge (the same trim `wrap: false` lines
+ * get). */
+function tableCell(value: string | number, column: TableColumn, reversed: boolean): Node {
+  return Text({
+    text: tableCellText(value, column.width, column.align),
+    width: column.width,
+    reversed,
+  });
+}
+
+/** One data row: a flex row of per-column cell leaves, one per column
+ * (missing cells render blank). The highlighted row's cells are reversed. */
+function buildTableRow(row: (string | number)[], columns: TableColumn[], highlighted: boolean): Node {
+  return Box(
+    { flex_direction: "row" },
+    ...columns.map((column, index) => tableCell(row[index] ?? "", column, highlighted)),
+  );
+}
+
+/** The header row: a flex row of per-column cell leaves carrying the column
+ * labels. With a sticky header it carries the higher `z_index` so it paints
+ * above data rows scrolling beneath it. */
+function buildTableHeader(columns: TableColumn[], sticky: boolean): Node {
+  const props: NodeProps = { flex_direction: "row" };
+  if (sticky) props.z_index = TABLE_HEADER_Z_INDEX;
+  return Box(props, ...columns.map((column) => tableCell(column.header, column, false)));
+}
+
+/** The current vertical scroll of a table's content region (0 when unset). */
+function tableScrollY(table: Node): number {
+  const region = tableRegions.get(table);
+  if (region === undefined) return 0;
+  return typeof region.props.scroll_y === "number" ? region.props.scroll_y : 0;
+}
+
+/** The table's viewport height in rows: the `clip_height` prop, or the whole
+ * row list when unset (nothing to clamp against — every row is "visible"). */
+function tableViewport(table: Node): number {
+  const props = table.props as TableProps;
+  if (typeof props.clip_height === "number" && props.clip_height > 0) return props.clip_height;
+  return (tableRows.get(table) ?? []).length;
+}
+
+/**
+ * Rebuild a table node's children from its current props (the source of
+ * truth, mirroring `Select`'s `rebuildSelect`): the header row — sticky when
+ * `sticky_header` (a sibling above the content region, at the higher
+ * `z_index`), otherwise the region's first child — plus one row leaf per
+ * data row, the highlighted row reversed. Runs at creation (seeding the
+ * content region with the initial `scroll_y` prop) and after every
+ * {@link tableKey} mutation (the region's own `scroll_y` is re-stamped).
+ */
+function rebuildTable(table: Node, initialScrollY?: number): void {
+  const props = table.props as TableProps;
+  const columns = tableColumns.get(table) ?? [];
+  const rows = tableRows.get(table) ?? [];
+  const highlight = typeof props.highlight === "number" ? props.highlight : 0;
+  const sticky = props.sticky_header ?? true;
+
+  for (const child of [...table.children]) child.remove();
+
+  const header = buildTableHeader(columns, sticky);
+  const rowNodes = rows.map((row, index) => buildTableRow(row, columns, index === highlight));
+  const scrollY = initialScrollY ?? tableScrollY(table);
+  const regionProps: NodeProps = { flex_direction: "column", scroll_y: scrollY };
+  if (typeof props.clip_height === "number") regionProps.clip_height = props.clip_height;
+
+  if (sticky) {
+    table.addChild(header);
+    const region = Node.create("box", regionProps, rowNodes);
+    tableRegions.set(table, region);
+    table.addChild(region);
+  } else {
+    const region = Node.create("box", regionProps, [header, ...rowNodes]);
+    tableRegions.set(table, region);
+    table.addChild(region);
+  }
+}
+
+/**
+ * Create a `table` element: a flex column of box/text leaves — a header row
+ * (sticky by default, painted above the content region at the higher
+ * `z_index`; `sticky_header: false` moves it into the scrollable region) and
+ * one row leaf per data row with per-column width/alignment (each cell's
+ * text padded to the column width, right/center-aligned as declared,
+ * overflow truncated never mid-glyph; the highlighted row reversed). The
+ * column/row model is JS bookkeeping (never scene props); the interactive
+ * state (`highlight`, `scroll_x`, `scroll_y`) lives on the node props. The
+ * `scroll_x` prop on the root pans header + rows together (columns stay
+ * aligned); `scroll_y` pans only the content region, so the sticky header
+ * does not scroll. Drive it with {@link tableKey}; read the visible window
+ * with {@link visibleTableRows}. No new napi node kind: the `table` element
+ * materializes as a `box` (constitution).
+ */
+export function Table(props: TableProps): Node {
+  const columns = props.columns.map((column) => ({ ...column }));
+  const rows = props.rows.map((row) => [...row]);
+  const rootProps: NodeProps = {
+    ...props,
+    highlight: props.highlight ?? 0,
+    scroll_x: props.scroll_x ?? 0,
+    sticky_header: props.sticky_header ?? true,
+    flex_direction: "column",
+  };
+  const plain = rootProps as Record<string, unknown>;
+  delete plain.columns;
+  delete plain.rows;
+  delete plain.scroll_y;
+  const table = Node.create("table", rootProps, []);
+  tableColumns.set(table, columns);
+  tableRows.set(table, rows);
+  rebuildTable(table, props.scroll_y);
+  return table;
+}
+
+/**
+ * The data rows of a table currently inside its vertical viewport: the row
+ * slice `rows[scroll_y, scroll_y + clip_height)` (the whole remaining list
+ * when `clip_height` is unset), in scene order. The window the content
+ * region's scroll offset exposes below the sticky header.
+ */
+export function visibleTableRows(table: Node): (string | number)[][] {
+  const rows = tableRows.get(table) ?? [];
+  const scrollY = tableScrollY(table);
+  const viewport = tableViewport(table);
+  return rows.slice(scrollY, scrollY + Math.max(1, viewport));
+}
+
+/**
+ * Apply a key to a table node, mutating its state and rebuilding the
+ * composition in place — the Table counterpart of {@link selectKey}.
+ *
+ * - `up` / `down` move the highlight within the rows (clamped at the ends),
+ *   auto-scrolling the content region so the highlighted row stays inside
+ *   the visible window (`scroll_y` is clamped to `[0, rows.length -
+ *   viewport]`, where the viewport is `clip_height` or the whole list).
+ *
+ * Returns the new state; any other key leaves the table unchanged.
+ */
+export function tableKey(table: Node, event: KeyEvent): TableState {
+  const props = table.props as TableProps;
+  const rows = tableRows.get(table) ?? [];
+  const highlight = typeof props.highlight === "number" ? props.highlight : 0;
+  const scrollX = typeof props.scroll_x === "number" ? props.scroll_x : 0;
+  const scrollY = tableScrollY(table);
+  const viewport = Math.max(1, tableViewport(table));
+  const maxScroll = Math.max(0, rows.length - viewport);
+
+  let nextHighlight = highlight;
+  if (event.name === "up") {
+    nextHighlight = Math.max(0, highlight - 1);
+  } else if (event.name === "down") {
+    nextHighlight = Math.min(Math.max(0, rows.length - 1), highlight + 1);
+  }
+
+  // Auto-scroll: keep the highlighted row inside the visible window, then
+  // clamp the offset to the content bounds (a table whose rows fit its
+  // viewport cannot scroll).
+  let nextScrollY = scrollY;
+  if (nextHighlight < nextScrollY) nextScrollY = nextHighlight;
+  if (nextHighlight > nextScrollY + viewport - 1) nextScrollY = nextHighlight - viewport + 1;
+  nextScrollY = Math.max(0, Math.min(nextScrollY, maxScroll));
+
+  const state: TableState = { highlight: nextHighlight, scroll_x: scrollX, scroll_y: nextScrollY };
+  const changed = state.highlight !== highlight || state.scroll_y !== scrollY;
+  if (changed) {
+    table.setProps({ ...props, highlight: state.highlight });
+    const region = tableRegions.get(table);
+    if (region !== undefined) {
+      region.setProps({ ...region.props, scroll_y: state.scroll_y });
+    }
+    rebuildTable(table);
+  }
+  return state;
+}
+
+// ---------------------------------------------------------------------------
+// Modal
+//
+// A `modal` element is a full-bleed overlay: an absolutely positioned root
+// box (inset to its parent's padding box — the scene root when the modal is
+// mounted at the tree top) stamped with a high `z_index` so it paints above
+// in-flow content (compositor z-order, the same mechanism `Select`'s
+// `floating` overlay uses), composing a dimmed backdrop box plus a centered
+// content box that wraps the modal's content nodes. The interactive state
+// (`open`) lives on the root box's props, mirroring `Select`'s `open`;
+// `openModal` / `closeModal` toggle it plus the visible state (`hidden`
+// modifier + the engine's `display: none`, so a closed overlay really leaves
+// the scene), and isolate focus through the {@link FocusManager}: opening
+// records the active id and focuses the first registered focusable
+// (`focusFirst`), closing restores the recorded id (blurring when nothing
+// was recorded). No new napi node kind: the `modal` element materializes as
+// a `box` (constitution).
+// ---------------------------------------------------------------------------
+
+/** The modal overlay's paint z-order (100). In-flow content stacks at z 0
+ * (the scrollbar / sticky table header at 1), so a modal stamped with this
+ * `z_index` always paints above them (compositor z-order, the same
+ * mechanism `Select`'s `floating` overlay uses). */
+export const MODAL_Z_INDEX = 100;
+
+/** The backdrop's fill color: a dark slate a shade below the default palette
+ * backgrounds, so the dim layer reads as a shade over the content beneath
+ * the overlay. */
+export const MODAL_BACKDROP_BG = "#17191e";
+
+/**
+ * Props for the `Modal` element. `backdrop` / `content` are consumed by the
+ * factory (the content node list is JS bookkeeping — it never reaches the
+ * scene props, mirroring `Panels`' `panels`); `open` / `z_index` reach the
+ * root box's scene props (the compositor's paint z-order, default
+ * {@link MODAL_Z_INDEX}).
+ */
+export interface ModalProps extends NodeProps {
+  /** Whether the modal is open (default `false`). `openModal` / `closeModal`
+   * toggle it (and the visible state); a modal starts hidden. */
+  open?: boolean;
+  /** Whether the dimmed backdrop box is composed (default `true`). */
+  backdrop?: boolean;
+  /** The overlay's paint z-order (default {@link MODAL_Z_INDEX}). */
+  z_index?: number;
+  /** Content nodes wrapped into the centered content box (the Solid
+   *  factory's path; `Box`-style rest-arg children work too). */
+  content?: Node[];
+}
+
+/** The per-modal focus bookkeeping (JS state — never scene props). */
+interface ModalState {
+  /** The active focus id recorded when the modal opened (restored on close;
+   * `null` when nothing was focused before the open). */
+  previousFocusId: string | null;
+}
+
+/** The focus records of modal nodes created with {@link Modal}. */
+const modalStates = new WeakMap<Node, ModalState>();
+
+/**
+ * Create a `modal` element: an absolutely positioned, full-bleed overlay box
+ * (inset to its parent's padding box) stamped with a high `z_index` so it
+ * paints above in-flow content, composing a dimmed backdrop box (an absolute
+ * fill with a dark `bg`, unless `backdrop: false`) plus a centered content
+ * box (a flex column) wrapping the content nodes (rest-arg children or the
+ * `content` prop). The visible state starts from `open` (default `false` —
+ * hidden); drive it with {@link openModal} / {@link closeModal}, which also
+ * move focus into / out of the overlay through the {@link FocusManager}. No
+ * new napi node kind: the `modal` element materializes as a `box`
+ * (constitution).
+ */
+export function Modal(props: ModalProps = {}, ...children: Node[]): Node {
+  const open = props.open ?? false;
+  const backdrop = props.backdrop ?? true;
+  const content: Node[] = [...children];
+  if (Array.isArray(props.content)) content.push(...props.content);
+
+  const rootProps: NodeProps = {
+    ...props,
+    open,
+    // A closed modal is truly gone: the `hidden` modifier (the reconciler's
+    // hide semantics) plus `display: none` (the engine removes the node and
+    // its subtree from layout).
+    hidden: !open,
+    display: open ? "flex" : "none",
+    // The Select `floating` pattern: the overlay's paint z-order is stamped
+    // on the root box (an explicit `z_index` prop wins).
+    z_index: (props.z_index as number | undefined) ?? MODAL_Z_INDEX,
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    flex_direction: "column",
+    justify_content: "center",
+    align_items: "center",
+  };
+  const plain = rootProps as Record<string, unknown>;
+  delete plain.content;
+  delete plain.backdrop;
+
+  const composed: Node[] = [];
+  if (backdrop) {
+    // The dim layer: an absolute fill covering the overlay, painted beneath
+    // the centered content box (child order within the same z layer).
+    composed.push(
+      Box({
+        position: "absolute",
+        top: 0,
+        right: 0,
+        bottom: 0,
+        left: 0,
+        bg: MODAL_BACKDROP_BG,
+        dim: true,
+      }),
+    );
+  }
+  composed.push(Box({ flex_direction: "column" }, ...content));
+
+  const modal = Node.create("modal", rootProps, composed);
+  modalStates.set(modal, { previousFocusId: null });
+  return modal;
+}
+
+/**
+ * Open a modal overlay: record the currently active focus id, show the
+ * overlay (toggle the `hidden` modifier off and `display` back to flex), and
+ * move focus into it — `focusFirst()` focuses the first registered
+ * focusable (the overlay's content is expected to register its focusables
+ * with `manager`). A no-op when the modal is already open (the record must
+ * not be overwritten by the focus that now sits inside the overlay).
+ */
+export function openModal(modal: Node, manager: FocusManager = focusManager): void {
+  const state = modalStates.get(modal);
+  if (state === undefined || modal.props.open === true) return;
+  state.previousFocusId = manager.activeId;
+  modal.setProps({ ...modal.props, open: true, hidden: false, display: "flex" });
+  manager.focusFirst();
+}
+
+/**
+ * Close a modal overlay: hide it (toggle the `hidden` modifier on and
+ * `display` to none) and restore the focus recorded by {@link openModal} —
+ * the previously active id, or a blur when nothing was focused before the
+ * open (fallback `null`; a recorded id that was unregistered meanwhile also
+ * falls back to a blur). A no-op when the modal is already closed.
+ */
+export function closeModal(modal: Node, manager: FocusManager = focusManager): void {
+  const state = modalStates.get(modal);
+  if (state === undefined || modal.props.open !== true) return;
+  const previous = state.previousFocusId;
+  modal.setProps({ ...modal.props, open: false, hidden: true, display: "none" });
+  state.previousFocusId = null;
+  if (previous === null || !manager.focus(previous)) {
+    manager.blur();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // StreamingText auto-scroll
 //
 // A `streaming_text` node can pin its `scroll_y` to the content tail as the
@@ -1854,12 +2838,14 @@ export type ThemeRole = (typeof THEME_ROLES)[number];
 /** The components with themeable style presets. */
 export const THEME_COMPONENTS = [
   "input",
+  "textarea",
   "spinner",
   "status_bar",
   "panels",
   "diff",
   "select",
   "scroll_view",
+  "table",
 ] as const;
 
 /** A themeable component kind ("input", "diff", ...). */
@@ -1930,12 +2916,14 @@ export const defaultTheme: Theme = {
   },
   components: {
     input: {},
+    textarea: {},
     spinner: {},
     status_bar: {},
     panels: {},
     diff: {},
     select: {},
     scroll_view: {},
+    table: {},
   },
 };
 
@@ -2039,26 +3027,44 @@ export interface Focusable {
 /**
  * Routes key events to the focused element's key handler. Elements register
  * with `register` (or the {@link useFocus} helper) and become routable; the
- * active focus is moved with `focus`/`blur`.
+ * active focus is moved with `focus`/`blur`, or walked in registration order
+ * with `next`/`prev`/`focusFirst`. Focus changes (including blur and the
+ * unregister of the active id) are observable through `subscribe`.
  */
 export class FocusManager {
   #entries = new Map<string, Focusable>();
+  #nodes = new Map<Node, string>();
   #active: string | null = null;
+  #listeners = new Set<(activeId: string | null) => void>();
 
   /**
    * Register a focusable element. Returns an unsubscribe function that
-   * unregisters it. Registering an id twice replaces the earlier entry.
+   * unregisters it. Registering an id twice replaces the earlier entry (the
+   * stale node mapping, if any, is dropped).
    */
   register(focusable: Focusable): () => void {
-    this.#entries.set(focusable.id, focusable);
-    return () => this.unregister(focusable.id);
+    const { id, node } = focusable;
+    const prev = this.#entries.get(id);
+    if (prev !== undefined && prev.node !== node) {
+      if (this.#nodes.get(prev.node) === id) this.#nodes.delete(prev.node);
+    }
+    this.#entries.set(id, focusable);
+    this.#nodes.set(node, id);
+    return () => this.unregister(id);
   }
 
-  /** Unregister `id` (clearing it as active if it was). Returns whether an
-   * entry was removed. */
+  /** Unregister `id` (clearing it as active if it was, which notifies
+   * subscribers with `null`). Returns whether an entry was removed. */
   unregister(id: string): boolean {
+    const entry = this.#entries.get(id);
     const removed = this.#entries.delete(id);
-    if (removed && this.#active === id) this.#active = null;
+    if (removed && entry !== undefined) {
+      if (this.#nodes.get(entry.node) === id) this.#nodes.delete(entry.node);
+    }
+    if (removed && this.#active === id) {
+      this.#active = null;
+      this.#notify(null);
+    }
     return removed;
   }
 
@@ -2067,16 +3073,24 @@ export class FocusManager {
     return this.#entries.has(id);
   }
 
-  /** Make `id` the active focus. Returns `false` when it is not registered. */
+  /** Make `id` the active focus. Returns `false` when it is not registered.
+   * Focusing the already-active id is a no-op (subscribers are not re-fired). */
   focus(id: string): boolean {
     if (!this.#entries.has(id)) return false;
-    this.#active = id;
+    if (this.#active !== id) {
+      this.#active = id;
+      this.#notify(id);
+    }
     return true;
   }
 
-  /** Clear the active focus (elements stay registered). */
+  /** Clear the active focus (elements stay registered). Blurring when nothing
+   * is focused is a no-op (subscribers are not re-fired). */
   blur(): void {
-    this.#active = null;
+    if (this.#active !== null) {
+      this.#active = null;
+      this.#notify(null);
+    }
   }
 
   /** The id of the active focus, or `null`. */
@@ -2088,6 +3102,71 @@ export class FocusManager {
   get active(): Focusable | null {
     if (this.#active === null) return null;
     return this.#entries.get(this.#active) ?? null;
+  }
+
+  /** Focus the first registered element. Returns `false` when nothing is
+   * registered. */
+  focusFirst(): boolean {
+    const first = [...this.#entries.keys()][0];
+    if (first === undefined) return false;
+    return this.focus(first);
+  }
+
+  /**
+   * Move the active focus to the element registered after the current one,
+   * wrapping around to the first. With nothing focused, focuses the first
+   * element. Returns `false` when nothing is registered.
+   */
+  next(): boolean {
+    if (this.#active === null) return this.focusFirst();
+    const keys = [...this.#entries.keys()];
+    const idx = keys.indexOf(this.#active);
+    if (idx === -1) return false;
+    const nextId = keys[(idx + 1) % keys.length];
+    if (nextId === undefined) return false;
+    return this.focus(nextId);
+  }
+
+  /**
+   * Move the active focus to the element registered before the current one,
+   * wrapping around to the last. With nothing focused, focuses the first
+   * element. Returns `false` when nothing is registered.
+   */
+  prev(): boolean {
+    if (this.#active === null) return this.focusFirst();
+    const keys = [...this.#entries.keys()];
+    const idx = keys.indexOf(this.#active);
+    if (idx === -1) return false;
+    const prevId = keys[(idx - 1 + keys.length) % keys.length];
+    if (prevId === undefined) return false;
+    return this.focus(prevId);
+  }
+
+  /** The registered focus id for a scene node, or `null` when the node is not
+   * registered. When the same node is registered under several ids, the most
+   * recently registered id wins. */
+  focusIdFor(node: Node): string | null {
+    return this.#nodes.get(node) ?? null;
+  }
+
+  /**
+   * Subscribe to focus changes. The callback runs with the new active id (or
+   * `null` when focus is cleared) each time the active focus changes — on
+   * `focus`, `blur`, and when unregistering the active id. Returns an
+   * unsubscribe function.
+   */
+  subscribe(cb: (activeId: string | null) => void): () => void {
+    this.#listeners.add(cb);
+    return () => this.unsubscribe(cb);
+  }
+
+  /** Remove a focus-change subscriber added with {@link FocusManager.subscribe}. */
+  unsubscribe(cb: (activeId: string | null) => void): void {
+    this.#listeners.delete(cb);
+  }
+
+  #notify(activeId: string | null): void {
+    for (const cb of this.#listeners) cb(activeId);
   }
 
   /**
@@ -2143,6 +3222,124 @@ export function useFocus(
     isFocused: () => manager.activeId === id,
     dispose: () => manager.unregister(id),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Mouse wheel scroll + click-to-focus
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether `view` is a scrollable scroll-view-like node: a `scroll_view`,
+ * `streaming_text`, `diff`, or `table` element, or any attached node carrying
+ * the engine's clip/scroll region props (`clip_*` / `scroll_*`). The node
+ * must be attached — scroll geometry (`Node.contentSize()`) errors on a
+ * detached node, so a detached view is never scrollable.
+ */
+function isScrollableNode(view: Node): boolean {
+  if (!view.attached) return false;
+  const type = view.type;
+  if (type === "scroll_view" || type === "streaming_text" || type === "diff" || type === "table") {
+    return true;
+  }
+  const props = view.props;
+  return (
+    typeof props.clip_width === "number" ||
+    typeof props.clip_height === "number" ||
+    typeof props.scroll_x === "number" ||
+    typeof props.scroll_y === "number"
+  );
+}
+
+/** The node a wheel event scrolls for `view`: a `table` scrolls its content
+ * region (the sticky header stays pinned — the region carries the `scroll_y`
+ * / `clip_height` viewport props); any other scroll view is the node itself.
+ * Returns `null` when `view` is detached (scroll geometry is unavailable). */
+function wheelScrollTarget(view: Node): Node | null {
+  if (!view.attached) return null;
+  if (view.type === "table") return tableRegions.get(view) ?? null;
+  return view;
+}
+
+/**
+ * Map a mouse wheel event to a scroll on `view`, returning whether the event
+ * was consumed. The wheel direction names the content movement: `scroll_up`
+ * pans the content up one cell (`scroll_y - 1`), `scroll_down` pans down
+ * (`scroll_y + 1`), and `scroll_left` / `scroll_right` pan the columns the
+ * same way (`scroll_x - 1` / `scroll_x + 1`). The offset is applied through
+ * {@link scrollBy}, so it clamps to the content bounds (and a streaming view
+ * scrolled above the tail detaches its auto-follow, mirroring
+ * {@link scrollTo}).
+ *
+ * A `table` view scrolls its scrollable content region (the sticky header
+ * stays pinned); any other scroll view scrolls itself. Returns `false` — a
+ * no-op, so the event can fall through to other mouse handlers — for
+ * non-wheel events (`down_left`, `moved`, ...), for wheel events on a
+ * non-scrollable node (a plain box with no clip/scroll region), and for
+ * wheel events on a detached view.
+ */
+export function wheelScroll(view: Node, event: MouseEventJs): boolean {
+  let dx = 0;
+  let dy = 0;
+  switch (event.kind) {
+    case "scroll_up":
+      dy = -1;
+      break;
+    case "scroll_down":
+      dy = 1;
+      break;
+    case "scroll_left":
+      dx = -1;
+      break;
+    case "scroll_right":
+      dx = 1;
+      break;
+    default:
+      return false; // not a wheel event — not consumed
+  }
+  const target = wheelScrollTarget(view);
+  if (target === null || !isScrollableNode(target)) return false;
+  scrollBy(target, dx, dy);
+  return true;
+}
+
+/**
+ * Focus the topmost registered focusable node under a `down_left` press,
+ * returning whether a focus was applied.
+ *
+ * Mouse routing (via `Renderer.hit_test`): the press must land on a painted
+ * cell — `hit_test(col, row)` returns the scene node ids covering the cell
+ * (empty off any node — the scene root is never reported, so a press in dead
+ * space is a no-op). On a painted cell the press resolves to the topmost
+ * registered focusable node: the live scene tree is walked from the root in
+ * paint order and the first node the {@link FocusManager} has registered (via
+ * `focusIdFor`) is the click target, focused through `manager.focus(id)`.
+ *
+ * Returns `false` — a no-op — for non-`down_left` events, for presses off any
+ * painted cell, and for presses whose topmost node is not registered.
+ */
+export function focusAt(
+  renderer: Renderer,
+  event: MouseEventJs,
+  manager: FocusManager = focusManager,
+): boolean {
+  if (event.kind !== "down_left") return false;
+  if (renderer.hit_test(event.column, event.row).length === 0) return false;
+  const id = topmostFocusId(renderer.root, manager);
+  if (id === null) return false;
+  return manager.focus(id);
+}
+
+/** The registered focus id of the topmost focusable node in `root`'s live
+ * subtree: the first node in a pre-order (paint-order) walk that `manager`
+ * has registered, or `null` when none is. */
+function topmostFocusId(root: Node, manager: FocusManager): string | null {
+  const id = manager.focusIdFor(root);
+  if (id !== null) return id;
+  for (const child of root.children) {
+    const found = topmostFocusId(child, manager);
+    if (found !== null) return found;
+  }
+  return null;
 }
 
 /**

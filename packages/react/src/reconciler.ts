@@ -12,7 +12,8 @@
  * - `supportsMutation: true` — mutation mode (append/insert/remove ops).
  * - `createInstance(type, props)` -> tern node via `Box(props)` /
  *   `Text(props)` / `StreamingText(props)` / `Input(props)` / `Spinner(props)`
- *   / `StatusBar(props)` / `Panels(props)`.
+ *   / `StatusBar(props)` / `Panels(props)` / `DiffView(props)` /
+ *   `Select(props)` / `ScrollView(props)` / `Table(props)` / `Modal(props)`.
  * - `createTextInstance` throws — tern requires an explicit `<Text>` element,
  *   bare string children are rejected at render time.
  * - `appendChild` / `insertBefore` / `removeChild` -> tern tree ops. The core
@@ -50,23 +51,29 @@ import {
   Box,
   DiffView as CoreDiffView,
   Input as CoreInput,
+  Modal as CoreModal,
   Panels as CorePanels,
   ScrollView as CoreScrollView,
   Select as CoreSelect,
   Spinner as CoreSpinner,
   StatusBar as CoreStatusBar,
   StreamingText,
+  Table as CoreTable,
   Text,
+  Textarea as CoreTextarea,
   focusManager,
   type DiffViewProps,
   type FocusManager,
   type KeyEvent,
+  type ModalProps,
   type Node,
   type NodeProps,
   type PanelsProps,
   type Renderer,
   type ScrollViewProps,
   type SelectProps,
+  type TableProps,
+  type TextareaProps,
 } from "@tern/core";
 
 // ---------------------------------------------------------------------------
@@ -170,6 +177,12 @@ const STREAMING_TEXT_PROPS = new Set(["stream", "autoScroll", "wrap"]);
  */
 const INPUT_PROPS = new Set(["onChange", "onSubmit", "focusId", "focusManager"]);
 
+/** Component-consumed props of `<Textarea>` that must never reach a scene
+ * node: the callbacks and the focus wiring (mirroring `<Input>`). The
+ * lines/row/col/width/height/scroll edit-model props flow through to the
+ * core factory. */
+const TEXTAREA_PROPS = new Set(["onChange", "onSubmit", "focusId", "focusManager"]);
+
 /** Component-consumed props of `<Spinner>`: `interval` drives the timer, it
  * is not a scene prop. */
 const SPINNER_PROPS = new Set(["interval"]);
@@ -184,10 +197,18 @@ const SPINNER_PROPS = new Set(["interval"]);
 const SELECT_PROPS = new Set(["onChange", "onConfirm", "onDismiss", "focusId", "focusManager"]);
 
 /**
+ * Component-consumed props of `<Modal>` that must never reach a scene node:
+ * `content` is the core `Node[]` modal body (JS bookkeeping the core factory
+ * consumes, mirroring `<Panels>`' `panels`). The open/backdrop/z_index state
+ * props flow through to the core factory.
+ */
+const MODAL_PROPS = new Set(["content"]);
+
+/**
  * Strip the React-only props (and the component-level `<StreamingText>`,
- * `<Input>` / `<Spinner>` / `<Select>` props), leaving the tern node props
- * (style + layout keys) that the core factories and `Node.setProps`
- * understand.
+ * `<Input>` / `<Spinner>` / `<Select>` / `<Modal>` props), leaving the tern
+ * node props (style + layout keys) that the core factories and
+ * `Node.setProps` understand.
  */
 export function toNodeProps(props: TernProps, type?: string): NodeProps {
   const out: NodeProps = {};
@@ -195,8 +216,10 @@ export function toNodeProps(props: TernProps, type?: string): NodeProps {
     if (REACT_RESERVED_PROPS.has(key) || THEME_PROPS.has(key) || value === undefined) continue;
     if (type === "streaming_text" && STREAMING_TEXT_PROPS.has(key)) continue;
     if (type === "input" && INPUT_PROPS.has(key)) continue;
+    if (type === "textarea" && TEXTAREA_PROPS.has(key)) continue;
     if (type === "spinner" && SPINNER_PROPS.has(key)) continue;
     if (type === "select" && SELECT_PROPS.has(key)) continue;
+    if (type === "modal" && MODAL_PROPS.has(key)) continue;
     out[key] = value;
   }
   return out;
@@ -292,6 +315,10 @@ export const hostConfig: HostConfig = {
         return StreamingText(nodeProps);
       case "input":
         return CoreInput(nodeProps);
+      case "textarea":
+        // The lines/row/col edit model is JS bookkeeping the core factory
+        // consumes; `TextareaProps` is an open record over `NodeProps`.
+        return CoreTextarea(nodeProps as TextareaProps);
       case "spinner":
         return CoreSpinner(nodeProps);
       case "status_bar":
@@ -313,6 +340,17 @@ export const hostConfig: HostConfig = {
         // core factory; React children are appended after the (absolutely
         // positioned) scrollbar leaf by the reconciler's tree ops.
         return CoreScrollView(nodeProps as ScrollViewProps);
+      case "table":
+        // The column/row model is JS bookkeeping the core factory consumes;
+        // `TableProps` requires it while `NodeProps` is an open record.
+        return CoreTable(nodeProps as TableProps);
+      case "modal":
+        // The content node list is JS bookkeeping the core factory consumes
+        // (mirroring `Panels`' `panels`); `toNodeProps` strips it above, so
+        // it is re-attached here for the factory.
+        return (props as ModalProps).content === undefined
+          ? CoreModal(nodeProps as ModalProps)
+          : CoreModal({ ...nodeProps, content: (props as ModalProps).content } as ModalProps);
       default:
         throw new Error(`@tern/react: unknown host element type "${type}"`);
     }

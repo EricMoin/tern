@@ -4,11 +4,12 @@
 //! [`Text`] is a leaf that paints its content into its laid-out rect
 //! (clipped to it). [`Box`] is a flex container that paints its background,
 //! optional border glyphs, and a padding inset around its children. The
-//! roadmap components — [`Input`](crate::Input), [`Spinner`](crate::Spinner),
-//! [`Panels`](crate::Panels), [`StatusBar`](crate::StatusBar) — layer richer
-//! interaction state on top of the same pattern: each is a plain-data struct
-//! with builder helpers and editing/mutation methods that materializes as a
-//! subtree of `Box`/`Text` scene nodes (see `docs/components.md`).
+//! roadmap components — [`Input`](crate::Input), [`Textarea`](crate::Textarea),
+//! [`Spinner`](crate::Spinner), [`Panels`](crate::Panels),
+//! [`StatusBar`](crate::StatusBar) — layer richer interaction state on top of
+//! the same pattern: each is a plain-data struct with builder helpers and
+//! editing/mutation methods that materializes as a subtree of `Box`/`Text`
+//! scene nodes (see `docs/components.md`).
 //!
 //! Every container renderable exposes a *root frame* ([`Renderable::root_box`]:
 //! the top-level box's style + layout props) plus its content
@@ -23,6 +24,7 @@ use crate::input::Input;
 use crate::panels::Panels;
 use crate::spinner::Spinner;
 use crate::statusbar::StatusBar;
+use crate::textarea::Textarea;
 
 /// A node in an imperative component tree: a [`Text`] leaf, a [`Box`]
 /// container, or one of the roadmap components.
@@ -34,6 +36,8 @@ pub enum Renderable {
     Box(Box),
     /// A single-line text-entry field ([`Input`]).
     Input(Input),
+    /// A multi-line text-entry field ([`Textarea`]).
+    Textarea(Textarea),
     /// An animated progress indicator ([`Spinner`]).
     Spinner(Spinner),
     /// A stacked, collapsible panel container ([`Panels`]).
@@ -78,6 +82,7 @@ impl Renderable {
         match self {
             Renderable::Box(b) => Some(b.clone()),
             Renderable::Input(i) => Some(i.frame()),
+            Renderable::Textarea(t) => Some(t.frame()),
             Renderable::Spinner(s) => Some(s.frame()),
             Renderable::Panels(p) => Some(p.frame()),
             Renderable::StatusBar(sb) => Some(sb.frame()),
@@ -96,6 +101,7 @@ impl Renderable {
                 }
             }
             Renderable::Input(i) => i.materialize_content(scene, parent),
+            Renderable::Textarea(t) => t.materialize_content(scene, parent),
             Renderable::Spinner(s) => s.materialize_content(scene, parent),
             Renderable::Panels(p) => p.materialize_content(scene, parent),
             Renderable::StatusBar(sb) => sb.materialize_content(scene, parent),
