@@ -14,11 +14,16 @@ import { act, createElement } from "react";
 import {
   Box as CoreBox,
   FocusManager,
+  MODAL_Z_INDEX,
+  closeModal,
   createRenderer,
+  focusManager,
   followTail,
   isStreamFollowing,
+  openModal,
   scrollTo,
   syncStreamTail,
+  useFocus as coreUseFocus,
   type KeyEvent,
   type Node,
   type Renderer,
@@ -36,27 +41,37 @@ import {
   Box,
   DiffView,
   Input,
+  Modal,
   Panels,
   ScrollView,
   Select,
   Spinner,
   StatusBar,
   StreamingText,
+  Table,
   Text,
+  Textarea,
   ThemeProvider,
   createRoot,
   defaultTheme,
+  editTextareaKey,
+  focusAt,
   hostConfig,
   name,
   render,
+  tableKey,
   toNodeProps,
   useApp,
+  useClickToFocus,
   useFocus,
   useInput,
   usePanelMouseDrag,
   useResize,
   useTheme,
+  useWheelScroll,
   version,
+  visibleTableRows,
+  wheelScroll,
 } from "./index.ts";
 import type { AppHandle, TernProps, Theme, ThemeOverrides } from "./index.ts";
 
@@ -132,6 +147,7 @@ Deno.test("public API surface is exported", () => {
     Panels,
     DiffView,
     ScrollView,
+    Table,
     useFocus,
     useResize,
     createRoot,
@@ -213,6 +229,21 @@ Deno.test("createInstance maps roadmap host types to the core factories", () => 
     throw new Error("input must compose a text leaf carrying the value");
   }
 
+  const textarea = hc.createInstance(
+    "textarea",
+    { lines: ["ab", "cd"], row: 1, col: 2 },
+    container,
+    {},
+    null,
+  );
+  if (textarea.type !== "textarea") throw new Error(`textarea type = ${textarea.type}`);
+  if (textarea.props.row !== 1 || textarea.props.col !== 2) {
+    throw new Error(`textarea props = ${JSON.stringify(textarea.props)}`);
+  }
+  if (textarea.children.length !== 2 || textarea.children[1]?.props.caret !== 2) {
+    throw new Error("textarea must compose one line leaf per line with the caret");
+  }
+
   const spinner = hc.createInstance("spinner", {}, container, {}, null);
   if (spinner.type !== "spinner") throw new Error(`spinner type = ${spinner.type}`);
   if (typeof spinner.props.text !== "string" || spinner.props.text === "") {
@@ -279,6 +310,74 @@ Deno.test("createInstance maps scroll_view to the core ScrollView factory", () =
   if (leaf === undefined || leaf.type !== "text" || leaf.props.position !== "absolute") {
     throw new Error("showScrollbar must compose a scrollbar text leaf");
   }
+});
+
+Deno.test("createInstance maps table to the core Table factory", () => {
+  const container = { root: CoreBox(), renderer: mockRenderer().renderer };
+  const table = hc.createInstance(
+    "table",
+    {
+      columns: [
+        { key: "name", header: "Name", width: 8 },
+        { key: "score", header: "Score", width: 5, align: "right" },
+      ],
+      rows: [
+        ["Ada", 92],
+        ["Grace", 88],
+      ],
+      highlight: 1,
+      clip_height: 2,
+    } as never,
+    container,
+    {},
+    null,
+  );
+  if (table.type !== "table") throw new Error(`type = ${table.type}`);
+  if (table.props.highlight !== 1) throw new Error(`highlight = ${table.props.highlight}`);
+  // The column/row model is JS bookkeeping, never scene props.
+  if ("columns" in table.props || "rows" in table.props) {
+    throw new Error("columns/rows must not reach the scene props");
+  }
+  // Sticky structure: header row + content region with one row per data row.
+  const header = table.children[0];
+  const region = table.children[1];
+  if (header?.props.flex_direction !== "row" || header?.children.length !== 2) {
+    throw new Error("header row must compose one cell per column");
+  }
+  if (region === undefined || region.children.length !== 2) {
+    throw new Error(`rows = ${region?.children.length}`);
+  }
+  // The highlighted row (index 1) renders reversed.
+  if (region.children[1]?.children.every((cell) => cell.props.reversed === true) !== true) {
+    throw new Error("the highlighted row's cells must be reversed");
+  }
+});
+
+Deno.test("createInstance maps modal to the core Modal factory", () => {
+  const container = { root: CoreBox(), renderer: mockRenderer().renderer };
+  const body = CoreBox();
+  const modal = hc.createInstance(
+    "modal",
+    { open: true, content: [body] } as never,
+    container,
+    {},
+    null,
+  );
+  if (modal.type !== "modal") throw new Error(`type = ${modal.type}`);
+  // The overlay paints above in-flow content: the high default z_index.
+  if (modal.props.z_index !== MODAL_Z_INDEX) throw new Error(`z_index = ${modal.props.z_index}`);
+  if (modal.props.open !== true) throw new Error(`open = ${modal.props.open}`);
+  // Composition: the dimmed backdrop fill + a centered content box holding
+  // the content node.
+  if (modal.children.length !== 2) throw new Error(`children = ${modal.children.length}`);
+  if (modal.children[0]?.props.position !== "absolute") {
+    throw new Error("backdrop must be an absolute fill");
+  }
+  if (modal.children[1]?.children[0] !== body) {
+    throw new Error("content must live inside the content box");
+  }
+  // The content node list is JS bookkeeping, never a scene prop.
+  if ("content" in modal.props) throw new Error("content must not reach the scene props");
 });
 
 Deno.test("createInstance strips React-only props before the factories", () => {
@@ -541,6 +640,33 @@ Deno.test("toNodeProps strips component-level props for input and spinner", () =
     throw new Error("spinner frame props must flow through");
   }
   if ("interval" in spinnerOut) throw new Error("spinner interval must be stripped");
+
+  // Textarea: the edit-model props flow through; the callbacks and the focus
+  // wiring are stripped (mirroring input).
+  const textareaOut = toNodeProps(
+    {
+      lines: ["a", "b"],
+      row: 1,
+      col: 2,
+      width: 10,
+      focusId: "t",
+      focusManager: new FocusManager(),
+      onChange: () => {},
+      onSubmit: () => {},
+    } as unknown as TernProps,
+    "textarea",
+  );
+  if (
+    textareaOut.row !== 1 ||
+    textareaOut.col !== 2 ||
+    textareaOut.width !== 10 ||
+    (textareaOut.lines as string[]).join(",") !== "a,b"
+  ) {
+    throw new Error(`textarea tern props lost: ${JSON.stringify(textareaOut)}`);
+  }
+  for (const key of ["focusId", "focusManager", "onChange", "onSubmit"]) {
+    if (key in textareaOut) throw new Error(`textarea component prop leaked: ${key}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -955,6 +1081,13 @@ const fakeDragSizes = new Map<object, { width: number; height: number }>();
  * renderer (consumed in order). */
 const pendingMouseEvents: TernEventJs[] = [];
 
+/** The path returned by the drag-test fake `hit_test` (override for the
+ * click-to-focus tests — an empty path models a press off any painted cell). */
+let dragFakeHitPath: bigint[] = [7n];
+
+/** Render calls recorded by the drag-test fake renderer's `render()`. */
+const dragFakeRenders: number[] = [];
+
 /** A size-aware fake native handle: `content_size` measures streamed spans. */
 class FakeStreamNodeHandle {
   readonly kind: string;
@@ -1024,11 +1157,13 @@ class DragFakeTuiRenderer {
     return pendingMouseEvents.splice(0);
   }
   hit_test(_col: number, _row: number): bigint[] {
-    // Every press lands on a painted cell (the routing gate in
-    // `usePanelMouseDrag` consults this).
-    return [7n];
+    // The click-to-focus routing gate consults this; `dragFakeHitPath` is
+    // overridden by the wheel/click tests (an empty path = off any cell).
+    return dragFakeHitPath;
   }
-  render(): void {}
+  render(): void {
+    dragFakeRenders.push(1);
+  }
   destroy(): void {
     this.destroyed = true;
   }
@@ -1507,6 +1642,71 @@ Deno.test("a focused Input receives routed keys and fires onChange/onSubmit", as
   if (manager.activeId !== null) throw new Error("active focus must clear on unregister");
 });
 
+Deno.test("a focused Textarea receives routed keys and fires onChange/onSubmit", async () => {
+  const { renderer, root, keyHandlers } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const manager = new FocusManager();
+  const changes: Array<{ lines: string[]; row: number; col: number }> = [];
+  const submits: Array<{ lines: string[]; row: number; col: number }> = [];
+  // Length read through a function: TS narrows a const-typed empty array's
+  // `length` to 0 (the pushes happen inside closures it cannot see).
+  const changeCount = () => changes.length;
+  const submitCount = () => submits.length;
+
+  function App() {
+    // The tree-level key subscription routes each key through the manager
+    // before falling back to its own (no-op) handler.
+    useInput(() => {}, { focusManager: manager });
+    return createElement(Textarea, {
+      lines: ["hi"],
+      focusId: "main",
+      focusManager: manager,
+      onChange: (state) => changes.push(state),
+      onSubmit: (state) => submits.push(state),
+    });
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(App));
+  });
+
+  if (!manager.has("main")) throw new Error("textarea must register under focusId");
+  // Not focused: keys fall through to the tree handler (a no-op here).
+  for (const handler of keyHandlers) handler(keyEvent({ char: "a" }));
+  if (changeCount() !== 0) throw new Error("unfocused textarea must not receive keys");
+
+  if (!manager.focus("main")) throw new Error("focus(main) must succeed");
+  for (const handler of keyHandlers) handler(keyEvent({ char: "a" }));
+  for (const handler of keyHandlers) handler(keyEvent({ char: "b" }));
+  if (changeCount() !== 2) throw new Error(`onChange count = ${changeCount()}`);
+  // The caret starts at col 0 (no col prop), so chars insert at the head.
+  if (changes[0]!.lines.join(",") !== "ahi" || changes[1]!.lines.join(",") !== "abhi") {
+    throw new Error(`onChange lines = ${changes.map((c) => c.lines.join("")).join(",")}`);
+  }
+  if (changes[1]!.col !== 2) throw new Error(`col = ${changes[1]!.col}`);
+
+  // The routed edits land on the scene node itself (one leaf per line).
+  const textarea = root.children[0]!;
+  if ((textarea.props as { lines?: string[] }).lines?.join(",") !== "abhi") {
+    throw new Error(`node lines = ${JSON.stringify(textarea.props)}`);
+  }
+  if (textarea.children.length !== 1 || textarea.children[0]?.props.text !== "abhi") {
+    throw new Error(`node leaves = ${textarea.children.map((c) => c.props.text).join(",")}`);
+  }
+
+  // Enter splits the line AND routes to onSubmit (the Input mirror).
+  for (const handler of keyHandlers) handler(keyEvent({ name: "enter" }));
+  if (submitCount() !== 1 || submits[0]!.lines.join(",") !== "ab,hi") {
+    throw new Error(`onSubmit = ${JSON.stringify(submits)}`);
+  }
+
+  await act(async () => {
+    ternRoot.unmount();
+  });
+  if (manager.has("main")) throw new Error("textarea must unregister on unmount");
+  if (manager.activeId !== null) throw new Error("active focus must clear on unregister");
+});
+
 Deno.test("Select materializes with filter and option rows and strips component props", async () => {
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
@@ -1539,6 +1739,75 @@ Deno.test("Select materializes with filter and option rows and strips component 
   if (select.children[0]?.props.text !== "filter…") throw new Error("filter row");
   if (select.children[1]?.props.text !== "A" || select.children[2]?.props.text !== "B") {
     throw new Error(`rows = ${select.children.map((c) => c.props.text).join(",")}`);
+  }
+});
+
+Deno.test("Table materializes with a sticky header and rows; tableKey drives the highlight", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(async () => {
+    ternRoot.render(
+      createElement(Table, {
+        columns: [
+          { key: "name", header: "Name", width: 10 },
+          { key: "score", header: "Score", width: 5, align: "right" },
+        ],
+        rows: [
+          ["Ada", 92],
+          ["Grace", 88],
+          ["Linus", 95],
+          ["Alan", 84],
+        ],
+        highlight: 1,
+        clip_height: 2,
+      }),
+    );
+  });
+
+  const table = root.children[0];
+  if (!table || table.type !== "table") throw new Error("expected a table node");
+  // Accessor: tableKey mutates the node in place, which TS's control flow
+  // cannot see — reading through a function defeats the stale narrowing.
+  const highlightOf = () => table.props.highlight as number | undefined;
+  if (highlightOf() !== 1) throw new Error(`highlight = ${highlightOf()}`);
+  // The model is JS bookkeeping, never scene props.
+  if ("columns" in table.props || "rows" in table.props) {
+    throw new Error("columns/rows must not reach the scene props");
+  }
+  // Sticky structure: header row + content region.
+  const header = table.children[0];
+  const region = table.children[1];
+  if (header?.props.flex_direction !== "row" || header?.props.z_index !== 1) {
+    throw new Error("the sticky header must be a row box above the content");
+  }
+  if (header?.children.length !== 2 || header?.children[0]?.props.text !== "Name".padEnd(10)) {
+    throw new Error("the header row lays out padded header cells");
+  }
+  if (region === undefined || region.children.length !== 4) {
+    throw new Error(`rows = ${region?.children.length}`);
+  }
+  // The highlighted row (index 1) is reversed; the others are not.
+  if (region.children[1]?.children.every((cell) => cell.props.reversed === true) !== true) {
+    throw new Error("the highlighted row's cells must be reversed");
+  }
+  if (region.children[0]?.children.some((cell) => cell.props.reversed === true)) {
+    throw new Error("only the highlighted row may be reversed");
+  }
+  // tableKey moves the highlight and auto-scrolls the 2-row viewport.
+  const key = { name: "down", ctrl: false, alt: false, shift: false } as const;
+  let state = tableKey(table, key); // highlight 2 -> scroll_y 1
+  state = tableKey(table, key); // highlight 3 -> scroll_y 2 (clamped at max)
+  if (state.highlight !== 3 || state.scroll_y !== 2) {
+    throw new Error(`tableKey state = ${JSON.stringify(state)}`);
+  }
+  if (highlightOf() !== 3) throw new Error(`node highlight = ${highlightOf()}`);
+  // tableKey rebuilds the composition, so re-read the live content region.
+  const liveRegion = table.children[1];
+  if (liveRegion?.props.scroll_y !== 2) throw new Error(`region scroll_y = ${liveRegion?.props.scroll_y}`);
+  if (visibleTableRows(table).length !== 2) throw new Error(`visible = ${visibleTableRows(table).length}`);
+  if (visibleTableRows(table)[0]?.[0] !== "Linus") {
+    throw new Error(`visible window = ${JSON.stringify(visibleTableRows(table).map((r) => r[0]))}`);
   }
 });
 
@@ -1673,6 +1942,93 @@ Deno.test("Select floating mode sets a z_index prop", async () => {
   if (!select || select.type !== "select") throw new Error("expected a select node");
   if (select.props.z_index !== 0) throw new Error(`z_index = ${select.props.z_index}`);
   if ("floating" in select.props) throw new Error("floating must not reach the scene props");
+});
+
+Deno.test("Modal host materializes an overlay and strips the content prop", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const body = CoreBox();
+
+  await act(async () => {
+    ternRoot.render(createElement(Modal, { open: true, content: [body] }));
+  });
+
+  const modal = root.children[0];
+  if (!modal || modal.type !== "modal") throw new Error("expected a modal node");
+  if (modal.props.z_index !== MODAL_Z_INDEX) throw new Error(`z_index = ${modal.props.z_index}`);
+  if (modal.props.open !== true) throw new Error(`open = ${modal.props.open}`);
+  // The content node list is JS bookkeeping, never a scene prop.
+  if ("content" in modal.props) throw new Error("content must not reach the scene props");
+  // Composition: backdrop fill + a centered content box holding the content.
+  if (modal.children.length !== 2) throw new Error(`children = ${modal.children.length}`);
+  if (modal.children[0]?.props.position !== "absolute") {
+    throw new Error("backdrop must be an absolute fill");
+  }
+  if (modal.children[1]?.children[0] !== body) {
+    throw new Error("content must live inside the content box");
+  }
+});
+
+Deno.test("Modal host: openModal moves focus into the overlay and closeModal restores it", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const modalRef: { current: Node | null } = { current: null };
+  // A dedicated manager isolates the test from the shared focusManager (and
+  // its cross-test registrations): the overlay's focusable registers first,
+  // so openModal's focusFirst() lands inside; the outside focusable is the
+  // prior focus that closing restores.
+  const manager = new FocusManager();
+  const insideBody = CoreBox();
+  const outsideBody = CoreBox();
+  const insideHandle = coreUseFocus("modal-in", insideBody, () => {}, manager);
+  const outsideHandle = coreUseFocus("modal-out", outsideBody, () => {}, manager);
+  const activeId = (): string | null => manager.activeId;
+
+  function App() {
+    return createElement(Modal, { ref: modalRef, open: false, content: [insideBody] });
+  }
+
+  try {
+    await act(async () => {
+      ternRoot.render(createElement(App));
+    });
+
+    const modal = modalRef.current;
+    if (modal === null) throw new Error("ref must receive the modal node");
+    if (modal.type !== "modal") throw new Error(`type = ${modal.type}`);
+    // Fresh reads per assertion — TS narrows a const-typed property access to
+    // its first-checked literal (openModal/closeModal mutate the node's props).
+    const open = (): unknown => modal.props.open;
+    const hidden = (): unknown => modal.props.hidden;
+    if (open() !== false || hidden() !== true) {
+      throw new Error("modal must start hidden (open: false)");
+    }
+
+    manager.focus("modal-out");
+    openModal(modal, manager);
+    if (activeId() !== "modal-in") {
+      throw new Error(`open must focus the overlay's focusable, got ${activeId()}`);
+    }
+    if (open() !== true || hidden() !== false) {
+      throw new Error("openModal must show the overlay");
+    }
+
+    closeModal(modal, manager);
+    if (activeId() !== "modal-out") {
+      throw new Error(`close must restore the prior focus, got ${activeId()}`);
+    }
+    if (open() !== false || hidden() !== true) {
+      throw new Error("closeModal must hide the overlay");
+    }
+
+    await act(async () => {
+      ternRoot.unmount();
+    });
+  } finally {
+    insideHandle.dispose();
+    outsideHandle.dispose();
+    manager.blur();
+  }
 });
 
 Deno.test("ScrollView materializes with region props, children and a scrollbar leaf", async () => {
@@ -1928,4 +2284,164 @@ Deno.test("toNodeProps strips the semantic theme hints from scene props", () => 
     throw new Error(`theme hints leaked: ${JSON.stringify(out)}`);
   }
   if (out.text !== "x") throw new Error(`text = ${out.text}`);
+});
+
+// ---------------------------------------------------------------------------
+// Mouse wheel scroll + click-to-focus (useWheelScroll / useClickToFocus)
+//
+// The hooks subscribe to the renderer's mouse events over the drag-test fake
+// addon (mouse events flow through `poll_events`; `content_size` reads the
+// per-handle registry): `useWheelScroll` maps wheel events onto the ref'd
+// scroll view's offsets (clamped) and re-renders on a consumed wheel;
+// `useClickToFocus` routes a `down_left` on a painted cell (the configurable
+// `dragFakeHitPath`) to the topmost registered focusable via the
+// `FocusManager`.
+// ---------------------------------------------------------------------------
+
+/** A `useWheelScroll` probe: renders a `<ScrollView>` and hooks the wheel
+ * wiring onto its node. */
+function WheelScrollProbe(props: { viewRef: { current: Node | null } }): ReturnType<typeof createElement> {
+  useWheelScroll(props.viewRef);
+  return createElement(
+    ScrollView,
+    { ref: props.viewRef, width: 5, height: 2 },
+    createElement(Text, { text: "aaaaaa\nbbbbb\ncc" }),
+  );
+}
+
+Deno.test("useWheelScroll maps wheel events onto the ref'd view and re-renders on a consumed wheel", async () => {
+  setAddonForTesting(dragFakeAddon);
+  try {
+    const renderer = createRenderer();
+    const ternRoot = createRoot(renderer);
+    const viewRef: { current: Node | null } = { current: null };
+
+    await act(async () => {
+      ternRoot.render(createElement(WheelScrollProbe, { viewRef }));
+    });
+    await act(async () => {}); // flush the mount effect (mouse subscription)
+
+    const view = viewRef.current;
+    if (view === null || view.type !== "scroll_view") throw new Error("ref must receive the scroll view");
+    // Viewport 5x2, content leaf 6x3 -> max offsets (1, 1).
+    fakeDragSizes.set(view.handle, { width: 5, height: 2 });
+    const leaf = view.children.find((child) => child.type === "text");
+    if (leaf === undefined) throw new Error("scroll view must compose a content leaf");
+    fakeDragSizes.set(leaf.handle, { width: 6, height: 3 });
+
+    // The reconciler's commit phases call renderer.render(); reset the spy so
+    // the assertions below count only the wheel wiring's re-renders.
+    dragFakeRenders.length = 0;
+
+    const emit = (kind: string, column: number, row: number): void => {
+      pendingMouseEvents.push({
+        type: "mouse",
+        mouse: { kind, column, row, ctrl: false, alt: false, shift: false },
+      });
+      renderer.pollEvents(0);
+    };
+    const y = (): number => view.props.scroll_y as number;
+
+    emit("scroll_down", 0, 0);
+    if (y() !== 1) throw new Error(`scroll_down scroll_y = ${y()}`);
+    // Read through a function: TS control-flow narrowing would otherwise pin
+    // the array length to the literal of the first assertion.
+    const renderCount = (): number => dragFakeRenders.length;
+    if (renderCount() !== 1) throw new Error(`a consumed wheel must re-render (renders = ${renderCount()})`);
+    emit("scroll_down", 0, 0); // clamps at max 1, still consumed
+    if (y() !== 1) throw new Error(`clamped scroll_y = ${y()}`);
+    if (renderCount() !== 2) {
+      throw new Error(`a wheel at the bound must stay consumed and re-render (renders = ${renderCount()})`);
+    }
+    emit("scroll_up", 0, 0);
+    if (y() !== 0) throw new Error(`scroll_up scroll_y = ${y()}`);
+    // A non-wheel event falls through: no scroll, no re-render.
+    const rendersBefore = renderCount();
+    emit("down_left", 0, 0);
+    if (y() !== 0) throw new Error(`a down_left must not scroll (scroll_y = ${y()})`);
+    if (renderCount() !== rendersBefore) {
+      throw new Error("an unconsumed event must not re-render");
+    }
+
+    await act(async () => {
+      ternRoot.unmount();
+    });
+  } finally {
+    setAddonForTesting(null);
+    pendingMouseEvents.length = 0;
+    dragFakeHitPath = [7n];
+    dragFakeRenders.length = 0;
+    fakeDragSizes.clear();
+  }
+});
+
+/** A `useClickToFocus` probe: registers a focusable box and hooks the click
+ * wiring onto the renderer from the tree context. */
+function ClickFocusProbe(props: {
+  boxRef: { current: Node | null };
+  manager: FocusManager;
+  focused: string[];
+}): ReturnType<typeof createElement> {
+  const { renderer } = useApp();
+  useClickToFocus(renderer);
+  useInput(() => {}, { focusManager: props.manager });
+  useFocus("probe", props.boxRef, (event) => {
+    if (event.name === "char") props.focused.push(event.char ?? "");
+  }, { manager: props.manager });
+  return createElement(Box, { ref: props.boxRef });
+}
+
+Deno.test("useClickToFocus focuses the topmost registered node on a down_left and no-ops on an empty hit_test", async () => {
+  setAddonForTesting(dragFakeAddon);
+  try {
+    const renderer = createRenderer();
+    const ternRoot = createRoot(renderer);
+    const boxRef: { current: Node | null } = { current: null };
+    // The hook routes through the core `focusManager` (its default), so the
+    // probe registers on the same shared manager.
+    const manager = focusManager;
+    const focused: string[] = [];
+
+    await act(async () => {
+      ternRoot.render(createElement(ClickFocusProbe, { boxRef, manager, focused }));
+    });
+    await act(async () => {}); // flush the mount effects (registration + mouse subscription)
+
+    if (!manager.has("probe")) throw new Error("useFocus must register the id");
+
+    const emit = (kind: string, column: number, row: number): void => {
+      pendingMouseEvents.push({
+        type: "mouse",
+        mouse: { kind, column, row, ctrl: false, alt: false, shift: false },
+      });
+      renderer.pollEvents(0);
+    };
+
+    // A down_left on a painted cell (fake hit path non-empty) focuses the box.
+    emit("down_left", 3, 2);
+    if (manager.activeId !== "probe") throw new Error(`active after click = ${manager.activeId}`);
+
+    // The focused element now routes keys: a char key reaches its handler.
+    pendingMouseEvents.push({ type: "key", key: { name: "char", char: "x", ctrl: false, alt: false, shift: false } });
+    renderer.pollEvents(0);
+    if (focused.join("") !== "x") throw new Error(`focused chars = ${focused.join("")}`);
+
+    // A press off any painted cell (empty hit path) is a no-op.
+    dragFakeHitPath = [];
+    manager.blur();
+    emit("down_left", 0, 0);
+    if (manager.activeId !== null) throw new Error(`active after empty hit = ${manager.activeId}`);
+
+    await act(async () => {
+      ternRoot.unmount();
+    });
+  } finally {
+    setAddonForTesting(null);
+    pendingMouseEvents.length = 0;
+    dragFakeHitPath = [7n];
+    dragFakeRenders.length = 0;
+    fakeDragSizes.clear();
+    focusManager.blur();
+    focusManager.unregister("probe");
+  }
 });

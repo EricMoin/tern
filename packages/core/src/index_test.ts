@@ -22,6 +22,9 @@ import {
   DiffView,
   FocusManager,
   Input,
+  MODAL_BACKDROP_BG,
+  MODAL_Z_INDEX,
+  Modal,
   Node,
   PANEL_DRAG_MIN_SIZE,
   Panels,
@@ -33,22 +36,28 @@ import {
   Spinner,
   StatusBar,
   StreamingText,
+  Table,
   Text,
+  Textarea,
   THEME_COMPONENTS,
   THEME_ROLES,
   collapsePanel,
+  closeModal,
   createRenderer,
   defaultTheme,
   dragPanels,
   editKey,
+  editTextareaKey,
   endPanelDrag,
   expandPanel,
   followTail,
+  focusAt,
   focusManager,
   focusPanel,
   isStreamFollowing,
   mergeTheme,
   name,
+  openModal,
   resolveTheme,
   scrollBy,
   scrollTo,
@@ -56,16 +65,23 @@ import {
   selectKey,
   startPanelDrag,
   syncStreamTail,
+  tableKey,
   tick,
   togglePanel,
   useFocus,
   version,
   visibleOptions,
+  visibleTableRows,
+  wheelScroll,
 } from "./index.ts";
 import type {
   SelectOption,
   SelectProps,
   SelectState,
+  TableColumn,
+  TableProps,
+  TableState,
+  TextareaProps,
   Theme,
   ThemeOverrides,
   ThemeResolvableProps,
@@ -76,6 +92,7 @@ import type {
   KeyEvent,
   MouseEventJs,
   NodeHandle,
+  Renderer,
   Span,
   TernEventJs,
   TuiRenderer,
@@ -91,6 +108,10 @@ const pendingEvents: TernEventJs[] = [];
 
 /** The last `(col, row)` passed to the fake `hit_test`, or `null`. */
 let lastHitTest: [number, number] | null = null;
+
+/** The path returned by the fake `hit_test` (override for the click-to-focus
+ * tests — an empty path models a press off any painted cell). */
+let fakeHitPath: bigint[] = [7n, 3n];
 
 /** The native node types materialized through the fake `create_node`. */
 const createdNodes: Array<{ type: string; props: Record<string, unknown> | null }> = [];
@@ -137,7 +158,7 @@ class FakeTuiRenderer {
   }
   hit_test(col: number, row: number): bigint[] {
     lastHitTest = [col, row];
-    return [7n, 3n];
+    return fakeHitPath;
   }
   render(): void {}
   destroy(): void {
@@ -159,6 +180,7 @@ const fakeAddon = {
 function withFakeAddon(fn: () => void): void {
   pendingEvents.length = 0;
   lastHitTest = null;
+  fakeHitPath = [7n, 3n];
   createdNodes.length = 0;
   fakeContentSizes.clear();
   setAddonForTesting(fakeAddon);
@@ -781,6 +803,169 @@ Deno.test("editKey is multi-width aware for the caret column", () => {
   // Backspace over a wide char removes the whole glyph and steps two columns.
   const bs = editKey(Input({ value: "コ", caret: 2 }), { name: "backspace", ...base });
   if (bs.value !== "" || bs.caret !== 0) throw new Error(`backspace wide = ${bs.value}/${bs.caret}`);
+});
+
+// ---------------------------------------------------------------------------
+// Roadmap elements: Textarea
+// ---------------------------------------------------------------------------
+
+Deno.test("Textarea composes one text leaf per line with the caret on the caret's line", () => {
+  const ta = Textarea({ lines: ["ab", "cd"], row: 1, col: 2 });
+  const props = ta.props as TextareaProps;
+  if (ta.type !== "textarea") throw new Error(`type = ${ta.type}`);
+  if (props.lines?.join(",") !== "ab,cd") throw new Error(`lines = ${JSON.stringify(props.lines)}`);
+  if (props.row !== 1 || props.col !== 2) {
+    throw new Error(`row/col = ${props.row}/${props.col}`);
+  }
+  if (ta.children.length !== 2) throw new Error(`leaves = ${ta.children.length}`);
+  const first = ta.children[0]!;
+  const second = ta.children[1]!;
+  if (first.type !== "text" || first.props.text !== "ab") {
+    throw new Error(`leaf 0 = ${JSON.stringify(first.props)}`);
+  }
+  if ("caret" in first.props) throw new Error("the caret's line must be the only one with a caret");
+  if (second.props.text !== "cd" || second.props.caret !== 2) {
+    throw new Error(`leaf 1 = ${JSON.stringify(second.props)}`);
+  }
+  // No explicit width: leaves are not sized, each line stays one display row.
+  if ("width" in first.props) throw new Error("no width prop without a wrap width");
+});
+
+Deno.test("Textarea with a width soft-wraps long lines into multiple leaves", () => {
+  // The caret starts at (0,0) unless props say otherwise; the end-of-text
+  // caret (col 11) rides the second display line.
+  const ta = Textarea({ lines: ["hello world"], width: 5, row: 0, col: 11 });
+  if (ta.children.length !== 2) throw new Error(`leaves = ${ta.children.length}`);
+  const first = ta.children[0]!;
+  const second = ta.children[1]!;
+  if (first.props.text !== "hello" || first.props.width !== 5) {
+    throw new Error(`wrapped line 0 = ${JSON.stringify(first.props)}`);
+  }
+  if ("caret" in first.props) throw new Error("the first wrapped line must not carry the caret");
+  // The caret (end of "hello world") rides the second display line at its
+  // display column (5 — the trailing space at the wrap point is dropped).
+  if (second.props.text !== "world" || second.props.caret !== 5) {
+    throw new Error(`wrapped line 1 = ${JSON.stringify(second.props)}`);
+  }
+  // Default caret (0,0) sits on the first display line instead.
+  const atStart = Textarea({ lines: ["hello world"], width: 5 });
+  if (atStart.children[0]?.props.caret !== 0 || "caret" in (atStart.children[1]?.props ?? {})) {
+    throw new Error(`default caret must ride the first line: ${JSON.stringify(atStart.children.map((c) => c.props))}`);
+  }
+});
+
+Deno.test("editTextareaKey inserts chars and splits lines on enter", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  const ta = Textarea({ lines: ["ab", "cd"], row: 1, col: 1 });
+  const afterChar = editTextareaKey(ta, { name: "char", char: "X", ...base });
+  if (afterChar.lines.join(",") !== "ab,cXd" || afterChar.col !== 2) {
+    throw new Error(`after insert = ${JSON.stringify(afterChar)}`);
+  }
+  if ((ta.props as TextareaProps).lines?.join(",") !== "ab,cXd") {
+    throw new Error(`node lines = ${JSON.stringify(ta.props.lines)}`);
+  }
+  if (ta.children[1]?.props.text !== "cXd" || ta.children[1]?.props.caret !== 2) {
+    throw new Error(`node leaf = ${JSON.stringify(ta.children[1]?.props)}`);
+  }
+  // Enter splits the line at the caret; the tail becomes a new line.
+  const afterEnter = editTextareaKey(ta, { name: "enter", ...base });
+  if (afterEnter.lines.join(",") !== "ab,cX,d" || afterEnter.row !== 2 || afterEnter.col !== 0) {
+    throw new Error(`after enter = ${JSON.stringify(afterEnter)}`);
+  }
+  if (ta.children.length !== 3) throw new Error(`leaves after split = ${ta.children.length}`);
+  if (ta.children[2]?.props.text !== "d" || ta.children[2]?.props.caret !== 0) {
+    throw new Error(`split tail leaf = ${JSON.stringify(ta.children[2]?.props)}`);
+  }
+});
+
+Deno.test("editTextareaKey backspace and delete remove chars and join lines", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  // Backspace at the start of a line joins the previous line at the join point.
+  const join = Textarea({ lines: ["ab", "cd"], row: 1, col: 0 });
+  const joined = editTextareaKey(join, { name: "backspace", ...base });
+  if (joined.lines.join(",") !== "abcd" || joined.row !== 0 || joined.col !== 2) {
+    throw new Error(`backspace join = ${JSON.stringify(joined)}`);
+  }
+  // Delete at the end of a line joins the next line.
+  const fwd = Textarea({ lines: ["ab", "cd"], row: 0, col: 2 });
+  const deleted = editTextareaKey(fwd, { name: "delete", ...base });
+  if (deleted.lines.join(",") !== "abcd" || deleted.row !== 0 || deleted.col !== 2) {
+    throw new Error(`delete join = ${JSON.stringify(deleted)}`);
+  }
+  // Boundary deletes are no-ops.
+  const top = Textarea({ lines: ["x"], row: 0, col: 0 });
+  const noBack = editTextareaKey(top, { name: "backspace", ...base });
+  if (noBack.lines.join(",") !== "x") {
+    throw new Error(`backspace at top = ${JSON.stringify(noBack)}`);
+  }
+  const bottom = Textarea({ lines: ["x"], row: 0, col: 1 });
+  const noFwd = editTextareaKey(bottom, { name: "delete", ...base });
+  if (noFwd.lines.join(",") !== "x") throw new Error(`delete at bottom = ${JSON.stringify(noFwd)}`);
+});
+
+Deno.test("editTextareaKey navigates left/right/home/end with wrap-around", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  const mk = () => Textarea({ lines: ["ab", "cd"], row: 1, col: 0 });
+  const left = editTextareaKey(mk(), { name: "left", ...base });
+  if (left.row !== 0 || left.col !== 2) {
+    throw new Error(`left wraps up = ${left.row}/${left.col}`);
+  }
+  const right = editTextareaKey(mk(), { name: "right", ...base });
+  if (right.row !== 1 || right.col !== 1) throw new Error(`right = ${right.row}/${right.col}`);
+  const end = editTextareaKey(mk(), { name: "end", ...base });
+  if (end.row !== 1 || end.col !== 2) throw new Error(`end = ${end.row}/${end.col}`);
+  const home = editTextareaKey(mk(), { name: "home", ...base });
+  if (home.row !== 1 || home.col !== 0) throw new Error(`home = ${home.row}/${home.col}`);
+  // Unknown keys leave the textarea unchanged.
+  const unknown = editTextareaKey(mk(), { name: "tab", ...base });
+  if (unknown.lines.join(",") !== "ab,cd" || unknown.row !== 1 || unknown.col !== 0) {
+    throw new Error(`tab must not edit: ${JSON.stringify(unknown)}`);
+  }
+});
+
+Deno.test("editTextareaKey up/down traverse soft-wrapped display lines", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  // "hello world" wraps at width 5 into "hello" / "world"; the caret at the
+  // end sits on display row 1 at display col 5.
+  const ta = Textarea({ lines: ["hello world"], width: 5, row: 0, col: 11 });
+  const up = editTextareaKey(ta, { name: "up", ...base });
+  if (up.row !== 0 || up.col !== 5) throw new Error(`up = ${up.row}/${up.col}`);
+  const down = editTextareaKey(ta, { name: "down", ...base });
+  if (down.row !== 0 || down.col !== 11) throw new Error(`down = ${down.row}/${down.col}`);
+  // The preferred column sticks across the vertical run: from the end of the
+  // last display line, three ups climb the display rows keeping col 5.
+  const multi = Textarea({ lines: ["alpha beta", "gamma delta"], width: 5, row: 1, col: 11 });
+  const u1 = editTextareaKey(multi, { name: "up", ...base });
+  if (u1.row !== 1 || u1.col !== 5) throw new Error(`u1 = ${u1.row}/${u1.col}`);
+  const u2 = editTextareaKey(multi, { name: "up", ...base });
+  if (u2.row !== 0 || u2.col !== 10) throw new Error(`u2 = ${u2.row}/${u2.col}`);
+  const u3 = editTextareaKey(multi, { name: "up", ...base });
+  if (u3.row !== 0 || u3.col !== 5) throw new Error(`u3 = ${u3.row}/${u3.col}`);
+  const d1 = editTextareaKey(multi, { name: "down", ...base });
+  if (d1.row !== 0 || d1.col !== 10) throw new Error(`d1 = ${d1.row}/${d1.col}`);
+});
+
+Deno.test("editTextareaKey scrolls vertically to keep the caret visible", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  const scrollOf = (node: Node): number => (node.props as TextareaProps).scroll ?? 0;
+  const ta = Textarea({ lines: ["1", "2", "3", "4", "5"], height: 2, row: 0, col: 0 });
+  if (scrollOf(ta) !== 0) throw new Error(`initial scroll = ${scrollOf(ta)}`);
+  editTextareaKey(ta, { name: "down", ...base }); // (1,0) — visible
+  if (scrollOf(ta) !== 0) throw new Error(`scroll after 1 down = ${scrollOf(ta)}`);
+  editTextareaKey(ta, { name: "down", ...base }); // (2,0) — below the window
+  if (scrollOf(ta) !== 1) throw new Error(`scroll after 2 downs = ${scrollOf(ta)}`);
+  // Only the visible window is composed: rows 2 and 3 (scroll 1, height 2).
+  if (ta.children.length !== 2) throw new Error(`window leaves = ${ta.children.length}`);
+  if (ta.children[0]?.props.text !== "2" || ta.children[1]?.props.text !== "3") {
+    throw new Error(`window = ${ta.children.map((c) => c.props.text).join(",")}`);
+  }
+  if (ta.children[1]?.props.caret !== 0) {
+    throw new Error(`caret on the windowed leaf = ${ta.children[1]?.props.caret}`);
+  }
+  editTextareaKey(ta, { name: "up", ...base }); // (1,0) — still inside [1,3)
+  if (scrollOf(ta) !== 1) throw new Error(`scroll stays while visible = ${scrollOf(ta)}`);
+  editTextareaKey(ta, { name: "up", ...base }); // (0,0) — above the window
+  if (scrollOf(ta) !== 0) throw new Error(`scroll after up past the top = ${scrollOf(ta)}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -1480,6 +1665,202 @@ Deno.test("Select floating mode sets a z_index prop", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Roadmap elements: Table
+// ---------------------------------------------------------------------------
+
+const tableColumns: TableColumn[] = [
+  { key: "name", header: "Name", width: 10 },
+  { key: "role", header: "Role", width: 8 },
+  { key: "score", header: "Score", width: 5, align: "right" },
+];
+
+const tableRows: (string | number)[][] = [
+  ["Ada", "dev", 92],
+  ["Grace", "dev", 88],
+  ["Linus", "maintainer", 95],
+  ["Alan", "researcher", 84],
+  ["Margaret", "flight", 91],
+  ["Dennis", "systems", 87],
+  ["Ken", "systems", 90],
+  ["Barbara", "ui", 86],
+  ["Edsger", "algorithms", 89],
+  ["Donald", "typesetting", 93],
+];
+
+const tableKeyBase = { ctrl: false, alt: false, shift: false } as const;
+
+Deno.test("Table composes a sticky header row above a content region of per-column rows", () => {
+  const table = Table({ columns: tableColumns, rows: tableRows });
+  if (table.type !== "table") throw new Error(`type = ${table.type}`);
+  if (table.props.flex_direction !== "column") throw new Error(`flex_direction = ${table.props.flex_direction}`);
+  if (table.props.highlight !== 0) throw new Error(`highlight = ${table.props.highlight}`);
+  if (table.props.sticky_header !== true) throw new Error(`sticky_header = ${table.props.sticky_header}`);
+  // The model is JS bookkeeping, never scene props.
+  if ("columns" in table.props || "rows" in table.props) {
+    throw new Error("columns/rows must not reach the scene props");
+  }
+  // Sticky structure: header row (child 0) + content region (child 1).
+  if (table.children.length !== 2) throw new Error(`children = ${table.children.length}`);
+  const header = table.children[0];
+  if (header === undefined || header.type !== "box" || header.props.flex_direction !== "row") {
+    throw new Error("header must be a row box");
+  }
+  if (header.props.z_index !== 1) throw new Error(`header z_index = ${header.props.z_index}`);
+  if (header.children.length !== tableColumns.length) throw new Error(`header cells = ${header.children.length}`);
+  const region = table.children[1];
+  if (region === undefined || region.type !== "box" || region.props.flex_direction !== "column") {
+    throw new Error("content region must be a column box");
+  }
+  if (region.children.length !== tableRows.length) throw new Error(`rows = ${region.children.length}`);
+  for (let i = 0; i < region.children.length; i++) {
+    const row = region.children[i];
+    if (row === undefined || row.type !== "box" || row.props.flex_direction !== "row") {
+      throw new Error(`row ${i} must be a row box`);
+    }
+    if (row.children.length !== tableColumns.length) throw new Error(`row ${i} cells = ${row.children.length}`);
+  }
+});
+
+Deno.test("Table cells align per column (left/right/center) and truncate wide content", () => {
+  const table = Table({ columns: tableColumns, rows: tableRows });
+  const row0 = table.children[1]?.children[0];
+  // Name: left-aligned to width 10 (padded with trailing spaces).
+  if (row0?.children[0]?.props.text !== "Ada".padEnd(10)) {
+    throw new Error(`name cell = ${JSON.stringify(row0?.children[0]?.props.text)}`);
+  }
+  // Score: right-aligned to width 5 (padded with leading spaces).
+  if (row0?.children[2]?.props.text !== "92".padStart(5)) {
+    throw new Error(`score cell = ${JSON.stringify(row0?.children[2]?.props.text)}`);
+  }
+  // Each cell pins its column width so every column lines up.
+  if (row0?.children[0]?.props.width !== 10 || row0?.children[2]?.props.width !== 5) {
+    throw new Error(`cell widths = ${JSON.stringify(row0?.children.map((c) => c.props.width))}`);
+  }
+  // Center alignment splits the padding evenly.
+  const centered = Table({
+    columns: [{ key: "c", header: "C", width: 7, align: "center" }],
+    rows: [["x"]],
+  });
+  if (centered.children[1]?.children[0]?.children[0]?.props.text !== "   x   ") {
+    throw new Error(`center cell = ${JSON.stringify(centered.children[1]?.children[0]?.children[0]?.props.text)}`);
+  }
+  // Content wider than the column is truncated to the width, never mid-glyph
+  // ("宽度对齐测试" is 6 wide chars -> display width 12 -> 4 kept = 2 chars).
+  const wide = Table({
+    columns: [{ key: "n", header: "N", width: 4 }],
+    rows: [["宽度对齐测试"]],
+  });
+  if (wide.children[1]?.children[0]?.children[0]?.props.text !== "宽度") {
+    throw new Error(`truncated cell = ${JSON.stringify(wide.children[1]?.children[0]?.children[0]?.props.text)}`);
+  }
+});
+
+Deno.test("Table routes scroll_x to the root and scroll_y/clip_height to the content region", () => {
+  const table = Table({ columns: tableColumns, rows: tableRows, scroll_x: 4, scroll_y: 3, clip_height: 5 });
+  // scroll_x pans header + rows together, so it stays on the root.
+  if (table.props.scroll_x !== 4) throw new Error(`scroll_x = ${table.props.scroll_x}`);
+  // scroll_y is the content region's state — the root never carries it (it
+  // would pan the sticky header with the rows).
+  if ("scroll_y" in table.props) throw new Error("scroll_y must not reach the root props");
+  const region = table.children[1];
+  if (region?.props.scroll_y !== 3) throw new Error(`region scroll_y = ${region?.props.scroll_y}`);
+  if (region?.props.clip_height !== 5) throw new Error(`region clip_height = ${region?.props.clip_height}`);
+});
+
+Deno.test("visibleTableRows returns the viewport window under scroll and clip_height", () => {
+  const table = Table({ columns: tableColumns, rows: tableRows, scroll_y: 2, clip_height: 3 });
+  const visible = visibleTableRows(table);
+  if (visible.length !== 3) throw new Error(`visible = ${visible.length}`);
+  if (visible[0]?.[0] !== "Linus" || visible[2]?.[0] !== "Margaret") {
+    throw new Error(`visible = ${JSON.stringify(visible.map((r) => r[0]))}`);
+  }
+  // Without clip_height the whole remaining list is the window.
+  const all = Table({ columns: tableColumns, rows: tableRows });
+  if (visibleTableRows(all).length !== tableRows.length) {
+    throw new Error(`window = ${visibleTableRows(all).length}`);
+  }
+});
+
+Deno.test("tableKey moves the highlight with up/down and clamps at the ends", () => {
+  const table = Table({ columns: tableColumns, rows: tableRows });
+  const down = tableKey(table, { name: "down", ...tableKeyBase });
+  if (down.highlight !== 1) throw new Error(`down = ${down.highlight}`);
+  const up = tableKey(table, { name: "up", ...tableKeyBase });
+  if (up.highlight !== 0) throw new Error(`up = ${up.highlight}`);
+  // Clamp at the top.
+  const upClamped = tableKey(Table({ columns: tableColumns, rows: tableRows }), { name: "up", ...tableKeyBase });
+  if (upClamped.highlight !== 0) throw new Error(`up clamp = ${upClamped.highlight}`);
+  // Clamp at the bottom (a few extra downs past the last row).
+  const bottom = Table({ columns: tableColumns, rows: tableRows });
+  for (let i = 0; i < tableRows.length + 2; i++) tableKey(bottom, { name: "down", ...tableKeyBase });
+  const clamped = tableKey(bottom, { name: "down", ...tableKeyBase });
+  if (clamped.highlight !== tableRows.length - 1) {
+    throw new Error(`down clamp = ${clamped.highlight}`);
+  }
+  // The composition reflects the moved highlight: the highlighted row's
+  // cells are reversed, and only its.
+  const moved = Table({ columns: tableColumns, rows: tableRows });
+  tableKey(moved, { name: "down", ...tableKeyBase });
+  tableKey(moved, { name: "down", ...tableKeyBase });
+  const row2 = moved.children[1]?.children[2];
+  if (row2?.children.every((cell) => cell.props.reversed === true) !== true) {
+    throw new Error("the highlighted row must be reversed");
+  }
+  if (moved.children[1]?.children[0]?.children.some((cell) => cell.props.reversed === true)) {
+    throw new Error("only the highlighted row may be reversed");
+  }
+  // Unknown keys leave the state unchanged.
+  const tab = tableKey(moved, { name: "tab", ...tableKeyBase });
+  if (tab.highlight !== 2) throw new Error(`tab must not move = ${tab.highlight}`);
+});
+
+Deno.test("tableKey auto-scrolls to keep the highlight visible and clamps scroll_y", () => {
+  const table = Table({ columns: tableColumns, rows: tableRows, clip_height: 3 });
+  // Down from 0: highlights 1, 2 fit the window [0, 2]; highlight 3 scrolls.
+  tableKey(table, { name: "down", ...tableKeyBase });
+  tableKey(table, { name: "down", ...tableKeyBase });
+  const scrolled = tableKey(table, { name: "down", ...tableKeyBase });
+  if (scrolled.highlight !== 3 || scrolled.scroll_y !== 1) {
+    throw new Error(`scrolled = ${JSON.stringify(scrolled)}`);
+  }
+  // The scroll offset lands on the content region's props.
+  if (table.children[1]?.props.scroll_y !== 1) {
+    throw new Error(`region scroll_y = ${table.children[1]?.props.scroll_y}`);
+  }
+  // Down to the last row: scroll_y clamps at rows.length - clip_height.
+  let last = scrolled;
+  for (let i = 0; i < 10; i++) last = tableKey(table, { name: "down", ...tableKeyBase });
+  if (last.highlight !== tableRows.length - 1) throw new Error(`highlight = ${last.highlight}`);
+  if (last.scroll_y !== tableRows.length - 3) throw new Error(`scroll_y clamp = ${last.scroll_y}`);
+  // Up back toward the top: scroll_y clamps at 0.
+  let up = last;
+  for (let i = 0; i < 10; i++) up = tableKey(table, { name: "up", ...tableKeyBase });
+  if (up.highlight !== 0 || up.scroll_y !== 0) {
+    throw new Error(`up back to top = ${JSON.stringify(up)}`);
+  }
+});
+
+Deno.test("sticky_header: false moves the header into the scrollable content region", () => {
+  const table = Table({ columns: tableColumns, rows: tableRows, sticky_header: false });
+  if (table.props.sticky_header !== false) throw new Error(`sticky_header = ${table.props.sticky_header}`);
+  // Single child: the content region, whose first child is the header row
+  // (it scrolls away with the rows, so no sticky z_index).
+  if (table.children.length !== 1) throw new Error(`children = ${table.children.length}`);
+  const region = table.children[0];
+  if (region === undefined || region.type !== "box" || region.props.flex_direction !== "column") {
+    throw new Error("content region must be a column box");
+  }
+  const header = region.children[0];
+  if (header === undefined || header.props.flex_direction !== "row" || header.children.length !== tableColumns.length) {
+    throw new Error("the header must be the region's first child");
+  }
+  if (header.props.z_index !== undefined) throw new Error(`header z_index = ${header.props.z_index}`);
+  if (region.children.length !== tableRows.length + 1) {
+    throw new Error(`region children = ${region.children.length}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Focus manager
 // ---------------------------------------------------------------------------
 
@@ -1548,6 +1929,255 @@ Deno.test("useFocus registers, focuses and disposes through the manager", () => 
 Deno.test("the default focus manager is a FocusManager instance", () => {
   if (!(focusManager instanceof FocusManager)) {
     throw new Error("default focus manager must be a FocusManager");
+  }
+});
+
+function assertActiveId(manager: FocusManager, expected: string | null, label: string): void {
+  const actual = manager.activeId;
+  if (actual !== expected) {
+    throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+  }
+}
+
+function assertEvents(events: Array<string | null>, expected: Array<string | null>, label: string): void {
+  if (events.length !== expected.length) {
+    throw new Error(`${label}: expected ${expected.length} events, got ${events.length}: ${JSON.stringify(events)}`);
+  }
+  for (let i = 0; i < events.length; i++) {
+    if (events[i] !== expected[i]) {
+      throw new Error(`${label}: event ${i} = ${JSON.stringify(events[i])}, expected ${JSON.stringify(expected[i])}`);
+    }
+  }
+}
+
+Deno.test("FocusManager next/prev/focusFirst traverse registration order with wrap-around", () => {
+  const manager = new FocusManager();
+  manager.register({ id: "a", node: Text({ text: "a" }), onKey: () => {} });
+  manager.register({ id: "b", node: Text({ text: "b" }), onKey: () => {} });
+  manager.register({ id: "c", node: Text({ text: "c" }), onKey: () => {} });
+  // With nothing focused, next()/prev() start at the first element.
+  if (manager.next() !== true) throw new Error("next() with no active must focus the first");
+  assertActiveId(manager, "a", "next() start");
+  if (manager.next() !== true) throw new Error("next() must move forward");
+  assertActiveId(manager, "b", "next() forward");
+  if (manager.next() !== true) throw new Error("next() must reach the last");
+  assertActiveId(manager, "c", "next() last");
+  if (manager.next() !== true) throw new Error("next() must wrap to the first");
+  assertActiveId(manager, "a", "next() wrap");
+  if (manager.prev() !== true) throw new Error("prev() must wrap to the last");
+  assertActiveId(manager, "c", "prev() wrap");
+  if (manager.prev() !== true) throw new Error("prev() must move backward");
+  assertActiveId(manager, "b", "prev() backward");
+  if (manager.prev() !== true) throw new Error("prev() must reach the first");
+  assertActiveId(manager, "a", "prev() first");
+  if (manager.focusFirst() !== true) throw new Error("focusFirst() must succeed");
+  assertActiveId(manager, "a", "focusFirst()");
+  // A single-element manager: next/prev stay on the only element.
+  const single = new FocusManager();
+  single.register({ id: "only", node: Text({ text: "x" }), onKey: () => {} });
+  if (single.next() !== true) throw new Error("single next() must succeed");
+  assertActiveId(single, "only", "single next()");
+  if (single.prev() !== true) throw new Error("single prev() must succeed");
+  assertActiveId(single, "only", "single prev()");
+  // An empty manager: traversal is a no-op that reports failure.
+  const empty = new FocusManager();
+  if (empty.next() !== false) throw new Error("next() on empty manager must fail");
+  if (empty.prev() !== false) throw new Error("prev() on empty manager must fail");
+  if (empty.focusFirst() !== false) throw new Error("focusFirst() on empty manager must fail");
+});
+
+Deno.test("FocusManager subscribe fires exactly once per focus/blur/unregister change", () => {
+  const manager = new FocusManager();
+  const events: Array<string | null> = [];
+  const unsub = manager.subscribe((id) => events.push(id));
+  manager.register({ id: "a", node: Text({ text: "a" }), onKey: () => {} });
+  manager.register({ id: "b", node: Text({ text: "b" }), onKey: () => {} });
+  manager.focus("a");
+  manager.focus("b");
+  manager.blur();
+  assertEvents(events, ["a", "b", null], "focus/blur");
+  // Unregistering the active id also reports the cleared focus.
+  manager.focus("a");
+  manager.unregister("a");
+  assertEvents(events, ["a", "b", null, "a", null], "unregister of active id");
+  // Unsubscribing stops delivery.
+  unsub();
+  manager.focus("b");
+  assertEvents(events, ["a", "b", null, "a", null], "after unsubscribe");
+});
+
+Deno.test("FocusManager focusIdFor maps nodes to registered ids and clears on unregister", () => {
+  const manager = new FocusManager();
+  const aNode = Text({ text: "a" });
+  const bNode = Text({ text: "b" });
+  if (manager.focusIdFor(aNode) !== null) throw new Error("unregistered node must map to null");
+  manager.register({ id: "a", node: aNode, onKey: () => {} });
+  manager.register({ id: "b", node: bNode, onKey: () => {} });
+  if (manager.focusIdFor(aNode) !== "a") throw new Error("focusIdFor(aNode) must be 'a'");
+  if (manager.focusIdFor(bNode) !== "b") throw new Error("focusIdFor(bNode) must be 'b'");
+  if (manager.focusIdFor(Text({ text: "other" })) !== null) {
+    throw new Error("foreign node must map to null");
+  }
+  manager.unregister("a");
+  if (manager.focusIdFor(aNode) !== null) throw new Error("focusIdFor must be null after unregister");
+  if (manager.focusIdFor(bNode) !== "b") throw new Error("other mapping must survive");
+  // Re-registering the same node under a new id updates the mapping.
+  manager.register({ id: "a2", node: aNode, onKey: () => {} });
+  if (manager.focusIdFor(aNode) !== "a2") throw new Error("re-registered node must map to the new id");
+});
+
+Deno.test("FocusManager focus/blur are idempotent and notify only on change", () => {
+  const manager = new FocusManager();
+  const events: Array<string | null> = [];
+  manager.subscribe((id) => events.push(id));
+  manager.register({ id: "a", node: Text({ text: "a" }), onKey: () => {} });
+  manager.focus("a");
+  assertActiveId(manager, "a", "focus(a)");
+  // Re-focusing the active id is a no-op: state and notifications unchanged.
+  manager.focus("a");
+  assertActiveId(manager, "a", "idempotent focus");
+  manager.blur();
+  assertActiveId(manager, null, "blur");
+  // Blurring when already blurred is a no-op.
+  manager.blur();
+  assertActiveId(manager, null, "idempotent blur");
+  // Focusing an unregistered id fails without disturbing state.
+  if (manager.focus("missing") !== false) throw new Error("focus on unregistered id must fail");
+  assertActiveId(manager, null, "failed focus");
+  assertEvents(events, ["a", null], "idempotent notifications");
+});
+
+// ---------------------------------------------------------------------------
+// Roadmap elements: Modal
+// ---------------------------------------------------------------------------
+
+Deno.test("Modal composes a dimmed backdrop plus a centered content box at a high z_index", () => {
+  const content = Text({ text: "hi" });
+  const modal = Modal({ open: true, content: [content] });
+  if (modal.type !== "modal") throw new Error(`type = ${modal.type}`);
+  // The overlay paints above in-flow content (z 0; the scrollbar/sticky
+  // header stack at 1): the root box carries the high default z_index.
+  if (modal.props.z_index !== MODAL_Z_INDEX) throw new Error(`z_index = ${modal.props.z_index}`);
+  if (modal.props.position !== "absolute") throw new Error(`position = ${modal.props.position}`);
+  if (modal.props.justify_content !== "center" || modal.props.align_items !== "center") {
+    throw new Error(`centering = ${JSON.stringify(modal.props)}`);
+  }
+  if (modal.props.open !== true) throw new Error(`open = ${modal.props.open}`);
+  if (modal.props.hidden !== false) throw new Error(`hidden = ${modal.props.hidden}`);
+  if (modal.props.display !== "flex") throw new Error(`display = ${modal.props.display}`);
+  // An explicit z_index is honored.
+  const layered = Modal({ z_index: 5 });
+  if (layered.props.z_index !== 5) throw new Error(`layered z_index = ${layered.props.z_index}`);
+  // Composition: a dimmed backdrop fill + a centered content box holding the
+  // content nodes.
+  if (modal.children.length !== 2) throw new Error(`children = ${modal.children.length}`);
+  const backdrop = modal.children[0];
+  if (backdrop?.props.position !== "absolute") throw new Error("backdrop must be an absolute fill");
+  if (backdrop?.props.bg !== MODAL_BACKDROP_BG || backdrop?.props.dim !== true) {
+    throw new Error(`backdrop = ${JSON.stringify(backdrop?.props)}`);
+  }
+  const box = modal.children[1];
+  if (box?.type !== "box" || box?.props.flex_direction !== "column") {
+    throw new Error("content box must be a flex column");
+  }
+  if (box?.children[0] !== content) throw new Error("content must live inside the content box");
+  // `backdrop: false` skips the dim layer (content box only).
+  const bare = Modal({ backdrop: false });
+  if (bare.children.length !== 1) throw new Error(`bare children = ${bare.children.length}`);
+  // `content` is JS bookkeeping, never a scene prop.
+  if ("content" in modal.props) throw new Error("content must not reach the scene props");
+});
+
+Deno.test("Modal starts hidden and openModal/closeModal toggle the visible state", () => {
+  // The default (open: false) modal is hidden. Fresh reads per assertion —
+  // TS narrows a const-typed property access to its first-checked literal.
+  const closed = Modal();
+  const open = (): unknown => closed.props.open;
+  const hidden = (): unknown => closed.props.hidden;
+  const display = (): unknown => closed.props.display;
+  if (open() !== false) throw new Error(`open = ${open()}`);
+  if (hidden() !== true) throw new Error(`hidden = ${hidden()}`);
+  if (display() !== "none") throw new Error(`display = ${display()}`);
+  // openModal shows it; closeModal hides it again.
+  openModal(closed);
+  if (open() !== true || hidden() !== false || display() !== "flex") {
+    throw new Error(`after open = ${JSON.stringify(closed.props)}`);
+  }
+  closeModal(closed);
+  if (open() !== false || hidden() !== true || display() !== "none") {
+    throw new Error(`after close = ${JSON.stringify(closed.props)}`);
+  }
+  // Opening an already-open modal is a no-op (the focus record must not be
+  // overwritten by the focus that now sits inside the overlay).
+  openModal(closed);
+  openModal(closed);
+  if (open() !== true) throw new Error(`double open = ${JSON.stringify(closed.props)}`);
+  closeModal(closed);
+  closeModal(closed);
+  if (open() !== false) throw new Error(`double close = ${JSON.stringify(closed.props)}`);
+  // A foreign node (not created by the Modal factory) is left alone.
+  const box = Box();
+  openModal(box);
+  if ("open" in box.props) throw new Error("openModal must ignore non-modal nodes");
+  closeModal(box);
+});
+
+Deno.test("openModal focuses the first registered focusable and closeModal restores the prior focus", () => {
+  const modal = Modal({});
+  const manager = new FocusManager();
+  const insideNode = Text({ text: "in" });
+  const outsideNode = Text({ text: "out" });
+  // The overlay's focusable registers first, so `openModal`'s `focusFirst()`
+  // lands inside the overlay; the outside focusable is the prior focus that
+  // closing restores. Fresh read per assertion (see the toggle test above).
+  const inside = useFocus("modal-in", insideNode, () => {}, manager);
+  const outside = useFocus("modal-out", outsideNode, () => {}, manager);
+  const activeId = (): string | null => manager.activeId;
+  try {
+    manager.focus("modal-out");
+    if (activeId() !== "modal-out") throw new Error("setup focus failed");
+    openModal(modal, manager);
+    if (activeId() !== "modal-in") {
+      throw new Error(`open must focus the first registered focusable, got ${activeId()}`);
+    }
+    closeModal(modal, manager);
+    if (activeId() !== "modal-out") {
+      throw new Error(`close must restore the prior focus, got ${activeId()}`);
+    }
+  } finally {
+    inside.dispose();
+    outside.dispose();
+    manager.blur();
+  }
+});
+
+Deno.test("closeModal falls back to a blur when nothing was focused before the open", () => {
+  const modal = Modal({});
+  const manager = new FocusManager();
+  const insideNode = Text({ text: "in" });
+  const inside = useFocus("modal-fallback-in", insideNode, () => {}, manager);
+  const activeId = (): string | null => manager.activeId;
+  try {
+    // Nothing is focused when the modal opens: the record is null.
+    openModal(modal, manager);
+    if (activeId() !== "modal-fallback-in") {
+      throw new Error(`focusFirst must focus the registered focusable, got ${activeId()}`);
+    }
+    closeModal(modal, manager);
+    if (activeId() !== null) {
+      throw new Error(`close with no recorded focus must blur, got ${activeId()}`);
+    }
+    // A recorded id that was unregistered meanwhile also falls back to blur.
+    manager.focus("modal-fallback-in");
+    openModal(modal, manager);
+    inside.dispose(); // unregister the recorded id while the modal is open
+    closeModal(modal, manager);
+    if (activeId() !== null) {
+      throw new Error(`close with an unregistered recorded id must blur, got ${activeId()}`);
+    }
+  } finally {
+    inside.dispose();
+    manager.blur();
   }
 });
 
@@ -2081,5 +2711,197 @@ Deno.test("followTail on a plain streaming node enables auto-scroll from scratch
     if (!isStreamFollowing(node)) throw new Error("followTail must enable a raw node's follow");
     // 4 rows - clip 2 = tail 2.
     if (node.props.scroll_y !== 2) throw new Error(`raw snap scroll_y = ${node.props.scroll_y}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mouse wheel scroll + click-to-focus
+//
+// `wheelScroll` maps terminal wheel events (`scroll_up` / `scroll_down` /
+// `scroll_left` / `scroll_right`) onto a scrollable node's offsets via
+// `scrollBy` (consumed = a wheel event on a scrollable node; clamping and
+// no-ops follow the scroll helpers). `focusAt` routes a `down_left` press on
+// a painted cell (the fake `hit_test` path, configurable via `fakeHitPath`)
+// to the topmost registered focusable node through the `FocusManager`
+// (`focusIdFor` + `focus`).
+// ---------------------------------------------------------------------------
+
+/** A `ScrollView` with a 5x2 viewport and a 6x3 content leaf attached under a
+ * fresh renderer over the fake addon: both axes can scroll (max offsets
+ * (1, 1)). Returns the renderer and the attached view. */
+function makeScrollable(): { renderer: Renderer; view: Node } {
+  const renderer = createRenderer();
+  const view = ScrollView(
+    { width: 5, height: 2, showScrollbar: true },
+    Text({ text: "aaaaaa\nbbbbb\ncc" }),
+  );
+  renderer.root.addChild(view);
+  fakeContentSizes.set(view.handle, { width: 5, height: 2 });
+  const leaf = view.children.find((child) => child.type === "text");
+  if (leaf === undefined) throw new Error("scroll view must compose a content leaf");
+  fakeContentSizes.set(leaf.handle, { width: 6, height: 3 });
+  return { renderer, view };
+}
+
+Deno.test("wheelScroll maps wheel directions onto the scroll offsets (consumed)", () => {
+  withFakeAddon(() => {
+    const { view } = makeScrollable();
+    const y = (): number => view.props.scroll_y as number;
+    const x = (): number => view.props.scroll_x as number;
+
+    // scroll_down pans the content down (scroll_y + 1).
+    if (wheelScroll(view, mouse("scroll_down", 0, 0)) !== true) {
+      throw new Error("scroll_down on a scrollable node must be consumed");
+    }
+    if (y() !== 1) throw new Error(`scroll_down scroll_y = ${y()}`);
+    // scroll_up pans the content back up (scroll_y - 1).
+    if (wheelScroll(view, mouse("scroll_up", 0, 0)) !== true) {
+      throw new Error("scroll_up on a scrollable node must be consumed");
+    }
+    if (y() !== 0) throw new Error(`scroll_up scroll_y = ${y()}`);
+    // scroll_right pans the columns (scroll_x + 1).
+    if (wheelScroll(view, mouse("scroll_right", 0, 0)) !== true) {
+      throw new Error("scroll_right on a scrollable node must be consumed");
+    }
+    if (x() !== 1) throw new Error(`scroll_right scroll_x = ${x()}`);
+    // scroll_left pans the columns back (scroll_x - 1).
+    if (wheelScroll(view, mouse("scroll_left", 0, 0)) !== true) {
+      throw new Error("scroll_left on a scrollable node must be consumed");
+    }
+    if (x() !== 0) throw new Error(`scroll_left scroll_x = ${x()}`);
+  });
+});
+
+Deno.test("wheelScroll clamps at the content bounds but stays consumed", () => {
+  withFakeAddon(() => {
+    const { view } = makeScrollable();
+    // maxScroll.y = content 3 - viewport 2 = 1: two downs clamp at 1.
+    wheelScroll(view, mouse("scroll_down", 0, 0));
+    wheelScroll(view, mouse("scroll_down", 0, 0));
+    if (view.props.scroll_y !== 1) throw new Error(`clamped scroll_y = ${view.props.scroll_y}`);
+    // A wheel at the bound is still consumed — it did not fall through.
+    if (wheelScroll(view, mouse("scroll_down", 0, 0)) !== true) {
+      throw new Error("a wheel event at the scroll bound must stay consumed");
+    }
+    if (view.props.scroll_y !== 1) throw new Error(`post-clamp scroll_y = ${view.props.scroll_y}`);
+  });
+});
+
+Deno.test("wheelScroll no-ops on non-scrollable nodes, detached views and non-wheel events", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const plain = Box();
+    renderer.root.addChild(plain);
+    if (wheelScroll(plain, mouse("scroll_down", 0, 0)) !== false) {
+      throw new Error("a plain box must not consume a wheel event");
+    }
+    const detached = ScrollView({ width: 5, height: 2 }, Text({ text: "aaaa\nbbbb\ncc" }));
+    if (wheelScroll(detached, mouse("scroll_down", 0, 0)) !== false) {
+      throw new Error("a detached view must not consume a wheel event");
+    }
+    const { view } = makeScrollable();
+    if (wheelScroll(view, mouse("down_left", 0, 0)) !== false) {
+      throw new Error("a down_left is not a wheel event and must not be consumed");
+    }
+  });
+});
+
+Deno.test("wheelScroll on a table scrolls its content region (sticky header pinned)", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const table = Table({
+      columns: [{ key: "a", header: "A", width: 4 }],
+      rows: [["1"], ["2"], ["3"], ["4"]],
+      clip_height: 3,
+    });
+    renderer.root.addChild(table);
+    // Region viewport 3 rows; the first row leaf measures 5 rows, so the
+    // content overflows: maxScroll.y = 5 - 3 = 2.
+    const region = table.children[1]!;
+    fakeContentSizes.set(region.handle, { width: 11, height: 3 });
+    fakeContentSizes.set(region.children[0]!.handle, { width: 11, height: 5 });
+
+    if (wheelScroll(table, mouse("scroll_down", 0, 0)) !== true) {
+      throw new Error("a wheel event on a table must be consumed");
+    }
+    // Read through a function: TS control-flow narrowing would otherwise pin
+    // the prop to the literal of the first assertion.
+    const regionY = (): number => region.props.scroll_y as number;
+    if (regionY() !== 1) throw new Error(`region scroll_y = ${regionY()}`);
+    if (table.props.scroll_y !== undefined) {
+      throw new Error("the table root must not scroll (the sticky header stays pinned)");
+    }
+    // A second wheel clamps at the content bound (max 2).
+    wheelScroll(table, mouse("scroll_down", 0, 0));
+    if (regionY() !== 2) throw new Error(`clamped region scroll_y = ${regionY()}`);
+  });
+});
+
+Deno.test("focusAt focuses the topmost registered node on a down_left press", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const manager = new FocusManager();
+    const first = Box();
+    const second = Box();
+    renderer.root.addChild(first);
+    renderer.root.addChild(second);
+    useFocus("second", second, () => {}, manager);
+    useFocus("first", first, () => {}, manager);
+    // The fake hit path is non-empty (the press lands on a painted cell); the
+    // walk resolves the first registered focusable in paint order.
+    if (focusAt(renderer, mouse("down_left", 3, 2), manager) !== true) {
+      throw new Error("a down_left on a painted cell must be consumed");
+    }
+    if (manager.activeId !== "first") throw new Error(`active = ${manager.activeId}`);
+  });
+});
+
+Deno.test("focusAt no-ops on a press off any painted cell (empty hit_test)", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const manager = new FocusManager();
+    const node = Box();
+    renderer.root.addChild(node);
+    useFocus("probe", node, () => {}, manager);
+    fakeHitPath = [];
+    if (focusAt(renderer, mouse("down_left", 0, 0), manager) !== false) {
+      throw new Error("a press off any painted cell must not be consumed");
+    }
+    if (manager.activeId !== null) throw new Error(`active = ${manager.activeId}`);
+  });
+});
+
+Deno.test("focusAt no-ops on non-down_left events and on hits with no registered node", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const manager = new FocusManager();
+    const node = Box();
+    renderer.root.addChild(node);
+    const handle = useFocus("probe", node, () => {}, manager);
+    // A wheel event is not a press: never routed.
+    if (focusAt(renderer, mouse("scroll_down", 0, 0), manager) !== false) {
+      throw new Error("a non-down_left event must not be consumed");
+    }
+    handle.dispose();
+    // The press lands on a painted cell, but no node is registered: no-op.
+    if (focusAt(renderer, mouse("down_left", 0, 0), manager) !== false) {
+      throw new Error("a press on a cell with no registered node must not be consumed");
+    }
+    if (manager.activeId !== null) throw new Error(`active = ${manager.activeId}`);
+  });
+});
+
+Deno.test("focusAt defaults to the shared focusManager", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const node = Box();
+    renderer.root.addChild(node);
+    const handle = useFocus("shared", node, () => {});
+    if (focusAt(renderer, mouse("down_left", 0, 0)) !== true) {
+      throw new Error("a down_left must be consumed by the default focus manager");
+    }
+    if (focusManager.activeId !== "shared") throw new Error(`active = ${focusManager.activeId}`);
+    handle.dispose();
+    focusManager.blur();
   });
 });
