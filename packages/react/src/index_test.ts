@@ -1077,9 +1077,10 @@ function manualSpanSource(): {
  * (keyed by the `FakeStreamNodeHandle` instance backing the node). */
 const fakeDragSizes = new Map<object, { width: number; height: number }>();
 
-/** Mouse events queued for the next `poll_events` call of the drag-test fake
- * renderer (consumed in order). */
-const pendingMouseEvents: TernEventJs[] = [];
+/** The push callback registered by the fakes' `start_event_stream` (the
+ * Renderer constructor registers it; the drag/wheel/click tests feed events
+ * through it, standing in for the native event loop). */
+let streamCallback: ((err: Error | null, event: TernEventJs) => void) | null = null;
 
 /** The path returned by the drag-test fake `hit_test` (override for the
  * click-to-focus tests — an empty path models a press off any painted cell). */
@@ -1087,6 +1088,20 @@ let dragFakeHitPath: bigint[] = [7n];
 
 /** Render calls recorded by the drag-test fake renderer's `render()`. */
 const dragFakeRenders: number[] = [];
+
+/** Dispatch a mouse event to the renderer's push stream callback. */
+function dispatchMouseEvent(kind: string, column: number, row: number): void {
+  dispatchEvent({
+    type: "mouse",
+    mouse: { kind, column, row, ctrl: false, alt: false, shift: false },
+  });
+}
+
+/** Dispatch a tagged event to the renderer's push stream callback. */
+function dispatchEvent(event: TernEventJs): void {
+  if (streamCallback === null) throw new Error("no stream callback registered");
+  streamCallback(null, event);
+}
 
 /** A size-aware fake native handle: `content_size` measures streamed spans. */
 class FakeStreamNodeHandle {
@@ -1129,8 +1144,8 @@ class FakeStreamTuiRenderer {
   root(): unknown {
     return new FakeStreamNodeHandle("box");
   }
-  poll_events(_timeoutMs: number): unknown[] {
-    return [];
+  start_event_stream(callback: (err: Error | null, event: TernEventJs) => void): void {
+    streamCallback = callback;
   }
   render(): void {}
   destroy(): void {
@@ -1145,16 +1160,17 @@ const streamFakeAddon = {
   create_node: (type: string) => new FakeStreamNodeHandle(type),
 } as unknown as TernAddon;
 
-/** A fake native `TuiRenderer` whose `poll_events` drains `pendingMouseEvents`
- * (the panel-drag tests dispatch mouse events through it). */
+/** A fake native `TuiRenderer` whose push stream callback receives the events
+ * the drag/wheel/click tests dispatch (via `dispatchMouseEvent` /
+ * `dispatchEvent`). */
 class DragFakeTuiRenderer {
   destroyed = false;
   constructor(_options: unknown) {}
   root(): unknown {
     return new FakeStreamNodeHandle("box");
   }
-  poll_events(_timeoutMs: number): TernEventJs[] {
-    return pendingMouseEvents.splice(0);
+  start_event_stream(callback: (err: Error | null, event: TernEventJs) => void): void {
+    streamCallback = callback;
   }
   hit_test(_col: number, _row: number): bigint[] {
     // The click-to-focus routing gate consults this; `dragFakeHitPath` is
@@ -1169,8 +1185,8 @@ class DragFakeTuiRenderer {
   }
 }
 
-/** The fake addon for the panel-drag tests: mouse events flow through
- * `poll_events` and `content_size` reads the per-handle registry. */
+/** The fake addon for the panel-drag tests: mouse events flow through the
+ * push stream callback and `content_size` reads the per-handle registry. */
 const dragFakeAddon = {
   TuiRenderer: DragFakeTuiRenderer,
   NodeHandle: FakeStreamNodeHandle,
@@ -1297,6 +1313,7 @@ Deno.test("usePanelMouseDrag resizes a panels split on gutter drags and clamps t
   setAddonForTesting(dragFakeAddon);
   try {
     const renderer = createRenderer();
+    renderer.startEventStream();
     const ternRoot = createRoot(renderer);
     const panelsRef: { current: Node | null } = { current: null };
 
@@ -1322,11 +1339,7 @@ Deno.test("usePanelMouseDrag resizes a panels split on gutter drags and clamps t
     fakeDragSizes.set(panels.children[1]!.handle, { width: 60, height: 2 });
 
     const emit = (kind: string, column: number, row: number): void => {
-      pendingMouseEvents.push({
-        type: "mouse",
-        mouse: { kind, column, row, ctrl: false, alt: false, shift: false },
-      });
-      renderer.pollEvents(0);
+      dispatchMouseEvent(kind, column, row);
     };
 
     // down_left on gutter 0, then drag down 1 cell: panel A's flex_basis 3 -> 4.
@@ -1358,7 +1371,7 @@ Deno.test("usePanelMouseDrag resizes a panels split on gutter drags and clamps t
     });
   } finally {
     setAddonForTesting(null);
-    pendingMouseEvents.length = 0;
+    streamCallback = null;
     fakeDragSizes.clear();
   }
 });
@@ -2290,12 +2303,12 @@ Deno.test("toNodeProps strips the semantic theme hints from scene props", () => 
 // Mouse wheel scroll + click-to-focus (useWheelScroll / useClickToFocus)
 //
 // The hooks subscribe to the renderer's mouse events over the drag-test fake
-// addon (mouse events flow through `poll_events`; `content_size` reads the
-// per-handle registry): `useWheelScroll` maps wheel events onto the ref'd
-// scroll view's offsets (clamped) and re-renders on a consumed wheel;
-// `useClickToFocus` routes a `down_left` on a painted cell (the configurable
-// `dragFakeHitPath`) to the topmost registered focusable via the
-// `FocusManager`.
+// addon (mouse events flow through the push stream callback;
+// `content_size` reads the per-handle registry): `useWheelScroll` maps wheel
+// events onto the ref'd scroll view's offsets (clamped) and re-renders on a
+// consumed wheel; `useClickToFocus` routes a `down_left` on a painted cell
+// (the configurable `dragFakeHitPath`) to the topmost registered focusable
+// via the `FocusManager`.
 // ---------------------------------------------------------------------------
 
 /** A `useWheelScroll` probe: renders a `<ScrollView>` and hooks the wheel
@@ -2313,6 +2326,7 @@ Deno.test("useWheelScroll maps wheel events onto the ref'd view and re-renders o
   setAddonForTesting(dragFakeAddon);
   try {
     const renderer = createRenderer();
+    renderer.startEventStream();
     const ternRoot = createRoot(renderer);
     const viewRef: { current: Node | null } = { current: null };
 
@@ -2334,11 +2348,7 @@ Deno.test("useWheelScroll maps wheel events onto the ref'd view and re-renders o
     dragFakeRenders.length = 0;
 
     const emit = (kind: string, column: number, row: number): void => {
-      pendingMouseEvents.push({
-        type: "mouse",
-        mouse: { kind, column, row, ctrl: false, alt: false, shift: false },
-      });
-      renderer.pollEvents(0);
+      dispatchMouseEvent(kind, column, row);
     };
     const y = (): number => view.props.scroll_y as number;
 
@@ -2368,7 +2378,7 @@ Deno.test("useWheelScroll maps wheel events onto the ref'd view and re-renders o
     });
   } finally {
     setAddonForTesting(null);
-    pendingMouseEvents.length = 0;
+    streamCallback = null;
     dragFakeHitPath = [7n];
     dragFakeRenders.length = 0;
     fakeDragSizes.clear();
@@ -2395,6 +2405,7 @@ Deno.test("useClickToFocus focuses the topmost registered node on a down_left an
   setAddonForTesting(dragFakeAddon);
   try {
     const renderer = createRenderer();
+    renderer.startEventStream();
     const ternRoot = createRoot(renderer);
     const boxRef: { current: Node | null } = { current: null };
     // The hook routes through the core `focusManager` (its default), so the
@@ -2410,11 +2421,7 @@ Deno.test("useClickToFocus focuses the topmost registered node on a down_left an
     if (!manager.has("probe")) throw new Error("useFocus must register the id");
 
     const emit = (kind: string, column: number, row: number): void => {
-      pendingMouseEvents.push({
-        type: "mouse",
-        mouse: { kind, column, row, ctrl: false, alt: false, shift: false },
-      });
-      renderer.pollEvents(0);
+      dispatchMouseEvent(kind, column, row);
     };
 
     // A down_left on a painted cell (fake hit path non-empty) focuses the box.
@@ -2422,8 +2429,7 @@ Deno.test("useClickToFocus focuses the topmost registered node on a down_left an
     if (manager.activeId !== "probe") throw new Error(`active after click = ${manager.activeId}`);
 
     // The focused element now routes keys: a char key reaches its handler.
-    pendingMouseEvents.push({ type: "key", key: { name: "char", char: "x", ctrl: false, alt: false, shift: false } });
-    renderer.pollEvents(0);
+    dispatchEvent({ type: "key", key: { name: "char", char: "x", ctrl: false, alt: false, shift: false } });
     if (focused.join("") !== "x") throw new Error(`focused chars = ${focused.join("")}`);
 
     // A press off any painted cell (empty hit path) is a no-op.
@@ -2437,7 +2443,7 @@ Deno.test("useClickToFocus focuses the topmost registered node on a down_left an
     });
   } finally {
     setAddonForTesting(null);
-    pendingMouseEvents.length = 0;
+    streamCallback = null;
     dragFakeHitPath = [7n];
     dragFakeRenders.length = 0;
     fakeDragSizes.clear();

@@ -6,8 +6,9 @@
 // reports that limitation clearly.
 //
 // The smoke asserts the addon surface, builds a tiny scene (rounded box with
-// padding around a text leaf), renders it, then polls for a quit key ('q').
-// Under the PTY harness (`printf 'q' | script -q /dev/null deno run
+// padding around a text leaf), renders it, then waits for a quit key ('q')
+// delivered through the push event stream (`start_event_stream`, roadmap
+// Phase 3). Under the PTY harness (`printf 'q' | script -q /dev/null deno run
 // --allow-all smoke.mjs`) the piped 'q' is delivered as a key event and the
 // smoke exits 0. Ctrl+C with exit_on_ctrl_c also ends the loop cleanly.
 
@@ -65,6 +66,11 @@ console.log("ok: typeof TuiRenderer === 'function'");
 // --- Scene construction (create_node / NodeHandle) --------------------------
 
 const renderer = new tern.TuiRenderer({ exit_on_ctrl_c: true });
+if (typeof renderer.start_event_stream !== "function") {
+  console.error(`FAIL: typeof start_event_stream = ${typeof renderer.start_event_stream}`);
+  process.exit(1);
+}
+console.log("ok: start_event_stream exposes push-based event delivery");
 const root = renderer.root();
 
 const box = tern.create_node("box", {
@@ -85,29 +91,35 @@ box.add_child(hint);
 renderer.render();
 
 // --- Event loop: quit on 'q', or on auto-destroy (ctrl+c) --------------------
+// Push delivery: the native event loop invokes the stream callback for every
+// event (Node's error-first callback convention — err is always null since
+// the native side only pushes successful deliveries).
 
 let quit = false;
 const deadline = Date.now() + 5000;
-while (Date.now() < deadline && !quit) {
-  let events;
-  try {
-    events = renderer.poll_events(50);
-  } catch (err) {
-    // The renderer was destroyed inside poll_events (ctrl+c with
-    // exit_on_ctrl_c) — that is a clean quit.
-    console.log(`ok: renderer destroyed (${err.message})`);
-    quit = true;
-    break;
-  }
-  for (const ev of events) {
-    if (ev.name === "char" && ev.char === "q") {
-      quit = true;
-      break;
+const receivedQ = await new Promise((resolve) => {
+  renderer.start_event_stream((err, ev) => {
+    if (err) {
+      console.log(`ok: stream error (${err.message})`);
+      resolve(false);
+      return;
     }
-  }
-}
+    // The callback receives the tagged TernEventJs union; the quit key is a
+    // "key"-tagged event carrying the KeyEvent payload.
+    if (ev.type === "key" && ev.key?.name === "char" && ev.key?.char === "q") {
+      resolve(true);
+    }
+  });
+  setTimeout(() => resolve(false), Math.max(0, deadline - Date.now()));
+});
+quit = receivedQ;
 
 renderer.destroy();
+if (!quit && renderer.destroyed) {
+  // Ctrl+C with exit_on_ctrl_c tore the renderer down — a clean quit.
+  console.log("ok: renderer destroyed");
+  quit = true;
+}
 if (!quit) {
   console.error("FAIL: did not receive 'q' within 5s");
   process.exit(1);

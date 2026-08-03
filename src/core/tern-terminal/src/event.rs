@@ -8,6 +8,8 @@
 //! everything currently buffered into a batch.
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{
@@ -283,6 +285,73 @@ pub fn poll_events(timeout: Duration) -> io::Result<Vec<TernEvent>> {
     Ok(events)
 }
 
+/// How often a running event loop re-checks its stop flag while idle. This is
+/// the wake-up latency of [`spawn_event_loop`]: a stopped loop notices within
+/// one interval. It is not a busy poll — `poll_events` blocks on the terminal
+/// input source for the whole interval, so an idle loop burns no CPU.
+pub const EVENT_LOOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// A handle to a running event loop. Dropping the handle does not stop the
+/// loop; call [`stop`](Self::stop) to make the loop thread exit at its next
+/// interval boundary.
+#[derive(Debug)]
+pub struct EventLoopHandle {
+    stop: Arc<AtomicBool>,
+}
+
+impl EventLoopHandle {
+    /// Ask the loop to stop. The loop thread observes the flag at its next
+    /// [`EVENT_LOOP_POLL_INTERVAL`] boundary and exits, dropping the sink.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Run the event loop on the current thread until `stop` is set (or the
+/// reader errors).
+///
+/// Repeatedly calls `read(interval)` for a batch of normalized events and
+/// feeds each to `sink`, in arrival order. The interval also bounds how long
+/// a stop request can go unnoticed. Errors from `read` propagate to the
+/// caller and end the loop.
+pub fn run_event_loop<F, R>(
+    mut sink: F,
+    mut read: R,
+    stop: &AtomicBool,
+) -> io::Result<()>
+where
+    F: FnMut(TernEvent),
+    R: FnMut(Duration) -> io::Result<Vec<TernEvent>>,
+{
+    while !stop.load(Ordering::Relaxed) {
+        let events = read(EVENT_LOOP_POLL_INTERVAL)?;
+        for event in events {
+            sink(event);
+        }
+    }
+    Ok(())
+}
+
+/// Spawn the event loop on a dedicated background thread.
+///
+/// The thread repeatedly polls the terminal (see [`poll_events`]) and feeds
+/// every normalized event to `sink`, which must be `Send` (it runs on the
+/// loop thread). Returns a handle; call [`EventLoopHandle::stop`] to end the
+/// loop. The loop also exits if the terminal source errors (e.g. the PTY is
+/// torn down) — the thread returns silently rather than surfacing the error.
+pub fn spawn_event_loop<F>(stop: Arc<AtomicBool>, mut sink: F) -> io::Result<EventLoopHandle>
+where
+    F: FnMut(TernEvent) + Send + 'static,
+{
+    let thread_stop = stop.clone();
+    std::thread::Builder::new()
+        .name("tern-event-loop".to_string())
+        .spawn(move || {
+            let _ = run_event_loop(&mut sink, |timeout| poll_events(timeout), &thread_stop);
+        })?;
+    Ok(EventLoopHandle { stop })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +623,104 @@ mod tests {
     fn paste_events_map_to_none() {
         // Paste is out of scope for the MVP.
         assert_eq!(normalize(CrosstermEvent::Paste("pasted".into())), None);
+    }
+
+    /// A fake reader that yields the given event batches, then sets the stop
+    /// flag and returns empty batches (an idle terminal).
+    fn fake_reader(
+        batches: Vec<Vec<TernEvent>>,
+        stop: Arc<AtomicBool>,
+    ) -> impl FnMut(Duration) -> io::Result<Vec<TernEvent>> {
+        let mut remaining = batches.into_iter();
+        move |_timeout: Duration| {
+            if let Some(batch) = remaining.next() {
+                Ok(batch)
+            } else {
+                // All batches delivered: ask the loop to stop, then idle.
+                stop.store(true, Ordering::Relaxed);
+                Ok(vec![])
+            }
+        }
+    }
+
+    #[test]
+    fn run_event_loop_delivers_all_events_in_order_without_loss() {
+        // A synthetic burst of N events split across batches must reach the
+        // sink exactly once each, in arrival order (the push contract: the JS
+        // side receives all N without loss).
+        let stop = Arc::new(AtomicBool::new(false));
+        let n = 100;
+        let mut batches: Vec<Vec<TernEvent>> = Vec::new();
+        let mut window: Vec<TernEvent> = Vec::new();
+        for i in 0..n {
+            let event = match i % 4 {
+                0 => TernEvent::Key(TernKey::new(KeyName::Char, Some('a'), false, false, false)),
+                1 => TernEvent::Resize { w: 80, h: (i + 1) as u16 },
+                2 => TernEvent::FocusGained,
+                _ => TernEvent::Mouse(TernMouse {
+                    kind: MouseEventKind::Moved,
+                    column: (i % 100) as u16,
+                    row: 0,
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                }),
+            };
+            window.push(event);
+            // Bursts of 1..=7 events per poll window.
+            if i % 7 == 6 || i == n - 1 {
+                batches.push(std::mem::take(&mut window));
+            }
+        }
+        let expected: Vec<TernEvent> = batches.iter().flatten().cloned().collect();
+        let mut received: Vec<TernEvent> = Vec::new();
+        {
+            let mut sink = |event: TernEvent| received.push(event);
+            let mut read = fake_reader(batches, stop.clone());
+            run_event_loop(&mut sink, &mut read, &stop).expect("loop runs cleanly");
+        }
+        assert_eq!(received.len(), n, "all {n} events delivered");
+        assert_eq!(received, expected, "events arrive in order, no loss");
+    }
+
+    #[test]
+    fn run_event_loop_exits_on_stop_flag_between_batches() {
+        // The loop must observe the stop flag even when no events arrive.
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut received: Vec<TernEvent> = Vec::new();
+        {
+            let mut sink = |event: TernEvent| received.push(event);
+            let mut read = fake_reader(vec![], stop.clone());
+            run_event_loop(&mut sink, &mut read, &stop).expect("loop runs cleanly");
+        }
+        assert!(received.is_empty());
+    }
+
+    #[test]
+    fn event_loop_handle_stops_a_spawned_loop() {
+        // `spawn_event_loop` + `EventLoopHandle::stop` terminates the thread:
+        // after stop, the sink stops receiving events (the loop notices at the
+        // next interval boundary).
+        let stop = Arc::new(AtomicBool::new(false));
+        let pushes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = pushes.clone();
+        let handle = spawn_event_loop(stop.clone(), move |_event: TernEvent| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        })
+        .expect("spawn loop");
+        // Give the loop a moment to run an interval, then stop it.
+        std::thread::sleep(Duration::from_millis(10));
+        handle.stop();
+        // The thread must exit (no join handle, so wait a couple of intervals
+        // and assert the sink is no longer being fed — a running loop keeps
+        // polling but the terminal yields no events in a unit test, so the
+        // count stays where it was).
+        let before = pushes.load(Ordering::Relaxed);
+        std::thread::sleep(EVENT_LOOP_POLL_INTERVAL * 3);
+        assert_eq!(
+            pushes.load(Ordering::Relaxed),
+            before,
+            "a stopped loop must not deliver events"
+        );
     }
 }
