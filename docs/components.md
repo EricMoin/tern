@@ -25,8 +25,8 @@ component below: element factories in `@tern/core`, host
 components/factories in `@tern/react` and `@tern/solid`, focus/key routing via
 the core `FocusManager`, spinner timer redraw, the theme system, soft wrap,
 and the Phase 2 event consumers (resize reflow, panel drag-resize,
-focus-aware redraw). The status table below is current — the shipped rows
-reflect what runs today.
+focus-aware redraw, mouse wheel scroll, click-to-focus). The status table
+below is current — the shipped rows reflect what runs today.
 
 ## Event model
 
@@ -67,6 +67,9 @@ handler.
 | [StatusBar](#statusbar) | ✅ Shipped | reserved viewport row |
 | [Select](#select) | ✅ Shipped | — |
 | [ScrollView](#scrollview) | ✅ Shipped | — |
+| [Table](#table) | ✅ Shipped | — |
+| [Textarea](#textarea) | ✅ Shipped | — |
+| [Modal](#modal) | ✅ Shipped | — |
 | [Theme system](#theme-system--soft-wrap) | ✅ Shipped | — |
 | [Soft wrap (`wrap` prop)](#theme-system--soft-wrap) | ✅ Shipped | — |
 
@@ -463,6 +466,167 @@ region.
 constants), `<ScrollView>` in `@tern/react` (content is React children), and
 `ScrollView` in `@tern/solid` (content via the `children` prop). The
 `streaming_text` auto-scroll reuses the same clip/scroll machinery.
+
+---
+
+## Table
+
+**Purpose:** render columnar data — file lists, symbol tables, model pickers,
+or any structured result the agent presents alongside its free-text
+transcript.
+
+**Core problem:** columns must line up across rows with fixed per-column
+widths and alignment, a pinned header must stay readable while the rows
+scroll, and the selection row must stay visible — all over a cell-buffer
+renderer with no native table node.
+
+**Design:**
+
+- **Sticky header.** A header row painted above the content region at paint
+  z-order 1; `scroll_y` pans only the content region, so the header never
+  scrolls away. `sticky_header: false` moves the header into the scrollable
+  region.
+- **Per-column cells.** One row leaf per data row; each cell padded to its
+  column width (left/right/center), overflow truncated never mid-glyph. The
+  highlighted row renders reversed.
+- **Independent axes.** `scroll_x` on the root pans header + rows together
+  (columns stay aligned); `clip_height` sets the content viewport.
+- **Keyboard driving.** `tableKey` moves the highlight with up/down (clamped)
+  and auto-scrolls the content region; `visibleTableRows` reads the visible
+  window `rows[scroll_y, scroll_y + clip_height)`.
+
+**API sketch (JS):**
+
+```tsx
+<Table
+  columns={[
+    { key: "name", header: "File", width: 24 },
+    { key: "size", header: "Size", width: 8, align: "right" },
+  ]}
+  rows={[["main.rs", 4096], ["lib.rs", 2048]]}
+  highlight={0}
+  sticky_header
+  clip_height={10}
+/>
+```
+
+**Acceptance:** golden test for per-column alignment and truncation; a key
+sequence moves the highlight and auto-scrolls the region (buffer matches).
+
+**Shipped:** `Table` in `@tern/core` builds the flex column — a sticky header
+row (paint z-order 1) above a scrollable content region, and one row leaf per
+data row with per-column width/alignment (padded cells, overflow truncated
+never mid-glyph; the highlighted row reversed). `tableKey` (up/down move the
+highlight and auto-scroll, clamped to the content bounds) and
+`visibleTableRows` (the visible window) drive it; `scroll_x` pans header +
+rows together, `scroll_y` pans only the content region, and `clip_height`
+sets the viewport. `<Table>` in `@tern/react` and `Table` in `@tern/solid`
+materialize the same factory.
+
+---
+
+## Textarea
+
+**Purpose:** multi-line text entry — composing agent messages, editing tool
+input, or any free-form field taller than one line.
+
+**Core problem:** a multi-line caret model (rows × columns), soft wrapping of
+long lines, and vertical scroll-to-caret are all stateful interactions
+layered on a paint-on-demand renderer.
+
+**Design:**
+
+- **Edit model on the node.** `lines` / `row` / `col` / `scroll` stay on the
+  node as JS bookkeeping (the source of truth for `editTextareaKey`) and
+  never reach the scene props.
+- **Soft wrap.** `width` wraps long lines into display rows (token-aware,
+  mirroring the Rust `wrap_line`); one text leaf is composed per visible
+  display row, the caret's leaf carrying its display column.
+- **Visible window.** `height` sets the window in display rows with vertical
+  scroll-to-caret; `scroll` is the top visible display row.
+- **Editing keys.** `enter` splits the line at the cursor; insert /
+  backspace / delete (joining adjacent lines at the boundaries); `left` /
+  `right` / `home` / `end`; `up` / `down` move across the soft-wrapped
+  display lines, preserving a preferred column across a run of vertical
+  moves.
+
+**API sketch (JS):**
+
+```tsx
+<Textarea
+  lines={["fn main() {", "  println!(\"hi\");", "}"]}
+  row={1}
+  col={4}
+  width={40}
+  height={10}
+  focusId="composer"
+  onChange={setDraft}
+  onSubmit={send}
+/>
+```
+
+**Acceptance:** golden test for soft wrap and the caret column; interaction
+test for editing, line splits, and vertical moves across wrapped lines.
+
+**Shipped:** `Textarea` in `@tern/core` builds a framed box with one text
+leaf per visible display row, soft-wrapped at `width` and vertically scrolled
+to keep the caret visible within `height`; `editTextareaKey` applies the
+editing keys (char insert, backspace/delete with line joins, left/right/
+home/end, `enter` splits, up/down across display lines preserving a preferred
+column) and returns the new `{ lines, row, col }`. `<Textarea>` in
+`@tern/react` adds `focusId` / `focusManager` / `onChange` / `onSubmit`
+(focus registration plus callbacks); `Textarea` in `@tern/solid` is the plain
+factory.
+
+---
+
+## Modal
+
+**Purpose:** overlay dialogs — confirmations, blocking prompts, or any
+transient surface that dims the workspace and takes over input.
+
+**Core problem:** an overlay must paint above in-flow content, dim what is
+beneath, center its content, and isolate keyboard focus while open — then
+hand focus back where it was when it closes.
+
+**Design:**
+
+- **Full-bleed overlay.** An absolutely positioned root box inset to its
+  parent's padding box, stamped with a high `z_index` (`MODAL_Z_INDEX` = 100)
+  so it paints above in-flow content.
+- **Backdrop + content.** A dimmed backdrop box (`MODAL_BACKDROP_BG`,
+  `backdrop: false` to omit) plus a centered content box wrapping the content
+  nodes.
+- **Visibility as state.** `open` starts `false` — the overlay is hidden
+  (`hidden` modifier + `display: none`); `openModal` / `closeModal` toggle it.
+- **Focus isolation.** `openModal` records the active focus id and moves
+  focus into the overlay (`focusFirst`); `closeModal` restores the recorded
+  id, or blurs when nothing was recorded.
+
+**API sketch (JS):**
+
+```tsx
+const modal = Modal({ content: [
+  Text({ text: "Apply this edit?" }),
+  Input({ placeholder: "y/n" }),
+] });
+openModal(modal);   // dims the scene, focuses the first registered focusable
+closeModal(modal);  // restores the previously active focus
+```
+
+**Acceptance:** the overlay paints above in-flow content with the backdrop
+dim; opening moves focus into the overlay and closing restores the previously
+active focus.
+
+**Shipped:** `Modal` in `@tern/core` composes the overlay — an absolutely
+positioned root box (inset to the parent) stamped with `MODAL_Z_INDEX` (100),
+a dimmed backdrop box (`MODAL_BACKDROP_BG`), and a centered content box
+wrapping the content nodes (the `content` prop or rest-arg children).
+`openModal` / `closeModal` toggle visibility (`hidden` + `display`) and move
+focus through the `FocusManager` — `focusFirst` on open, restoring the
+recorded id (or blurring) on close. `<Modal>` in `@tern/react` takes the
+content as a `content` prop (no React children); `Modal` in `@tern/solid` is
+the plain factory.
 
 ---
 
