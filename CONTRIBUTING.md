@@ -59,6 +59,72 @@ npm install
 npm run build        # napi build --platform && node fix-dts.mjs
 ```
 
+Use `npm install` (not `npm ci`) here: the `tern-node-<platform>` optional
+dependencies declared for the release strategy are not yet on the registry,
+so the lockfile cannot pin them, and `npm ci`'s sync check would fail.
+
+## Releasing
+
+Releases are gated end-to-end by the workflows in `.github/workflows/`.
+
+### Multi-platform native addon (napi-rs distribution model)
+
+The native addon follows the napi-rs convention: the root package
+(`tern-node`) declares per-platform packages in `optionalDependencies`
+(`tern-node-linux-x64-gnu`, `tern-node-linux-arm64-gnu`,
+`tern-node-darwin-x64`, `tern-node-darwin-arm64`, `tern-node-win32-x64-msvc`),
+and the generated `index.js` loader picks the package matching the running
+system. The build matrix in `ci.yml` (`napi-build` job) builds one target
+per row and uploads the `.node` binary:
+
+| Target (Rust triple)        | Runner          | Build command |
+| --------------------------- | --------------- | ------------- |
+| `x86_64-unknown-linux-gnu`  | ubuntu-latest   | `npm run build` |
+| `aarch64-unknown-linux-gnu` | ubuntu-latest   | `npm run build -- --target aarch64-unknown-linux-gnu --use-napi-cross` |
+| `x86_64-apple-darwin`       | macos-latest    | `npm run build -- --target x86_64-apple-darwin` |
+| `aarch64-apple-darwin`      | macos-latest    | `npm run build` |
+| `x86_64-pc-windows-msvc`    | windows-latest  | `npm run build` |
+
+Cross-compiled rows (binary arch ≠ runner arch) skip the native load-check;
+the three native rows run `node load-check.mjs` against the freshly built
+addon. The target list lives in `napi.targets` in
+`src/bindings/tern-node/package.json` — keep the matrix and that list in
+sync.
+
+Publishing the platform packages themselves is a separate step once they
+exist on the registry: `napi create-npm-dirs` → `napi artifacts` →
+`npm publish` (whose `prepublishOnly` runs `napi prepublish -t npm` to
+publish the platform packages first). See
+https://napi.rs/docs/deep-dive/release.
+
+### Publish workflow and gates
+
+`.github/workflows/publish.yml` runs on a `v*` tag push (or manual dispatch)
+and publishes `@tern/core`, `@tern/react`, `@tern/solid` (all set to
+`private: false`; `packages/examples` and the repo root stay private). Three
+gates must pass before any publish:
+
+1. **Pack gate** — `npm pack --dry-run` on each of the three packages; the
+   release fails if any `*_test.ts` would ship (the `files` arrays ship only
+   `src/**/*.ts` excluding tests).
+2. **Load-check gate** — build the tern-node addon natively and run
+   `node src/bindings/tern-node/load-check.mjs` (asserts the napi surface
+   loads).
+3. **Platform-wiring gate** — `napi create-npm-dirs` must scaffold all five
+   `npm/<platform-suffix>` directories, each a `tern-node-<platform>`
+   package (the names declared in `optionalDependencies`).
+
+### Publish command
+
+```sh
+npm version patch --workspaces -m "%s"  # bumps @tern/* versions, creates the v-tag
+git push --follow-tags                   # triggers publish.yml on the v* tag
+```
+
+The workflow needs the `NPM_TOKEN` secret (an npm automation token with
+publish rights on the `@tern/*` names). `id-token: write` is declared for
+npm provenance.
+
 ## Checking a change
 
 ```sh
