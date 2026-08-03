@@ -15,6 +15,7 @@ members = [
     "src/core/tern-layout",
     "src/core/tern-terminal",
     "src/core/tern-components",
+    "src/core/tern-highlight",
     "src/bindings/tern-node",
     "examples/rust/tern-demo",
 ]

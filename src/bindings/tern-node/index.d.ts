@@ -68,14 +68,15 @@ export declare class NodeHandle {
 }
 
 /**
- * The terminal-facing renderer: owns raw mode + alternate screen, polls
- * input, and paints the shared scene to the terminal.
+ * The terminal-facing renderer: owns raw mode + alternate screen, pushes
+ * input to the JS thread via a threadsafe event stream (or polls it with the
+ * `poll-fallback` feature), and paints the shared scene to the terminal.
  */
 export declare class TuiRenderer {
   /**
    * Enter raw mode + the alternate screen, ready to render. Mouse and
-   * focus-change event delivery is enabled so `poll_events` can surface
-   * them.
+   * focus-change event delivery is enabled so the event stream (or
+   * `poll_events`, with the fallback feature) can surface them.
    *
    * If any terminal transition fails the already-entered states are rolled
    * back before the error is returned, so a failed constructor never leaves
@@ -84,16 +85,6 @@ export declare class TuiRenderer {
   constructor(options: TuiRendererOptions)
   /** A handle to the scene root, to attach content under. */
   root(): NodeHandle
-  /**
-   * Block up to `timeout_ms` for input, returning every event that arrived
-   * in that window (a burst of events comes back as one batch).
-   *
-   * Key, resize, focus, and mouse events are all surfaced (mouse and focus
-   * delivery is enabled in the constructor). With `exit_on_ctrl_c` enabled,
-   * a Ctrl+C press tears the renderer down instead of being returned;
-   * subsequent calls error until a new renderer is constructed.
-   */
-  poll_events(timeoutMs: number): Array<TernEventJs>
   /**
    * The scene node ids covering the cell at (`col`, `row`), innermost
    * (topmost) first, then each ancestor that also covers the cell. The
@@ -112,8 +103,9 @@ export declare class TuiRenderer {
   render(): void
   /**
    * Leave the alternate screen and raw mode and stop event listening,
-   * restoring the terminal. Safe to call more than once; a destroyed
-   * renderer cannot render or poll.
+   * restoring the terminal. Also stops the push event loop (with the
+   * default `push-events` feature) so the loop thread exits. Safe to call
+   * more than once; a destroyed renderer cannot render or poll.
    */
   destroy(): void
   /**
@@ -121,6 +113,21 @@ export declare class TuiRenderer {
    * `exit_on_ctrl_c`).
    */
   get destroyed(): boolean
+  /**
+   * Start push-based event delivery: spawn tern-terminal's background
+   * event loop and deliver every normalized terminal event to `callback`
+   * on the JS thread through a threadsafe function.
+   *
+   * Events arrive in arrival order and none are dropped (the threadsafe
+   * queue is unbounded), so the JS renderer subscribes instead of polling.
+   * Key, resize, focus, and mouse events are all delivered (mouse and
+   * focus delivery is enabled in the constructor). With `exit_on_ctrl_c`
+   * enabled, a Ctrl+C press is delivered and then tears the renderer down
+   * (marked destroyed; the loop stops). Destroying the renderer also stops
+   * the loop. Errors if the renderer is already destroyed or a stream was
+   * already started.
+   */
+  start_event_stream(callback: ((err: Error | null, arg: TernEventJs) => any)): void
 }
 
 /** The laid-out content size of a scene node, in cells. */
@@ -138,6 +145,42 @@ export interface ContentSize {
  * `set_props` for the style-key convention.
  */
 export declare function create_node(type: string, props?: Record<string, any> | undefined | null): NodeHandle
+
+/**
+ * Token-highlight `source` in `language` (a Markdown fence info string:
+ * `"rust"` / `"typescript"` / `"ts"` / `"tsx"` / `"javascript"` / `"js"` /
+ * `"json"` / `"bash"` / `"shell"` / `"sh"` / `"zsh"`) into a complete span
+ * stream for a code fence or a `streaming_text` node.
+ *
+ * The returned spans cover every byte of `source` (gaps carry no style) and
+ * merge adjacent same-style runs, so concatenating their `text` reconstructs
+ * the source exactly — the compositor paints them in order. Unknown
+ * languages error; tree-sitter is error-tolerant, so half-open streaming
+ * input still highlights.
+ */
+export declare function highlight(language: string, source: string): Array<HighlightSpanJs>
+
+/**
+ * One token-highlighted span: the chunk's text plus the style keys lifted
+ * from the highlight style (`fg` as a `"#rrggbb"` hex string, and the boolean
+ * modifiers). The shape mirrors `Span` (the `append_span` style-key
+ * convention), so a JS consumer can feed a highlighted span straight into a
+ * `streaming_text` node.
+ */
+export interface HighlightSpanJs {
+  /** The span's text content. */
+  text: string
+  /** The foreground color as `"#rrggbb"`, when the token carries one. */
+  fg?: string
+  /** Whether the token is bold. */
+  bold: boolean
+  /** Whether the token is italic. */
+  italic: boolean
+  /** Whether the token is dim. */
+  dim: boolean
+  /** Whether the token is underlined. */
+  underline: boolean
+}
 
 /**
  * A key event surfaced to JS as a plain object: `{ name, char, ctrl, alt,

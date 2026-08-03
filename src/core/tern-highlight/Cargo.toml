@@ -1,0 +1,18 @@
+[package]
+name = "tern-highlight"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tern highlight: tree-sitter token highlighting mapped to styled spans"
+
+[dependencies]
+tern-core = { path = "../tern-core" }
+tree-sitter = "0.26"
+tree-sitter-language = "0.1"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-json = "0.23"
+tree-sitter-bash = "0.25"
+unicode-width = "0.2"

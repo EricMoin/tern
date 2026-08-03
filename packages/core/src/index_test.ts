@@ -100,11 +100,12 @@ import type {
 } from "./index.ts";
 
 // ---------------------------------------------------------------------------
-// Fake native addon (event dispatch)
+// Fake native addon (push event dispatch)
 // ---------------------------------------------------------------------------
 
-/** Events queued for the next fake `poll_events` call (consumed in order). */
-const pendingEvents: TernEventJs[] = [];
+/** The push callback registered by the fake `start_event_stream` (the
+ * Renderer constructor registers it; tests feed events through it). */
+let streamCallback: ((err: Error | null, event: TernEventJs) => void) | null = null;
 
 /** The last `(col, row)` passed to the fake `hit_test`, or `null`. */
 let lastHitTest: [number, number] | null = null;
@@ -153,8 +154,8 @@ class FakeTuiRenderer {
     // the dispatch tests never touch it.
     return new FakeNodeHandle() as unknown as NodeHandle;
   }
-  poll_events(_timeoutMs: number): TernEventJs[] {
-    return pendingEvents.splice(0);
+  start_event_stream(callback: (err: Error | null, event: TernEventJs) => void): void {
+    streamCallback = callback;
   }
   hit_test(col: number, row: number): bigint[] {
     lastHitTest = [col, row];
@@ -178,7 +179,7 @@ const fakeAddon = {
 
 /** Run `fn` with the fake addon installed, resetting the seam afterwards. */
 function withFakeAddon(fn: () => void): void {
-  pendingEvents.length = 0;
+  streamCallback = null;
   lastHitTest = null;
   fakeHitPath = [7n, 3n];
   createdNodes.length = 0;
@@ -188,7 +189,16 @@ function withFakeAddon(fn: () => void): void {
     fn();
   } finally {
     setAddonForTesting(null);
+    streamCallback = null;
   }
+}
+
+/** Feed `event` to the renderer's push callback (the fake's
+ * `start_event_stream`), dispatching it like the native loop would. */
+function pushEvent(event: TernEventJs): void {
+  const callback = streamCallback;
+  if (callback === null) throw new Error("no stream callback registered");
+  callback(null, event);
 }
 
 Deno.test("core exports package metadata", () => {
@@ -534,60 +544,52 @@ Deno.test("createRenderer is a function accepting options", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Event dispatch (fake native addon)
+// Event dispatch (fake native addon — push delivery)
 // ---------------------------------------------------------------------------
 
-Deno.test("pollEvents dispatches resize events to onResize and unsubscribe stops dispatch", () => {
+Deno.test("push events dispatch resize events to onResize and unsubscribe stops dispatch", () => {
   withFakeAddon(() => {
     const renderer = createRenderer();
+    renderer.startEventStream();
     const resized: Array<{ width: number; height: number }> = [];
     const unsub = renderer.onResize((size) => resized.push(size));
     const resize: TernEventJs = { type: "resize", width: 120, height: 40 };
-    pendingEvents.push(resize);
-    const returned = renderer.pollEvents(0);
-    if (returned.length !== 1 || returned[0] !== resize) {
-      throw new Error("pollEvents must return the resize event verbatim");
-    }
+    pushEvent(resize);
     if (resized.length !== 1) throw new Error(`onResize calls = ${resized.length}`);
     if (resized[0]!.width !== 120 || resized[0]!.height !== 40) {
       throw new Error(`resize payload = ${JSON.stringify(resized[0])}`);
     }
     // Unsubscribing stops further dispatch.
     unsub();
-    pendingEvents.push({ type: "resize", width: 10, height: 10 });
-    renderer.pollEvents(0);
+    pushEvent({ type: "resize", width: 10, height: 10 });
     if (resized.length !== 1) {
       throw new Error("unsubscribed onResize handler must not fire");
     }
   });
 });
 
-Deno.test("pollEvents dispatches key events to onKey with the KeyEvent payload", () => {
+Deno.test("push events dispatch key events to onKey with the KeyEvent payload", () => {
   withFakeAddon(() => {
     const renderer = createRenderer();
+    renderer.startEventStream();
     const keys: KeyEvent[] = [];
     renderer.onKey((event) => keys.push(event));
     const key: KeyEvent = { name: "char", char: "q", ctrl: false, alt: false, shift: false };
-    const tagged: TernEventJs = { type: "key", key };
-    pendingEvents.push(tagged);
-    const returned = renderer.pollEvents(0);
-    if (returned.length !== 1 || returned[0] !== tagged) {
-      throw new Error("pollEvents must return the key event verbatim");
-    }
+    pushEvent({ type: "key", key });
     if (keys.length !== 1 || keys[0] !== key) {
       throw new Error("onKey must receive the unwrapped KeyEvent payload");
     }
   });
 });
 
-Deno.test("pollEvents dispatches focus events to onFocus", () => {
+Deno.test("push events dispatch focus events to onFocus", () => {
   withFakeAddon(() => {
     const renderer = createRenderer();
+    renderer.startEventStream();
     const focusEvents: Array<{ focus_gained: boolean }> = [];
     renderer.onFocus((event) => focusEvents.push(event));
-    pendingEvents.push({ type: "focus", focus_gained: true });
-    pendingEvents.push({ type: "focus", focus_gained: false });
-    renderer.pollEvents(0);
+    pushEvent({ type: "focus", focus_gained: true });
+    pushEvent({ type: "focus", focus_gained: false });
     if (focusEvents.length !== 2) throw new Error(`onFocus calls = ${focusEvents.length}`);
     if (focusEvents[0]!.focus_gained !== true || focusEvents[1]!.focus_gained !== false) {
       throw new Error(`focus payloads = ${JSON.stringify(focusEvents)}`);
@@ -598,17 +600,17 @@ Deno.test("pollEvents dispatches focus events to onFocus", () => {
       unsubscribedFired++;
     });
     unsub();
-    pendingEvents.push({ type: "focus", focus_gained: true });
-    renderer.pollEvents(0);
+    pushEvent({ type: "focus", focus_gained: true });
     if (unsubscribedFired !== 0) {
       throw new Error("unsubscribed onFocus handler must not fire");
     }
   });
 });
 
-Deno.test("pollEvents dispatches mouse events to onMouse", () => {
+Deno.test("push events dispatch mouse events to onMouse", () => {
   withFakeAddon(() => {
     const renderer = createRenderer();
+    renderer.startEventStream();
     const mouseEvents: MouseEventJs[] = [];
     renderer.onMouse((event) => mouseEvents.push(event));
     const mouse: MouseEventJs = {
@@ -619,17 +621,17 @@ Deno.test("pollEvents dispatches mouse events to onMouse", () => {
       alt: false,
       shift: true,
     };
-    pendingEvents.push({ type: "mouse", mouse });
-    renderer.pollEvents(0);
+    pushEvent({ type: "mouse", mouse });
     if (mouseEvents.length !== 1 || mouseEvents[0] !== mouse) {
       throw new Error("onMouse must receive the MouseEventJs payload");
     }
   });
 });
 
-Deno.test("pollEvents returns the tagged union verbatim", () => {
+Deno.test("the events async iterable yields every pushed event without loss", async () => {
   withFakeAddon(() => {
     const renderer = createRenderer();
+    renderer.startEventStream();
     const events: TernEventJs[] = [
       { type: "key", key: { name: "enter", ctrl: false, alt: false, shift: false } },
       { type: "resize", width: 80, height: 24 },
@@ -639,16 +641,69 @@ Deno.test("pollEvents returns the tagged union verbatim", () => {
         mouse: { kind: "moved", column: 1, row: 2, ctrl: false, alt: false, shift: false },
       },
     ];
-    pendingEvents.push(...events);
-    const returned = renderer.pollEvents(0);
-    if (returned.length !== events.length) {
-      throw new Error(`returned ${returned.length} events, expected ${events.length}`);
-    }
-    for (let i = 0; i < events.length; i++) {
-      if (returned[i] !== events[i]) {
-        throw new Error(`event ${i} must be passed through verbatim`);
+    // Push N synthetic events through the native callback, exactly like the
+    // real event loop does.
+    for (const event of events) pushEvent(event);
+
+    // The async iterable must yield all N, in order, without loss.
+    return (async () => {
+      const received: TernEventJs[] = [];
+      for await (const event of renderer.events) {
+        received.push(event);
+        if (received.length === events.length) break;
       }
-    }
+      if (received.length !== events.length) {
+        throw new Error(`received ${received.length} events, expected ${events.length}`);
+      }
+      for (let i = 0; i < events.length; i++) {
+        if (received[i] !== events[i]) {
+          throw new Error(`event ${i} must be passed through verbatim`);
+        }
+      }
+    })();
+  });
+});
+
+Deno.test("the events async iterable delivers events pushed after subscription", async () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.startEventStream();
+    // Subscribe first, then push — events must still arrive (no missed
+    // wakeup between the queue check and the waiter registration).
+    const received: TernEventJs[] = [];
+    // Read the length through a function: TS narrows a const-typed empty
+    // array's `length` to 0 (the pushes happen inside the async consumer).
+    const receivedCount = (): number => received.length;
+    const consumer = (async () => {
+      for await (const event of renderer.events) {
+        received.push(event);
+        if (receivedCount() === 3) break;
+      }
+    })();
+    return (async () => {
+      pushEvent({ type: "focus", focus_gained: true });
+      await consumer;
+      if (receivedCount() !== 1) throw new Error(`received ${receivedCount()}`);
+      pushEvent({ type: "focus", focus_gained: true });
+      pushEvent({ type: "focus", focus_gained: true });
+      await consumer;
+      if (receivedCount() !== 3) throw new Error(`received ${receivedCount()}`);
+    })();
+  });
+});
+
+Deno.test("destroy closes the events stream", async () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.startEventStream();
+    renderer.destroy();
+    return (async () => {
+      const received: TernEventJs[] = [];
+      for await (const event of renderer.events) {
+        received.push(event);
+      }
+      if (received.length !== 0) throw new Error("a closed stream must yield nothing");
+    })();
   });
 });
 

@@ -7,10 +7,10 @@
 //
 // The smoke asserts the core API surface, builds a tiny scene through the
 // factory API (rounded box with padding around two text leaves), renders it,
-// then polls for a quit key ('q'). Under the PTY harness (`printf 'q' |
-// script -q /dev/null deno run --allow-all packages/core/smoke.mjs`) the
-// piped 'q' is delivered as a key event and the smoke exits 0. Ctrl+C with
-// exitOnCtrlC also ends the loop cleanly.
+// then waits for a quit key ('q') pushed through the event stream. Under the
+// PTY harness (`printf 'q' | script -q /dev/null deno run --allow-all
+// packages/core/smoke.mjs`) the piped 'q' is delivered as a key event and the
+// smoke exits 0. Ctrl+C with exitOnCtrlC also ends the loop cleanly.
 
 import { createRenderer, Box, Text } from "./src/index.ts";
 import process from "node:process";
@@ -74,30 +74,37 @@ renderer.root.addChild(box);
 renderer.render();
 
 // --- Event loop: quit on 'q', or on auto-destroy (ctrl+c) --------------------
+// Push delivery (roadmap Phase 3): events arrive through `renderer.events`
+// (an AsyncIterable fed by the native event loop) — no polling loop.
 
+renderer.startEventStream();
 let quit = false;
 const deadline = Date.now() + 5000;
+const events = renderer.events[Symbol.asyncIterator]();
 while (Date.now() < deadline && !quit) {
-  let events;
-  try {
-    events = renderer.pollEvents(50);
-  } catch (err) {
-    // The renderer was destroyed inside pollEvents (ctrl+c with
-    // exitOnCtrlC) — that is a clean quit.
-    console.log(`ok: renderer destroyed (${err.message})`);
+  if (renderer.destroyed) {
+    // Ctrl+C with exitOnCtrlC tore the renderer down — that is a clean quit.
     quit = true;
     break;
   }
-  for (const ev of events) {
-    // pollEvents returns tagged TernEventJs objects; the quit key is a
-    // "key"-tagged event carrying the KeyEvent payload.
-    if (ev.type === "key" && ev.key?.name === "char" && ev.key?.char === "q") {
-      quit = true;
-      break;
-    }
+  // Wait for the next pushed event, bounded by the deadline so a dead
+  // renderer fails the smoke instead of hanging forever.
+  const next = await Promise.race([
+    events.next(),
+    new Promise((resolve) =>
+      setTimeout(() => resolve({ done: true, value: undefined }), Math.max(0, deadline - Date.now())),
+    ),
+  ]);
+  if (next.done) break; // stream closed (renderer destroyed) or deadline hit
+  const ev = next.value;
+  // The stream yields tagged TernEventJs objects; the quit key is a
+  // "key"-tagged event carrying the KeyEvent payload.
+  if (ev.type === "key" && ev.key?.name === "char" && ev.key?.char === "q") {
+    quit = true;
+    break;
   }
 }
-
+if (renderer.destroyed) quit = true;
 renderer.destroy();
 if (!quit) {
   console.error("FAIL: did not receive 'q' within 5s");

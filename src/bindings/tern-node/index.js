@@ -703,3 +703,4 @@ module.exports = nativeBinding
 module.exports.NodeHandle = nativeBinding.NodeHandle
 module.exports.TuiRenderer = nativeBinding.TuiRenderer
 module.exports.create_node = nativeBinding.create_node
+module.exports.highlight = nativeBinding.highlight
