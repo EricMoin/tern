@@ -5,6 +5,52 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `Table` widget: a sticky header row (paint z-order 1) above a scrollable
+  content region, one row leaf per data row with per-column width/alignment
+  (padded cells, overflow truncated never mid-glyph), the highlighted row
+  reversed — driven by `tableKey` (up/down highlight + auto-scroll, clamped
+  to the content bounds) and `visibleTableRows` (the visible window);
+  `<Table>` in `@tern/react`, `Table` in `@tern/solid`.
+- `Textarea` widget (Rust + JS): a multi-line editor renderable in
+  `src/core/tern-components/src/textarea.rs` (plain state plus editing
+  operations — `lines` + char-index `row`/`col` cursor, token-aware soft
+  wrap via `wrap_line`, lazy vertical windowing, and a renderer-agnostic
+  `Key` / `KeyAction` mapping), surfaced in JS with a `lines` + `row`/`col`
+  cursor, `width`-bounded soft wrap, `height`-bounded visible window with
+  scroll-to-caret, `enter` line splitting, and up/down across soft-wrapped
+  display lines preserving a preferred column — `editTextareaKey`;
+  `<Textarea>` in `@tern/react` (with `focusId` / `focusManager` /
+  `onChange` / `onSubmit`), `Textarea` in `@tern/solid`.
+- `Modal` widget: a full-bleed dimmed overlay (`MODAL_Z_INDEX` 100) with a
+  centered content box — `openModal` / `closeModal` toggle visibility
+  (`hidden` + `display`) and move focus in/out through the `FocusManager`,
+  saving the previously active focus on open and restoring it on close.
+- Mouse wheel scroll: the core `wheelScroll(view, event)` maps
+  `scroll_up` / `scroll_down` / `scroll_left` / `scroll_right` to `scrollBy`
+  ±1 (a `table` scrolls its content region so the sticky header stays
+  pinned); wired by `useWheelScroll` (`@tern/react`) and
+  `subscribeWheelScroll` (`@tern/solid`).
+- Click-to-focus: the core `focusAt(renderer, event)` routes a `down_left`
+  press on a painted cell (`Renderer.hit_test`) to the topmost registered
+  focusable node; wired by `useClickToFocus` (`@tern/react`) and
+  `subscribeClickFocus` (`@tern/solid`).
+- `FocusManager` traversal, subscription, and reverse index: `next` /
+  `prev` (wrap-around), `focusFirst`, `focusIdFor` (the scene-node-to-id
+  reverse index), and `subscribe` / `unsubscribe` for focus-change
+  callbacks (the new active id, or `null` on blur / unregister of the
+  active focus).
+- Multi-platform napi release pipeline: a tag-triggered / manually
+  dispatched publish workflow (`.github/workflows/publish.yml`) that gates
+  on pack integrity (no `*_test.ts` shipped), a native addon build +
+  load-check, and the `napi create-npm-dirs` platform-package wiring
+  (`tern-node-<platform>` optionalDependencies for linux-x64-gnu,
+  linux-arm64-gnu, darwin-x64, darwin-arm64, win32-x64-msvc), then
+  publishes `@tern/core` / `@tern/react` / `@tern/solid`.
+
 ## [0.1.0] - 2026-08-02
 
 Initial release of tern: a Rust-native TUI renderer driven by React and SolidJS
