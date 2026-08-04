@@ -28,6 +28,10 @@ import {
   Node,
   PANEL_DRAG_MIN_SIZE,
   Panels,
+  PROGRESS_DEFAULT_WIDTH,
+  PROGRESS_EMPTY_CHAR,
+  PROGRESS_FILL_CHAR,
+  Progress,
   SCROLLBAR_THUMB_CHAR,
   SCROLLBAR_TRACK_CHAR,
   SELECT_FILTER_PLACEHOLDER,
@@ -37,11 +41,18 @@ import {
   Spinner,
   StatusBar,
   StreamingText,
+  TAB_ACTIVE_MARKER,
+  TAB_CLOSE_CHAR,
+  TAB_PRIMARY_BG,
+  TAB_PRIMARY_FG,
   Table,
+  Tabs,
   Text,
   Textarea,
   THEME_COMPONENTS,
   THEME_ROLES,
+  activateTab,
+  closeTab,
   collapsePanel,
   closeModal,
   createRenderer,
@@ -55,6 +66,7 @@ import {
   focusAt,
   focusManager,
   focusPanel,
+  framesEqual,
   isStreamFollowing,
   mergeTheme,
   name,
@@ -70,6 +82,7 @@ import {
   startPanelDrag,
   syncStreamTail,
   tableKey,
+  tabsKey,
   tick,
   togglePanel,
   useFocus,
@@ -77,11 +90,16 @@ import {
   visibleOptions,
   visibleTableRows,
   wheelScroll,
+  setProgress,
 } from "./index.ts";
 import type {
   SelectOption,
   SelectProps,
   SelectState,
+  ProgressProps,
+  TabSpec,
+  TabsProps,
+  TabsState,
   TableColumn,
   TableProps,
   TableState,
@@ -118,6 +136,12 @@ let lastHitTest: [number, number] | null = null;
  * tests — an empty path models a press off any painted cell). */
 let fakeHitPath: bigint[] = [7n, 3n];
 
+/** The last title passed to the fake `set_title`, or `null`. */
+let lastSetTitle: string | null = null;
+
+/** The last options passed to the fake `TuiRenderer` constructor, or `null`. */
+let lastRendererOptions: unknown = null;
+
 /** The native node types materialized through the fake `create_node`. */
 const createdNodes: Array<{ type: string; props: Record<string, unknown> | null }> = [];
 
@@ -125,21 +149,35 @@ const createdNodes: Array<{ type: string; props: Record<string, unknown> | null 
  * (keyed by the `FakeNodeHandle` instance backing the node). */
 const fakeContentSizes = new Map<object, { width: number; height: number }>();
 
+/** The last `(width, height)` passed to the fake `render_to_buffer`, or
+ * `null` when the snapshot method was never called. */
+let lastSnapshotSize: [number | undefined, number | undefined] | null = null;
+
 /**
  * A fake native `NodeHandle` standing in for the real addon's scene handle.
  * `content_size` returns the per-handle override set via `fakeContentSizes`
  * (used by the panel-drag geometry tests) or a fixed size, so the geometry-
  * query tests exercise the @tern/core plumbing without the native `.node`
- * binary.
+ * binary. The handle also records its `kind`/`props` and materialized
+ * children, so the fake `render_to_buffer` can paint the captured scene.
  */
 class FakeNodeHandle {
+  readonly kind: string;
+  readonly props: Record<string, unknown>;
+  readonly children: FakeNodeHandle[] = [];
+  constructor(type: string, props: Record<string, unknown> | null | undefined) {
+    this.kind = type;
+    this.props = props ?? {};
+  }
   content_size(): { width: number; height: number } {
     return fakeContentSizes.get(this) ?? { width: 11, height: 2 };
   }
   add_child(child: unknown): unknown {
+    this.children.push(child as FakeNodeHandle);
     return child;
   }
   insert_before(child: unknown, _anchor: unknown): unknown {
+    this.children.push(child as FakeNodeHandle);
     return child;
   }
   set_props(_props: unknown): void {}
@@ -152,11 +190,14 @@ class FakeNodeHandle {
 /** A fake native `TuiRenderer` standing in for the real addon. */
 class FakeTuiRenderer {
   destroyed = false;
-  constructor(_options: unknown) {}
+  /** The scene root handle, reused across `root()` calls so the scene the
+   * `Renderer` builds is captured for `render_to_buffer`. */
+  private rootHandle = new FakeNodeHandle("root", {});
+  constructor(options: unknown) {
+    lastRendererOptions = options;
+  }
   root(): NodeHandle {
-    // The `Renderer` constructor only stores this in `Node.wrapRoot`;
-    // the dispatch tests never touch it.
-    return new FakeNodeHandle() as unknown as NodeHandle;
+    return this.rootHandle as unknown as NodeHandle;
   }
   start_event_stream(callback: (err: Error | null, event: TernEventJs) => void): void {
     streamCallback = callback;
@@ -166,8 +207,16 @@ class FakeTuiRenderer {
     return fakeHitPath;
   }
   render(): void {}
+  render_to_buffer(width?: number, height?: number): string[] {
+    lastSnapshotSize = [width, height];
+    return paintSceneRows(this.rootHandle, width, height);
+  }
   destroy(): void {
     this.destroyed = true;
+  }
+  capabilities = { truecolor: true, colors: 16_777_216 };
+  set_title(title: string): void {
+    lastSetTitle = title;
   }
 }
 
@@ -177,9 +226,63 @@ const fakeAddon = {
   NodeHandle: FakeNodeHandle,
   create_node: (type: string, props?: Record<string, unknown> | null) => {
     createdNodes.push({ type, props: props ?? null });
-    return new FakeNodeHandle();
+    return new FakeNodeHandle(type, props);
   },
 } as unknown as TernAddon;
+
+/**
+ * Paint a captured fake scene into row strings, standing in for the native
+ * `render_to_buffer`.
+ *
+ * The fake cannot run the real compositor, so this is a minimal painter for
+ * the canonical golden scene: a box child of the root, laid out at the
+ * origin of the viewport and sized to its text content plus `padding`, with
+ * `border_style` glyphs drawn at the rect edges — exactly the geometry the
+ * real compositor produces for the same scene (see the `paint_scene_rows`
+ * Rust unit test in src/bindings/tern-node/src/lib.rs). Every row is padded
+ * with spaces to the viewport width; glyphs and text are single-width.
+ */
+function paintSceneRows(
+  root: FakeNodeHandle,
+  width: number | undefined,
+  height: number | undefined,
+): string[] {
+  const w = width ?? 6;
+  const h = height ?? 3;
+  const glyphs: Record<string, readonly [string, string, string, string, string, string]> = {
+    rounded: ["┌", "┐", "└", "┘", "─", "│"],
+    plain: ["+", "+", "+", "+", "-", "|"],
+    double: ["╔", "╗", "╚", "╝", "═", "║"],
+    thick: ["┏", "┓", "┗", "┛", "━", "┃"],
+  };
+  const rows: string[] = [];
+  for (let y = 0; y < h; y++) {
+    let row = "";
+    for (let x = 0; x < w; x++) {
+      let ch = " ";
+      for (const child of root.children) {
+        const textChild = child.children[0];
+        const text = typeof textChild?.props.text === "string" ? textChild.props.text : "";
+        const pad = typeof child.props.padding === "number" ? child.props.padding : 0;
+        const bw = text.length + 2 * pad;
+        const bh = 1 + 2 * pad;
+        if (x < bw && y < bh) {
+          const g = glyphs[String(child.props.border_style ?? "none")];
+          let c = " ";
+          if (g !== undefined) {
+            if (y === 0) c = x === 0 ? g[0] : x === bw - 1 ? g[1] : g[4];
+            else if (y === bh - 1) c = x === 0 ? g[2] : x === bw - 1 ? g[3] : g[4];
+            else c = x === 0 || x === bw - 1 ? g[5] : text[x - pad] ?? " ";
+          }
+          if (c !== " ") ch = c;
+        }
+      }
+      row += ch;
+    }
+    rows.push(row);
+  }
+  return rows;
+}
 
 /** Run `fn` with the fake addon installed, resetting the seam afterwards. */
 function withFakeAddon(fn: () => void): void {
@@ -188,6 +291,9 @@ function withFakeAddon(fn: () => void): void {
   fakeHitPath = [7n, 3n];
   createdNodes.length = 0;
   fakeContentSizes.clear();
+  lastSetTitle = null;
+  lastRendererOptions = null;
+  lastSnapshotSize = null;
   setAddonForTesting(fakeAddon);
   try {
     fn();
@@ -548,6 +654,61 @@ Deno.test("createRenderer is a function accepting options", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Terminal capabilities + title (fake native addon)
+// ---------------------------------------------------------------------------
+
+Deno.test("createRenderer forwards useAltScreen and title options", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer({ useAltScreen: false, title: "tern app" });
+    // The Renderer routes the camelCase options to the snake_case native
+    // constructor options, with the documented defaults for the unset ones.
+    if (JSON.stringify(lastRendererOptions) !== JSON.stringify({
+      exit_on_ctrl_c: false,
+      use_alt_screen: false,
+      title: "tern app",
+    })) {
+      throw new Error(`native options = ${JSON.stringify(lastRendererOptions)}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("createRenderer defaults useAltScreen to true", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const options = lastRendererOptions as { use_alt_screen?: boolean };
+    if (options.use_alt_screen !== true) {
+      throw new Error(`use_alt_screen = ${options.use_alt_screen}`);
+    }
+    if ("title" in (options as object)) {
+      throw new Error("title must be omitted when unset");
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("renderer capabilities getter routes to the native addon", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const caps = renderer.capabilities;
+    if (caps.truecolor !== true) throw new Error(`truecolor = ${caps.truecolor}`);
+    if (caps.colors !== 16_777_216) throw new Error(`colors = ${caps.colors}`);
+    renderer.destroy();
+  });
+});
+
+Deno.test("renderer setTitle routes to the native addon", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.setTitle("tern");
+    if (lastSetTitle !== "tern") {
+      throw new Error(`set_title called with ${JSON.stringify(lastSetTitle)}`);
+    }
+    renderer.destroy();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Event dispatch (fake native addon — push delivery)
 // ---------------------------------------------------------------------------
 
@@ -820,6 +981,70 @@ Deno.test("the mocked addon exposes hit_test and content_size natively", () => {
       throw new Error(`native content_size = ${JSON.stringify(size)}`);
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// Frame snapshots (render_to_buffer)
+// ---------------------------------------------------------------------------
+
+Deno.test("Renderer.snapshotFrame paints the scene to golden rows via render_to_buffer", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    // The canonical golden scene: a rounded-border box with 1-cell padding
+    // around Text('Hi'). The fake addon's `render_to_buffer` paints the
+    // captured scene with a mini-compositor mirroring the real compositor's
+    // geometry (content-sized box at the origin), so the rows must match the
+    // compositor's exact output — the same golden asserted by the
+    // `paint_scene_rows` Rust unit test in src/bindings/tern-node/src/lib.rs:
+    //   ┌──┐
+    //   │Hi│
+    //   └──┘
+    // with trailing blanks padded to the 6-column viewport width.
+    renderer.root.addChild(Box({ border_style: "rounded", padding: 1 }, Text({ text: "Hi" })));
+    const frame = renderer.snapshotFrame(6, 3);
+    const expected = ["┌──┐  ", "│Hi│  ", "└──┘  "];
+    if (!framesEqual(frame, expected)) {
+      throw new Error(`unexpected frame rows: ${JSON.stringify(frame)}`);
+    }
+    // The viewport was forwarded to the native method.
+    if (lastSnapshotSize === null || lastSnapshotSize[0] !== 6 || lastSnapshotSize[1] !== 3) {
+      throw new Error(`viewport not forwarded: ${JSON.stringify(lastSnapshotSize)}`);
+    }
+    // The scene was materialized through the fake addon (box + text).
+    if (createdNodes.length !== 2 || createdNodes[0]?.type !== "box" || createdNodes[1]?.type !== "text") {
+      throw new Error(`created nodes = ${JSON.stringify(createdNodes)}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("Renderer.snapshotFrame defaults the viewport to the native shared size", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Text({ text: "x" }));
+    // No viewport args: the native method falls back to its shared viewport,
+    // so the JS layer must delegate with undefined, undefined.
+    renderer.snapshotFrame();
+    if (lastSnapshotSize === null || lastSnapshotSize[0] !== undefined || lastSnapshotSize[1] !== undefined) {
+      throw new Error(`default viewport not forwarded: ${JSON.stringify(lastSnapshotSize)}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("framesEqual compares row counts and row strings", () => {
+  if (!framesEqual(["┌──┐  ", "│Hi│  "], ["┌──┐  ", "│Hi│  "])) {
+    throw new Error("identical frames must be equal");
+  }
+  if (framesEqual(["┌──┐  ", "│Hi│  "], ["┌──┐  ", "│Hi   "])) {
+    throw new Error("differing rows must be unequal");
+  }
+  if (framesEqual(["┌──┐  "], ["┌──┐  ", "│Hi│  "])) {
+    throw new Error("differing row counts must be unequal");
+  }
+  if (framesEqual([], ["x"])) {
+    throw new Error("empty vs non-empty must be unequal");
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -2354,6 +2579,448 @@ Deno.test("a 10k-row table materializes a bounded row window and still clamps an
     }
     if (table.props.scroll_y !== undefined) {
       throw new Error("the table root must not scroll (the sticky header stays pinned)");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tabs: composition, active-tab styling, activateTab / closeTab / tabsKey
+// ---------------------------------------------------------------------------
+
+/** A small tabs fixture: three tabs with distinct content nodes. */
+function tabsFixture(): { tabs: Node; specs: TabSpec[]; activeOf: () => number } {
+  const specs: TabSpec[] = [
+    { label: "logs", content: [Text({ text: "log line" })] },
+    { label: "files", content: [Text({ text: "file list" })] },
+    { label: "git", content: [Text({ text: "git status" })] },
+  ];
+  const tabs = Tabs({ tabs: specs });
+  const activeOf = (): number => tabs.props.active as number;
+  return { tabs, specs, activeOf };
+}
+
+Deno.test("Tabs composes a tab bar row and a content region holding the active tab's content", () => {
+  const { tabs } = tabsFixture();
+  if (tabs.type !== "tabs") throw new Error(`type = ${tabs.type}`);
+  if (tabs.props.flex_direction !== "column") throw new Error(`flex_direction = ${tabs.props.flex_direction}`);
+  if (tabs.props.active !== 0) throw new Error(`active = ${tabs.props.active}`);
+  // The tab list is JS bookkeeping, never scene props.
+  if ("tabs" in tabs.props || "closable" in tabs.props) {
+    throw new Error(`consumed keys leaked: ${JSON.stringify(tabs.props)}`);
+  }
+  // Composition: the tab bar row (child 0) + the content region (child 1).
+  if (tabs.children.length !== 2) throw new Error(`children = ${tabs.children.length}`);
+  const bar = tabs.children[0];
+  if (bar === undefined || bar.type !== "box" || bar.props.flex_direction !== "row") {
+    throw new Error("the tab bar must be a row box");
+  }
+  if (bar.children.length !== 3) throw new Error(`tab leaves = ${bar.children.length}`);
+  if (bar.children.map((leaf) => leaf.props.text).join(",") !== `${TAB_ACTIVE_MARKER}logs,files,git`) {
+    throw new Error(`labels = ${bar.children.map((leaf) => leaf.props.text).join(",")}`);
+  }
+  const region = tabs.children[1];
+  if (region === undefined || region.type !== "box" || region.props.flex_direction !== "column") {
+    throw new Error("the content region must be a column box");
+  }
+  // Only the active tab's content is materialized in the region.
+  if (region.children.length !== 1 || region.children[0]?.props.text !== "log line") {
+    throw new Error(`region content = ${region.children.map((n) => n.props.text).join(",")}`);
+  }
+  // The other tabs' content stays out of the scene tree (only the active
+  // tab's content is composed).
+  if (bar.children.some((leaf) => leaf.children.length !== 0)) {
+    throw new Error("tab leaves must be text leaves without children");
+  }
+});
+
+Deno.test("Tabs styles the active tab with the primary palette, reversed, and a top-border marker", () => {
+  const { tabs } = tabsFixture();
+  const bar = tabs.children[0]!;
+  const activeLeaf = bar.children[0]!;
+  const inactiveLeaf = bar.children[1]!;
+  // The active tab's label is prefixed by the top-border marker.
+  if (activeLeaf.props.text !== `${TAB_ACTIVE_MARKER}logs`) {
+    throw new Error(`active text = ${JSON.stringify(activeLeaf.props.text)}`);
+  }
+  // The active tab carries the primary palette colors + reversed; inactive
+  // tabs are plain.
+  if (activeLeaf.props.reversed !== true) throw new Error("the active tab must be reversed");
+  if (activeLeaf.props.fg !== TAB_PRIMARY_FG || activeLeaf.props.bg !== TAB_PRIMARY_BG) {
+    throw new Error(`active colors = ${JSON.stringify(activeLeaf.props)}`);
+  }
+  if (inactiveLeaf.props.reversed !== undefined) throw new Error("inactive tabs must not be reversed");
+  if (inactiveLeaf.props.fg !== undefined) throw new Error("inactive tabs must not carry the primary fg");
+  if (inactiveLeaf.props.text !== "files") throw new Error(`inactive text = ${inactiveLeaf.props.text}`);
+});
+
+Deno.test("Tabs close affordance appends the close glyph per tab (per-tab closable wins)", () => {
+  const closable = Tabs({
+    tabs: [
+      { label: "a", content: [] },
+      { label: "b", content: [] },
+    ],
+    closable: true,
+  });
+  const bar = closable.children[0]!;
+  if (bar.children[0]?.props.text !== `${TAB_ACTIVE_MARKER}a ${TAB_CLOSE_CHAR}`) {
+    throw new Error(`active closable = ${JSON.stringify(bar.children[0]?.props.text)}`);
+  }
+  if (bar.children[1]?.props.text !== `b ${TAB_CLOSE_CHAR}`) {
+    throw new Error(`inactive closable = ${JSON.stringify(bar.children[1]?.props.text)}`);
+  }
+  // A per-tab `closable: false` overrides the element default.
+  const mixed = Tabs({
+    tabs: [
+      { label: "a", content: [], closable: false },
+      { label: "b", content: [] },
+    ],
+    closable: true,
+  });
+  const mixedBar = mixed.children[0]!;
+  if (mixedBar.children[0]?.props.text !== `${TAB_ACTIVE_MARKER}a`) {
+    throw new Error(`per-tab closable: false = ${JSON.stringify(mixedBar.children[0]?.props.text)}`);
+  }
+  if (mixedBar.children[1]?.props.text !== `b ${TAB_CLOSE_CHAR}`) {
+    throw new Error(`default closable = ${JSON.stringify(mixedBar.children[1]?.props.text)}`);
+  }
+});
+
+Deno.test("activateTab switches the active tab and swaps the content region", () => {
+  const { tabs, activeOf } = tabsFixture();
+  activateTab(tabs, 1);
+  if (activeOf() !== 1) throw new Error(`active = ${activeOf()}`);
+  // Re-read the live composition: the rebuild replaced the bar and region.
+  const bar = tabs.children[0]!;
+  if (bar.children[1]?.props.text !== `${TAB_ACTIVE_MARKER}files`) {
+    throw new Error(`active leaf = ${JSON.stringify(bar.children[1]?.props.text)}`);
+  }
+  if (bar.children[0]?.props.text !== "logs") throw new Error(`old active leaf = ${bar.children[0]?.props.text}`);
+  const region = tabs.children[1]!;
+  if (region.children.length !== 1 || region.children[0]?.props.text !== "file list") {
+    throw new Error(`region content = ${region.children.map((n) => n.props.text).join(",")}`);
+  }
+  // Activating the same tab is a no-op (the composition is not rebuilt).
+  const before = tabs.children[0]!;
+  activateTab(tabs, 1);
+  if (tabs.children[0] !== before) throw new Error("a no-op activate must not rebuild");
+  // Out-of-range indices clamp: 99 -> last, -1 -> first.
+  activateTab(tabs, 99);
+  if (activeOf() !== 2) throw new Error(`clamp high = ${activeOf()}`);
+  activateTab(tabs, -1);
+  if (activeOf() !== 0) throw new Error(`clamp low = ${activeOf()}`);
+});
+
+Deno.test("closeTab removes the tab and re-clamps the active index", () => {
+  // Closing a tab before the active one shifts the active down.
+  const shift = Tabs({ tabs: tabsFixture().specs, active: 2 });
+  closeTab(shift, 0);
+  if (shift.props.active !== 1) throw new Error(`shift = ${shift.props.active}`);
+  if (shift.children[0]?.children.map((leaf) => leaf.props.text).join(",") !== `files,${TAB_ACTIVE_MARKER}git`) {
+    throw new Error(`labels after close = ${shift.children[0]?.children.map((leaf) => leaf.props.text).join(",")}`);
+  }
+  // Closing the active tab leaves the tab that slid into its slot.
+  const active = Tabs({ tabs: tabsFixture().specs, active: 1 });
+  closeTab(active, 1);
+  if (active.props.active !== 1) throw new Error(`active after self-close = ${active.props.active}`);
+  if (active.children[0]?.children.map((leaf) => leaf.props.text).join(",") !== `logs,${TAB_ACTIVE_MARKER}git`) {
+    throw new Error(`labels = ${active.children[0]?.children.map((leaf) => leaf.props.text).join(",")}`);
+  }
+  // Closing the last (active) tab clamps the active to the new last.
+  const last = Tabs({ tabs: tabsFixture().specs, active: 2 });
+  closeTab(last, 2);
+  if (last.props.active !== 1) throw new Error(`clamped active = ${last.props.active}`);
+  // Closing the only tab leaves an empty bar + region at active 0.
+  const only = Tabs({ tabs: [{ label: "solo", content: [Text({ text: "x" })] }] });
+  closeTab(only, 0);
+  if (only.props.active !== 0) throw new Error(`empty active = ${only.props.active}`);
+  if (only.children[0]?.children.length !== 0) throw new Error(`empty bar = ${only.children[0]?.children.length}`);
+  if (only.children[1]?.children.length !== 0) throw new Error(`empty region = ${only.children[1]?.children.length}`);
+  // Bad indices are no-ops.
+  const noop = Tabs({ tabs: tabsFixture().specs });
+  closeTab(noop, 5);
+  if (noop.children[0]?.children.length !== 3) throw new Error("a bad index must not close");
+});
+
+Deno.test("tabsKey left/right move the active tab and clamp at the ends", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  const { tabs, activeOf } = tabsFixture();
+  const right = tabsKey(tabs, { name: "right", ...base });
+  if (right.active !== 1 || right.count !== 3) throw new Error(`right = ${JSON.stringify(right)}`);
+  if (activeOf() !== 1) throw new Error(`node active = ${activeOf()}`);
+  // Right at the last tab clamps.
+  const atEnd = tabsKey(tabs, { name: "right", ...base });
+  const clamped = tabsKey(tabs, { name: "right", ...base });
+  if (atEnd.active !== 2 || clamped.active !== 2) throw new Error(`right clamp = ${clamped.active}`);
+  // Left walks back and clamps at the first.
+  const left = tabsKey(tabs, { name: "left", ...base });
+  if (left.active !== 1) throw new Error(`left = ${left.active}`);
+  const top = tabsKey(tabs, { name: "left", ...base });
+  if (top.active !== 0) throw new Error(`left = ${top.active}`);
+  const clampedLow = tabsKey(tabs, { name: "left", ...base });
+  if (clampedLow.active !== 0) throw new Error(`left clamp = ${clampedLow.active}`);
+  if (activeOf() !== 0) throw new Error(`node active = ${activeOf()}`);
+});
+
+Deno.test("tabsKey ctrl+tab / ctrl+shift+tab wrap to the next / previous tab", () => {
+  const base = { alt: false } as const;
+  const { tabs, activeOf } = tabsFixture();
+  // ctrl+shift+tab at the first tab wraps to the last.
+  const prevWrap = tabsKey(tabs, { name: "tab", ctrl: true, shift: true, ...base });
+  if (prevWrap.active !== 2) throw new Error(`ctrl+shift+tab wrap = ${prevWrap.active}`);
+  if (activeOf() !== 2) throw new Error(`node active = ${activeOf()}`);
+  // ctrl+tab at the last tab wraps to the first.
+  const nextWrap = tabsKey(tabs, { name: "tab", ctrl: true, shift: false, ...base });
+  if (nextWrap.active !== 0) throw new Error(`ctrl+tab wrap = ${nextWrap.active}`);
+  // Plain tab (no ctrl) leaves the tabs unchanged.
+  const plainTab = tabsKey(tabs, { name: "tab", ctrl: false, shift: false, ...base });
+  if (plainTab.active !== 0) throw new Error(`plain tab = ${plainTab.active}`);
+});
+
+Deno.test("tabsKey ctrl+w closes the active tab and re-clamps the active index", () => {
+  const base = { alt: false, shift: false } as const;
+  const { tabs, specs, activeOf } = tabsFixture();
+  // Move to the middle tab, then close it with ctrl+w.
+  tabsKey(tabs, { name: "right", ctrl: false, ...base });
+  const closed = tabsKey(tabs, { name: "w", ctrl: true, ...base });
+  if (closed.count !== 2) throw new Error(`count = ${closed.count}`);
+  if (activeOf() !== 1) throw new Error(`active after close = ${activeOf()}`);
+  if (tabs.children[0]?.children.map((leaf) => leaf.props.text).join(",") !== `logs,${TAB_ACTIVE_MARKER}git`) {
+    throw new Error(`labels = ${tabs.children[0]?.children.map((leaf) => leaf.props.text).join(",")}`);
+  }
+  // ctrl+w on the last tab closes it; the active clamps to the new last.
+  void specs;
+  const last = Tabs({ tabs: tabsFixture().specs, active: 2 });
+  const closedLast = tabsKey(last, { name: "w", ctrl: true, ...base });
+  if (closedLast.count !== 2 || closedLast.active !== 1) {
+    throw new Error(`last close = ${JSON.stringify(closedLast)}`);
+  }
+  // Unknown keys leave the tabs unchanged.
+  const untouched = tabsKey(tabs, { name: "char", char: "q", ctrl: false, ...base });
+  if (untouched.active !== 1 || untouched.count !== 2) {
+    throw new Error(`unknown key = ${JSON.stringify(untouched)}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Progress: composition, fill-cell math, percentage readout, label, setProgress
+// ---------------------------------------------------------------------------
+
+/** The inner (bar) width of a progress node: the outer width minus the frame's
+ * border columns (2 for a visible border, 0 for `none`/unset). */
+function progressInnerOf(node: Node): number {
+  const outer = typeof node.props.width === "number" ? node.props.width : PROGRESS_DEFAULT_WIDTH;
+  const border = node.props.border_style;
+  return outer - (border !== undefined && border !== "none" ? 2 : 0);
+}
+
+/** The expected bar text: `ceil(ratio*inner)` fills then empty cells. */
+function expectedBar(ratio: number, inner: number): string {
+  const filled = Math.max(0, Math.min(inner, Math.ceil(ratio * inner)));
+  return PROGRESS_FILL_CHAR.repeat(filled) + PROGRESS_EMPTY_CHAR.repeat(inner - filled);
+}
+
+Deno.test("Progress composes a framed gauge: fill leaf + percentage readout", () => {
+  // Defaults: plain frame, outer width 20 (inner 18), value 0/max 100.
+  const node = Progress();
+  if (node.type !== "progress") throw new Error(`type = ${node.type}`);
+  if (node.props.border_style !== "plain") throw new Error(`border_style = ${node.props.border_style}`);
+  if (node.props.height !== 1) throw new Error(`height = ${node.props.height}`);
+  if (node.props.width !== PROGRESS_DEFAULT_WIDTH) throw new Error(`width = ${node.props.width}`);
+  // The composition bookkeeping keys are consumed by the factory — never
+  // scene props (`ratio` is the bar model state, like Tabs' `active`, so it
+  // stays on the props).
+  if ("label" in node.props || "show_percentage" in node.props) {
+    throw new Error(`consumed keys leaked: ${JSON.stringify(node.props)}`);
+  }
+  // Composition: the in-flow fill leaf (child 0) + the percentage readout
+  // overlay (the last child); no label by default.
+  if (node.children.length !== 2) throw new Error(`children = ${node.children.length}`);
+  const bar = node.children[0];
+  if (bar === undefined || bar.type !== "text") throw new Error("the fill must be a text leaf");
+  if (bar.props.text !== expectedBar(0, progressInnerOf(node))) {
+    throw new Error(`empty bar = ${JSON.stringify(bar.props.text)}`);
+  }
+  const readout = node.children[1];
+  if (readout === undefined || readout.props.text !== "0%") {
+    throw new Error(`readout = ${JSON.stringify(readout?.props.text)}`);
+  }
+  if (readout?.props.position !== "absolute" || readout?.props.right !== 0) {
+    throw new Error(`readout position = ${JSON.stringify(readout?.props)}`);
+  }
+  if (readout?.props.z_index !== 1) throw new Error("the readout must overlay the fill (z_index 1)");
+});
+
+Deno.test("Progress fill-cell math: ceil(value/max * inner_width) filled cells", () => {
+  // width 6 with a plain frame => inner width 4.
+  const cases: Array<[number, number, string]> = [
+    [0, 4, "░░░░"],
+    [1, 4, "▓░░░"],
+    [2, 4, "▓▓░░"],
+    [3, 4, "▓▓▓░"],
+    [4, 4, "▓▓▓▓"],
+    // value > max clamps to full; ceil rounds partial cells up.
+    [5, 4, "▓▓▓▓"],
+    [1, 3, "▓▓░░"], // ceil(1/3*4) = ceil(1.33) = 2 of 4
+  ];
+  for (const [value, max, expected] of cases) {
+    const node = Progress({ value, max, width: 6 });
+    const text = node.children[0]?.props.text;
+    if (text !== expected) {
+      throw new Error(`value=${value} max=${max} bar = ${JSON.stringify(text)} (want ${JSON.stringify(expected)})`);
+    }
+  }
+});
+
+Deno.test("Progress percentage readout: ceil(value/max*100)%", () => {
+  const readout = (node: Node): string | undefined => node.children[node.children.length - 1]?.props.text;
+  if (readout(Progress({ value: 5, max: 10, width: 6 })) !== "50%") {
+    throw new Error("50% readout");
+  }
+  if (readout(Progress({ value: 1, max: 3, width: 6 })) !== "34%") {
+    throw new Error("ceil(1/3*100) = 34% readout");
+  }
+  if (readout(Progress({ value: 99, max: 100, width: 6 })) !== "99%") {
+    throw new Error("99% readout");
+  }
+  // show_percentage: false drops the readout leaf entirely.
+  const noReadout = Progress({ value: 1, max: 2, width: 6, show_percentage: false });
+  if (noReadout.children.length !== 1 || noReadout.children[0]?.props.text !== "▓▓░░") {
+    throw new Error(`no-readout composition = ${noReadout.children.length}`);
+  }
+});
+
+Deno.test("Progress label: left-aligned overlay inside the bar area when there is room", () => {
+  // width 12, plain frame => inner 10; "copy" (4 cells) + "100%" reserve (4)
+  // fits.
+  const fits = Progress({ value: 2, max: 4, width: 12, label: "copy" });
+  if (fits.children.length !== 3) throw new Error(`label composition = ${fits.children.length}`);
+  const label = fits.children[1];
+  if (label === undefined || label.props.text !== "copy") {
+    throw new Error(`label text = ${JSON.stringify(label?.props.text)}`);
+  }
+  if (label.props.position !== "absolute" || label.props.left !== 0) {
+    throw new Error(`label position = ${JSON.stringify(label?.props)}`);
+  }
+  if (label.props.dim !== true) throw new Error("the label must be dimmed");
+  // The fill leaf still counts the full inner width (the label overlays it).
+  if (fits.children[0]?.props.text !== expectedBar(0.5, progressInnerOf(fits))) {
+    throw new Error("the fill must stay exact under the label overlay");
+  }
+  // No room: a label wider than inner - reserve is dropped.
+  const tight = Progress({ value: 1, max: 4, width: 8, label: "copying" }); // inner 6 < 4 + 4
+  if (tight.children.length !== 2 || tight.children[1]?.props.text !== "25%") {
+    throw new Error(`tight label must be dropped (${tight.children.length})`);
+  }
+  // With the readout off, the label only competes against the inner width.
+  const wide = Progress({ value: 1, max: 4, width: 10, label: "copying", show_percentage: false }); // inner 8
+  if (wide.children.length !== 2 || wide.children[1]?.props.text !== "copying") {
+    throw new Error(`no-readout label = ${JSON.stringify(wide.children.map((c) => c.props.text))}`);
+  }
+  // An empty label string is never composed.
+  const empty = Progress({ value: 1, max: 4, width: 12, label: "" });
+  if (empty.children.length !== 2) throw new Error("an empty label must be dropped");
+});
+
+Deno.test("Progress ratio prop drives the bar directly (wins over value/max)", () => {
+  const ratio = Progress({ value: 9, max: 10, ratio: 0.5, width: 6 });
+  if (ratio.children[0]?.props.text !== expectedBar(0.5, progressInnerOf(ratio))) {
+    throw new Error(`ratio bar = ${JSON.stringify(ratio.children[0]?.props.text)}`);
+  }
+  if (ratio.children[1]?.props.text !== "50%") {
+    throw new Error(`ratio readout = ${JSON.stringify(ratio.children[1]?.props.text)}`);
+  }
+  // The ratio is clamped into [0, 1].
+  const over = Progress({ ratio: 1.5, width: 6 });
+  if (over.children[0]?.props.text !== expectedBar(1, progressInnerOf(over))) {
+    throw new Error("ratio must clamp to 1");
+  }
+  const under = Progress({ ratio: -0.5, width: 6 });
+  if (under.children[0]?.props.text !== expectedBar(0, progressInnerOf(under))) {
+    throw new Error("ratio must clamp to 0");
+  }
+});
+
+Deno.test("Progress border_style none fills the full outer width (no frame columns)", () => {
+  const node = Progress({ value: 1, max: 4, width: 4, border_style: "none" });
+  if (node.props.border_style !== "none") throw new Error(`border_style = ${node.props.border_style}`);
+  // inner = 4 (no border columns): 1 of 4 cells filled.
+  if (node.children[0]?.props.text !== "▓░░░") {
+    throw new Error(`bar = ${JSON.stringify(node.children[0]?.props.text)}`);
+  }
+});
+
+Deno.test("setProgress updates a live bar in place without rebuilding", () => {
+  // width 12 (inner 10): the label "work" (4) + the readout reserve (4) fits.
+  const node = Progress({ value: 1, max: 4, width: 12, label: "work" });
+  if (node.children.length !== 3) throw new Error(`label composition = ${node.children.length}`);
+  const barBefore = node.children[0];
+  const labelBefore = node.children[1];
+  const readoutBefore = node.children[2];
+  // Accessors: setProgress mutates the node's props and leaves in place, which
+  // TS's control flow cannot see — reading through functions defeats the
+  // stale narrowing (the established pattern in this suite).
+  const valueOf = (): unknown => node.props.value;
+  const maxOf = (): unknown => node.props.max;
+  const barText = (): string => node.children[0]?.props.text as string;
+  const readoutText = (): string => node.children[2]?.props.text as string;
+
+  setProgress(node, 3);
+  if (valueOf() !== 3 || maxOf() !== 4) throw new Error(`props = ${JSON.stringify(node.props)}`);
+  // The composition is not rebuilt: the same leaf instances are repainted.
+  if (node.children[0] !== barBefore) throw new Error("setProgress must not rebuild the fill leaf");
+  if (node.children[1] !== labelBefore) throw new Error("setProgress must not rebuild the label leaf");
+  if (node.children[2] !== readoutBefore) throw new Error("setProgress must not rebuild the readout leaf");
+  if (barText() !== expectedBar(0.75, progressInnerOf(node))) {
+    throw new Error(`bar after setProgress = ${JSON.stringify(barText())}`);
+  }
+  if (readoutText() !== "75%") {
+    throw new Error(`readout after setProgress = ${JSON.stringify(readoutText())}`);
+  }
+
+  // The explicit max argument overrides the node's current max.
+  setProgress(node, 1, 2);
+  if (maxOf() !== 2) throw new Error(`max = ${maxOf()}`);
+  if (barText() !== expectedBar(0.5, progressInnerOf(node))) {
+    throw new Error(`bar after max override = ${JSON.stringify(barText())}`);
+  }
+  // 0% clamps the bar empty.
+  setProgress(node, 0);
+  if (barText() !== expectedBar(0, progressInnerOf(node))) {
+    throw new Error(`empty bar = ${JSON.stringify(barText())}`);
+  }
+  if (readoutText() !== "0%") {
+    throw new Error(`0% readout = ${JSON.stringify(readoutText())}`);
+  }
+});
+
+Deno.test("Progress resolves the progress component preset through resolveTheme", () => {
+  const custom = mergeTheme(defaultTheme, {
+    components: { progress: { fg: "#98c379", border_style: "double" } },
+  });
+  const out = resolveTheme(custom, { component: "progress" });
+  if (out.fg !== "#98c379") throw new Error(`fg = ${out.fg}`);
+  if (out.border_style !== "double") throw new Error(`border_style = ${out.border_style}`);
+  if ("component" in out) throw new Error(`component leaked: ${JSON.stringify(out)}`);
+  // The preset is stamped onto the framed box by the factory path (the
+  // explicit prop wins over the preset).
+  const node = Progress(resolveTheme(custom, { component: "progress", width: 6, value: 1, max: 4 }));
+  if (node.props.fg !== "#98c379") throw new Error(`factory fg = ${node.props.fg}`);
+  if (node.props.border_style !== "double") throw new Error(`factory border_style = ${node.props.border_style}`);
+});
+
+Deno.test("Progress materializes as a box through the native kind map", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    // width 12 (inner 10): the label "x" fits alongside the readout.
+    renderer.root.addChild(Progress({ value: 1, max: 4, width: 12, label: "x" }));
+    // The progress element materializes its root as a box; the composition
+    // (fill + label + readout) materializes as text leaves.
+    if (createdNodes.length !== 4) throw new Error(`created = ${JSON.stringify(createdNodes)}`);
+    if (createdNodes[0]?.type !== "box") throw new Error(`root native type = ${createdNodes[0]?.type}`);
+    for (let i = 1; i < 4; i++) {
+      if (createdNodes[i]?.type !== "text") {
+        throw new Error(`child ${i} native type = ${createdNodes[i]?.type}`);
+      }
     }
   });
 });
