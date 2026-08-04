@@ -53,7 +53,6 @@ import {
   defaultTheme,
   followTail,
   isStreamFollowing,
-  syncStreamTail,
   scrollTo,
   scrollToBottom,
   STREAM_AFFORDANCE_CHAR,
@@ -63,7 +62,6 @@ import {
   type KeyEvent,
   type Renderer,
   type Theme,
-  type ThemeOverrides,
   renderer,
   rendererOptions,
   replaceNode,
@@ -94,7 +92,6 @@ import {
   Progress as CoreProgress,
   Modal as CoreModal,
   createRenderer,
-  focusAt,
   wheelScroll,
   type TernEventJs,
 } from "@tern/core";

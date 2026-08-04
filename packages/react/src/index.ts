@@ -59,13 +59,12 @@ import {
   useEffect,
   useMemo,
   useRef,
+  type Context,
   type ReactElement,
   type ReactNode,
   type RefObject,
 } from "react";
 import {
-  activateTab,
-  closeTab,
   defaultTheme,
   dragPanels,
   editKey,
@@ -77,30 +76,21 @@ import {
   pasteInto,
   pasteIntoTextarea,
   resolveTheme,
-  scrollBy,
-  scrollTo,
-  scrollTop,
   selectKey,
-  setProgress,
   setStreamAutoScroll,
   startPanelDrag,
   syncStreamTail,
-  tableKey,
   tabsKey,
   tick,
   useFocus as coreUseFocus,
-  visibleTableRows,
   wheelScroll,
-  FocusManager,
+  type FocusManager,
   type DiffLine,
   type FocusHandle,
   type KeyHandler,
   type Node,
   type NodeProps,
-  type PanelDragHandle,
-  type PanelDragResult,
   type PanelSpec,
-  type PasteHandler,
   type Renderer,
   type ResizeHandler,
   type SelectOption,
@@ -109,7 +99,6 @@ import {
   type StatusBarSegment,
   type TabSpec,
   type TableColumn,
-  type TableState,
   type TabsState,
   type TextareaState,
   type Theme,
@@ -183,7 +172,7 @@ export interface StreamingTextProps extends TernNodeProps {
  * `defaultTheme`, so host components resolve against the default theme when
  * no `ThemeProvider` is mounted (provider fallback).
  */
-export const ThemeContext = createContext<Theme>(defaultTheme);
+export const ThemeContext: Context<Theme> = createContext<Theme>(defaultTheme);
 
 /** Props for `ThemeProvider`: the (partial) theme plus the tree it applies
  * to. The theme is merged over the core `defaultTheme`, so a partial theme
@@ -1040,7 +1029,7 @@ export function Progress(props: ProgressProps): ReactElement<ProgressProps> {
  * route the tree's focus wiring — `useFocusManager`, `useFocus` and
  * `useFocusTraversal` — through your own manager.
  */
-export const FocusManagerContext = createContext<FocusManager>(focusManager);
+export const FocusManagerContext: Context<FocusManager> = createContext<FocusManager>(focusManager);
 
 /**
  * The current `FocusManager` for this tree: the one provided by

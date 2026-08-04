@@ -57,7 +57,11 @@ export interface Renderer<NodeType> {
   createElement(tag: string): NodeType;
   createTextNode(value: string): NodeType;
   insertNode(parent: NodeType, node: NodeType, anchor?: NodeType): void;
+  // The `any` params mirror the canonical solid-js 1.9.14 `Renderer`
+  // interface verbatim (see node_modules/solid-js/universal/types/universal.d.ts).
+  // deno-lint-ignore no-explicit-any
   insert<T>(parent: any, accessor: (() => T) | T, marker?: any | null, initial?: any): NodeType;
+  // deno-lint-ignore no-explicit-any
   spread<T>(node: any, accessor: (() => T) | T, skipChildren?: boolean): void;
   setProp<T>(node: NodeType, name: string, value: T, prev?: T): T;
   mergeProps(...sources: unknown[]): unknown;
@@ -67,6 +71,7 @@ export interface Renderer<NodeType> {
 const memo = <T>(fn: () => T, _equal?: boolean): (() => T) => createMemo(() => fn());
 
 /** Internal dynamic-typed alias used by the canonical reconciler helpers. */
+// deno-lint-ignore no-explicit-any
 type Any = any;
 
 function createRenderer$1<NodeType>(
@@ -183,13 +188,13 @@ function createRenderer$1<NodeType>(
   }
 
   function reconcileArrays(parentNode: NodeType, a: Any[], b: Any[]): void {
-    let bLength = b.length,
-      aEnd = a.length,
+    const bLength = b.length;
+    let aEnd = a.length,
       bEnd = bLength,
       aStart = 0,
-      bStart = 0,
-      after = getNextSibling(a[aEnd - 1]),
-      map: Map<Any, number> | null = null;
+      bStart = 0;
+    const after = getNextSibling(a[aEnd - 1]);
+    let map: Map<Any, number> | null = null;
     while (aStart < aEnd || bStart < bEnd) {
       if (a[aStart] === b[bStart]) {
         aStart++;
