@@ -23,7 +23,8 @@ describes the scene and reads events.
   instead of surfacing it as an event.
 - `Renderer` — `root` (the scene root `Node`), `render()` (paint the scene),
   `pollEvents(timeoutMs)` (pull native events, feeding the handlers),
-  `onKey` / `onResize` / `onFocus` / `onMouse` (each returns an unsubscribe),
+  `onKey` / `onResize` / `onFocus` / `onMouse` / `onPaste` (each returns an
+  unsubscribe),
   `hit_test(col, row)` (z-ordered node ids covering a cell), `destroy()`,
   `destroyed`.
 
@@ -47,9 +48,10 @@ node kinds)
   and the drag-resize helpers `startPanelDrag` / `dragPanels` /
   `endPanelDrag`, `PANEL_DRAG_MIN_SIZE`) — collapsible header/body stack with
   a 1-cell drag gutter.
-- `DiffView` (+ `DIFF_ADD_FG` / `DIFF_DEL_FG`) — unified-diff rows: gutter,
-  `+`/`-`/` ` markers, per-kind colors, `wrap` passthrough, `scroll_x` /
-  `scroll_y` panning.
+- `DiffView` (+ `DIFF_ADD_FG` / `DIFF_DEL_FG`) — unified or side-by-side
+  diff rows: gutter, `+`/`-`/` ` markers, per-kind colors, `mode="side"`
+  two-column layout, `inline_highlight` intra-line highlighting, `wrap`
+  passthrough, `scroll_x` / `scroll_y` panning.
 - `Select` (+ `selectKey`, `visibleOptions`, `SELECT_FILTER_PLACEHOLDER`) —
   filterable option list, `multi` checkmarks, `floating` overlay.
 - `ScrollView` (+ `scrollTo` / `scrollBy` / `scrollTop`,
@@ -58,14 +60,18 @@ node kinds)
 
 **Streaming auto-scroll** — `setStreamAutoScroll`, `isStreamFollowing`,
 `syncStreamTail` (pin `scroll_y` to the stream tail after each append),
-`followTail` (re-attach after a manual scroll).
+`followTail` (re-attach after a manual scroll), `scrollToBottom` (a one-shot
+jump to the tail that dismisses the `▼` affordance —
+`STREAM_AFFORDANCE_CHAR`, stamped when a manual scroll above the tail
+detaches the follow — without re-attaching).
 
 **Theme** — `Theme` / `ThemeOverrides` types, `defaultTheme`,
 `mergeTheme(base, overrides)`, `resolveTheme(theme, props)` (stamps plain
 `fg`/`bg`/`border_style` from `role`/`component` hints).
 
 **Focus** — `FocusManager` (class), `focusManager` (default instance),
-`useFocus(id, node, onKey, manager?)`.
+`useFocus(id, node, onKey, manager?, onPaste?)`, `routePaste` (paste
+counterpart of `routeKey`).
 
 **Types** — `NodeProps`, `NodeType`, `KeyEvent`, `KeyHandler`,
 `ResizeHandler`, `FocusHandler`, `MouseHandler`, `Span`, `Renderer`,

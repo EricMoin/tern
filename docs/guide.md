@@ -55,16 +55,16 @@ structure:
 |---------|---------------|---------------|-------------|
 | Box | `<Box>` | `Box(props)` | Container: border, background, padding, flex layout |
 | Text | `<Text text="..." />` | `Text(props)` | Text leaf (string children are rejected in React) |
-| StreamingText | `<StreamingText stream autoScroll wrap />` | `StreamingText(props)` + `subscribeStream` | Incrementally fed styled-span stream with tail-follow auto-scroll |
-| Input | `<Input value caret placeholder focusId onChange onSubmit />` | `Input(props)` + `editKey` | Single-line text entry with a block caret |
+| StreamingText | `<StreamingText stream autoScroll wrap />` | `StreamingText(props)` + `subscribeStream` | Incrementally fed styled-span stream with tail-follow auto-scroll and `scrollToBottom` |
+| Input | `<Input value caret placeholder focusId onChange onSubmit />` | `Input(props)` + `editKey` | Single-line text entry with a block caret and focused auto-paste |
 | Spinner | `<Spinner value max frames interval />` | `Spinner(props)` + `tick` / `startSpinner` | Determinate bar or indeterminate glyph |
 | StatusBar | `<StatusBar left center right />` | `StatusBar(props)` | Single-row left/center/right segment strip |
 | Panels | `<Panels panels active direction />` | `Panels(props)` | Collapsible header/body stack with a drag gutter |
-| DiffView | `<DiffView hunks scroll_x scroll_y wrap />` | `DiffView(props)` | Unified-diff rows (gutter, markers, per-kind colors) |
+| DiffView | `<DiffView hunks mode scroll_x scroll_y wrap />` | `DiffView(props)` | Unified or side-by-side diff rows (`mode="side"` two columns, `inline_highlight` intra-line) |
 | Select | `<Select options multi value ... focusId />` | `Select(props)` + `selectKey` | Filterable option list, multi-select, floating overlay |
 | ScrollView | `<ScrollView clip_* scroll_* showScrollbar>` | `ScrollView(props)` + `scrollTo`/`scrollBy`/`scrollTop` | Clip/scroll region with optional scrollbar |
-| Table | `<Table columns rows scroll_x scroll_y highlight sticky_header clip_height />` | `Table(props)` + `tableKey`/`visibleTableRows` | Sticky-header data table with per-column alignment and highlight/scroll |
-| Textarea | `<Textarea lines row col width height focusId onChange onSubmit />` | `Textarea(props)` + `editTextareaKey` | Multi-line text editor with soft wrap, scroll-to-caret, line splitting |
+| Table | `<Table columns rows scroll_x scroll_y highlight sticky_header clip_height />` | `Table(props)` + `tableKey`/`visibleTableRows` | Sticky-header data table with per-column alignment, highlight/scroll, and windowed rows |
+| Textarea | `<Textarea lines row col width height focusId onChange onSubmit />` | `Textarea(props)` + `editTextareaKey` | Multi-line text editor with soft wrap, scroll-to-caret, line splitting, focused auto-paste |
 | Modal | `<Modal open backdrop z_index content />` | `Modal(props)` + `openModal`/`closeModal` | Full-bleed dimmed overlay with centered content and focus isolation |
 
 The roadmap elements are JS compositions over the primitive `box` / `text` /
@@ -78,7 +78,10 @@ compositor paints the result.
 `AsyncIterable<Span>` (`{ text, style? }`), appending each span to the node
 and repainting after every append. With `autoScroll` (the default) the view
 stays pinned to the stream tail (`syncStreamTail`); a manual scroll above the
-tail detaches the follow, and `followTail` re-attaches.
+tail detaches the follow and stamps a `▼` affordance
+(`STREAM_AFFORDANCE_CHAR`) at the clip region's bottom-right. `followTail`
+re-attaches (dismissing it); `scrollToBottom` is a one-shot jump to the tail
+that dismisses the affordance without re-attaching the follow.
 
 ## Widget API reference
 
@@ -89,10 +92,14 @@ node props; the driving helpers below read and mutate it.
 ### Table
 
 `Table(props)` (core) builds a flex column: a sticky header row (paint
-z-order 1) above a scrollable content region, plus one row leaf per data row
-with per-column width/alignment — each cell padded to its column width,
-overflow truncated never mid-glyph, the highlighted row reversed. `<Table>`
-in `@tern/react` and `Table` in `@tern/solid` materialize the same factory.
+z-order 1) above a scrollable content region, plus one row leaf per *visible*
+data row — only the visible window `rows[scroll_y, scroll_y + clip_height)`
+is materialized (**windowed rows**; a large dataset does not create one scene
+node per row — the full dataset stays JS bookkeeping in `tableRegionStates`,
+and the scroll clamp measures the full content height) — with per-column
+width/alignment: each cell padded to its column width, overflow truncated
+never mid-glyph, the highlighted row reversed. `<Table>` in `@tern/react`
+and `Table` in `@tern/solid` materialize the same factory.
 
 - `TableProps` — `columns: TableColumn[]`, `rows: (string | number)[][]`,
   `scroll_x` / `scroll_y` (offsets in cells), `highlight` (row index),
@@ -112,6 +119,29 @@ in `@tern/react` and `Table` in `@tern/solid` materialize the same factory.
 `scroll_x` on the root pans the header and rows together (columns stay
 aligned); `scroll_y` pans only the content region, so the sticky header does
 not scroll. `clip_height` sets the content viewport.
+
+### DiffView
+
+`DiffView(props)` (core) renders unified-diff rows — a dimmed gutter with
+right-aligned old/new line numbers, `+`/`-`/` ` markers, per-kind colors
+(adds `#98c379`, dels `#e06c75`, context dimmed) — as a scrollable clip
+region. `hunks` / `mode` / `inline_highlight` are consumed by the factory
+(the line model is JS bookkeeping — never scene props).
+
+- `DiffViewProps` — `hunks: DiffLine[]`, `mode` (`"unified"` | `"side"`,
+  default `"unified"`), `inline_highlight` (default `false`), `scroll_x` /
+  `scroll_y` (offsets in cells), `wrap`.
+- `mode="side"` — two aligned columns (old | new) split by a 1-cell gap
+  (mirroring `Panels`); each hunk line becomes one row per column, aligned by
+  line pair, with per-column gutters.
+- `inline_highlight` — intra-line char-level diff on each adjacent add/del
+  pair: the changed segments render bold + underlined on the line's kind
+  color, unchanged characters plain.
+
+`scroll_x` / `scroll_y` pan the whole region; `wrap` passes through to each
+content leaf (`false` keeps every diff line single-row, the classic diff
+look). `<DiffView>` in `@tern/react` and `DiffView` in `@tern/solid`
+materialize the same factory.
 
 ### Textarea
 
@@ -158,10 +188,12 @@ children); `Modal` in `@tern/solid` is the plain factory.
 
 ### FocusManager
 
-`FocusManager` (core) routes key events to registered focusable elements:
-`register({ id, node, onKey })` returns an unsubscribe, and
-`routeKey(event, node?)` dispatches to an explicit node's handler or the
-active focus.
+`FocusManager` (core) routes key and paste events to registered focusable
+elements: `register({ id, node, onKey, onPaste? })` returns an unsubscribe,
+`routeKey(event, node?)` dispatches a key to an explicit node's handler or
+the active focus, and `routePaste(text, node?)` dispatches a paste the same
+way — an element that registered no `onPaste` never consumes, so the paste
+falls through to the tree-level paste handler.
 
 - `focus(id)` / `blur()` — set / clear the active focus; `has(id)`,
   `activeId`, and `active` read it.
@@ -174,10 +206,31 @@ active focus.
   receives the new active id, or `null` on blur / unregister of the active
   id.
 
-`useFocus(id, node, onKey, manager?)` (core) registers and returns a
-`FocusHandle` (`focus` / `blur` / `isFocused` / `dispose`); the module-level
+`useFocus(id, node, onKey, manager?, onPaste?)` (core) registers and returns
+a `FocusHandle` (`focus` / `blur` / `isFocused` / `dispose`); `onPaste` is
+the element's paste handler, dispatched by `routePaste`. The module-level
 `focusManager` is the default. Focus changes are observed with `subscribe`,
 not a change callback prop.
+
+### Paste helpers
+
+- `pasteInto(input, text)` — insert pasted text into an `Input` node at the
+  caret, mutating the value and caret in place (the paste counterpart of
+  `editKey`); multi-width aware, the caret advances by the pasted text's
+  display width. Returns `{ value, caret }`.
+- `pasteIntoTextarea(textarea, text)` — insert pasted text into a `Textarea`
+  node at the caret; a pasted `\n` splits into new logical lines (the
+  post-caret tail joins the last pasted segment). Returns
+  `{ lines, row, col }`.
+- `usePaste(handler, { isActive, focusManager })` (`@tern/react`) and
+  `subscribePaste(renderer, handler, { isActive, focusManager })`
+  (`@tern/solid`) — route each paste through the `FocusManager` first
+  (`routePaste`); only when no focused element handles it does the tree-level
+  `handler` receive the text. React tears the subscription down on unmount;
+  Solid returns a disposer. A focused `<Input focusId>` / `<Textarea
+  focusId>` (React) or `Input` / `Textarea` with a focus registration
+  (Solid) auto-pastes via `pasteInto` / `pasteIntoTextarea`, firing
+  `onChange`.
 
 ### Mouse helpers
 
@@ -309,7 +362,7 @@ Events are **push-based** (roadmap Phase 3): `renderer.startEventStream()`
 starts the native binding's background event loop, which delivers every
 terminal event to the JS thread through a `ThreadsafeFunction` — no polling
 loop in the app. Each event is a tagged `TernEventJs` union (`"key"` /
-`"resize"` / `"focus"` / `"mouse"`) and is:
+`"resize"` / `"focus"` / `"mouse"` / `"paste"`) and is:
 
 - yielded by the `renderer.events` async iterable, so the app loop subscribes
   with `for await (const event of renderer.events)` — events arrive in order
@@ -324,6 +377,7 @@ loop in the app. Each event is a tagged `TernEventJs` union (`"key"` /
   - `onFocus({ focus_gained })` — `true` on focus gained, `false` on lost.
   - `onMouse(event)` — a `MouseEventJs` payload (`down_left`, `drag_left`,
     `up_*`, ... with `column` / `row`).
+  - `onPaste(text)` — the pasted text string (crossterm bracketed paste).
 
 Call `startEventStream()` once the scene is ready — before it, the terminal
 buffers input untouched. The app loop exits when the renderer is destroyed
@@ -337,9 +391,9 @@ Elements that edit on keys register with a `FocusManager`:
 
 - `@tern/react`: `<Input focusId="...">`, `<Textarea focusId="...">` and
   `<Select focusId="...">` register automatically; `useFocus(id, nodeRef,
-  onKey)` registers an arbitrary element's node.
-- `@tern/solid`: `useFocus(id, node, onKey)` (from `@tern/core`) registers a
-  node directly.
+  onKey, onPaste?)` registers an arbitrary element's node.
+- `@tern/solid`: `useFocus(id, node, onKey, onPaste?)` (from `@tern/core`)
+  registers a node directly.
 
 The tree-level input hooks route each key through the manager first — when a
 focused element handles it, the tree handler is skipped:
@@ -347,6 +401,15 @@ focused element handles it, the tree handler is skipped:
 - `@tern/react`: `useInput(handler)`.
 - `@tern/solid`: `subscribeInput(renderer, handler)` (Solid has no context,
   so the renderer is an explicit argument).
+
+Paste routing mirrors key routing: the tree-level paste hooks
+(`usePaste(handler, { isActive, focusManager })` in `@tern/react`,
+`subscribePaste(renderer, handler, { isActive, focusManager })` in
+`@tern/solid`) route each paste through the manager's `routePaste` first — a
+focused element with an `onPaste` handler consumes it (a focused `<Input
+focusId>` / `<Textarea focusId>` auto-pastes via `pasteInto` /
+`pasteIntoTextarea`, firing `onChange`); only when nothing focused handles
+the paste does the tree handler receive the text.
 
 Focus moves programmatically (`focus(id)` / `blur()`) or by traversal:
 `next()` / `prev()` walk the registered elements in registration order
