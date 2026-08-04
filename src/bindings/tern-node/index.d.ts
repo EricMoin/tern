@@ -41,7 +41,7 @@ export declare class NodeHandle {
    * `blink`, `reversed`, `hidden`, `strikethrough`). Every other key lands
    * in the node's property map (`text`, layout keywords, ...).
    */
-  set_props(props: Record<string, any>): void
+  set_props(props: Record<string, unknown>): void
   /**
    * Append a styled span of text to a `streaming_text` node's stream.
    *
@@ -52,7 +52,7 @@ export declare class NodeHandle {
    * when the node is detached from the scene or is not a `streaming_text`
    * node.
    */
-  append_span(text: string, style?: Record<string, any> | undefined | null): void
+  append_span(text: string, style?: Record<string, unknown> | undefined | null): void
   /**
    * The laid-out content size of this node: `{ width, height }` in cells.
    *
@@ -147,7 +147,7 @@ export declare class TuiRenderer {
    * the renderer also stops the loop. Errors if the renderer is already
    * destroyed or a stream was already started.
    */
-  start_event_stream(callback: ((err: Error | null, arg: TernEventJs) => any)): void
+  start_event_stream(callback: ((err: Error | null, arg: TernEventJs) => unknown)): void
 }
 
 /** The laid-out content size of a scene node, in cells. */
@@ -164,7 +164,7 @@ export interface ContentSize {
  * when it is added to a bound parent via `NodeHandle.add_child`. See
  * `set_props` for the style-key convention.
  */
-export declare function create_node(type: string, props?: Record<string, any> | undefined | null): NodeHandle
+export declare function create_node(type: string, props?: Record<string, unknown> | undefined | null): NodeHandle
 
 /**
  * Token-highlight `source` in `language` (a Markdown fence info string:

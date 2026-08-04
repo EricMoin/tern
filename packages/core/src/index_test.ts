@@ -94,14 +94,8 @@ import {
 } from "./index.ts";
 import type {
   SelectOption,
-  SelectProps,
-  SelectState,
-  ProgressProps,
   TabSpec,
-  TabsProps,
-  TabsState,
   TableColumn,
-  TableProps,
   TableState,
   TextareaProps,
   Theme,
@@ -817,6 +811,7 @@ Deno.test("push events dispatch paste events to onPaste with the pasted string",
 });
 
 Deno.test("the events async iterable yields every pushed event without loss", async () => {
+  let consumer: Promise<void> | undefined;
   withFakeAddon(() => {
     const renderer = createRenderer();
     renderer.startEventStream();
@@ -835,7 +830,7 @@ Deno.test("the events async iterable yields every pushed event without loss", as
     for (const event of events) pushEvent(event);
 
     // The async iterable must yield all N, in order, without loss.
-    return (async () => {
+    consumer = (async () => {
       const received: TernEventJs[] = [];
       for await (const event of renderer.events) {
         received.push(event);
@@ -851,14 +846,16 @@ Deno.test("the events async iterable yields every pushed event without loss", as
       }
     })();
   });
+  await consumer;
 });
 
 Deno.test("the events async iterable yields a paste event with the pasted text", async () => {
+  let consumer: Promise<void> | undefined;
   withFakeAddon(() => {
     const renderer = createRenderer();
     renderer.startEventStream();
     pushEvent({ type: "paste", paste: "multi\nline 粘贴" });
-    return (async () => {
+    consumer = (async () => {
       for await (const event of renderer.events) {
         if (event.type !== "paste") {
           throw new Error(`first event type = ${event.type}, expected "paste"`);
@@ -870,42 +867,43 @@ Deno.test("the events async iterable yields a paste event with the pasted text",
       }
     })();
   });
+  await consumer;
 });
 
 Deno.test("the events async iterable delivers events pushed after subscription", async () => {
+  let consumer: Promise<void> | undefined;
+  const received: TernEventJs[] = [];
   withFakeAddon(() => {
     const renderer = createRenderer();
     renderer.startEventStream();
     // Subscribe first, then push — events must still arrive (no missed
     // wakeup between the queue check and the waiter registration).
-    const received: TernEventJs[] = [];
     // Read the length through a function: TS narrows a const-typed empty
-    // array's `length` to 0 (the pushes happen inside the async consumer).
+    // array's `length` to 0 (the pushes happen after the consumer starts).
     const receivedCount = (): number => received.length;
-    const consumer = (async () => {
+    consumer = (async () => {
       for await (const event of renderer.events) {
         received.push(event);
         if (receivedCount() === 3) break;
       }
     })();
-    return (async () => {
-      pushEvent({ type: "focus", focus_gained: true });
-      await consumer;
-      if (receivedCount() !== 1) throw new Error(`received ${receivedCount()}`);
-      pushEvent({ type: "focus", focus_gained: true });
-      pushEvent({ type: "focus", focus_gained: true });
-      await consumer;
-      if (receivedCount() !== 3) throw new Error(`received ${receivedCount()}`);
-    })();
+    // Push all three while the consumer's waiter is registered — the
+    // iterator must wake on each, never missing one.
+    pushEvent({ type: "focus", focus_gained: true });
+    pushEvent({ type: "focus", focus_gained: true });
+    pushEvent({ type: "focus", focus_gained: true });
   });
+  await consumer;
+  if (received.length !== 3) throw new Error(`received ${received.length}`);
 });
 
 Deno.test("destroy closes the events stream", async () => {
+  let consumer: Promise<void> | undefined;
   withFakeAddon(() => {
     const renderer = createRenderer();
     renderer.startEventStream();
     renderer.destroy();
-    return (async () => {
+    consumer = (async () => {
       const received: TernEventJs[] = [];
       for await (const event of renderer.events) {
         received.push(event);
@@ -913,6 +911,7 @@ Deno.test("destroy closes the events stream", async () => {
       if (received.length !== 0) throw new Error("a closed stream must yield nothing");
     })();
   });
+  await consumer;
 });
 
 // ---------------------------------------------------------------------------

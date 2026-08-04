@@ -2489,11 +2489,6 @@ function scrollbarMetrics(
   return { offset, thumb, text: rows.join("\n") };
 }
 
-/** The viewport size of a scroll view: its own laid-out rect. */
-function scrollableViewport(view: Node): ContentSize {
-  return view.contentSize();
-}
-
 /**
  * The measured `{ viewport, content }` pair a scroll offset clamps against.
  *
@@ -4767,7 +4762,7 @@ export class FocusManager {
 }
 
 /** The default focus manager shared by {@link useFocus} calls that omit one. */
-export const focusManager = new FocusManager();
+export const focusManager: FocusManager = new FocusManager();
 
 /** The handle returned by {@link useFocus}. */
 export interface FocusHandle {

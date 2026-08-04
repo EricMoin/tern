@@ -14,14 +14,13 @@ import { createRequire } from "node:module";
 import process from "node:process";
 
 // The generated napi declarations. Type-only import: erased at runtime, so
-// this also resolves under Node's type stripping.
+// this also resolves under Node's type stripping. Only the types referenced
+// below are imported; the full surface is re-exported by the `export type`
+// block, which pulls directly from the binding module.
 import type {
-  ContentSize,
   HighlightSpanJs,
-  KeyEvent,
   NodeHandle as NativeNodeHandle,
   TuiRenderer as NativeTuiRenderer,
-  TuiRendererOptions,
 } from "../../../src/bindings/tern-node/index.d.ts";
 
 export type {

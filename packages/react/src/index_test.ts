@@ -25,7 +25,6 @@ import {
   openModal,
   scrollTo,
   scrollToBottom,
-  syncStreamTail,
   useFocus as coreUseFocus,
   type KeyEvent,
   type Node,
@@ -60,8 +59,6 @@ import {
   ThemeProvider,
   createRoot,
   defaultTheme,
-  editTextareaKey,
-  focusAt,
   hostConfig,
   name,
   render,
@@ -80,7 +77,6 @@ import {
   useWheelScroll,
   version,
   visibleTableRows,
-  wheelScroll,
 } from "./index.ts";
 import type { AppHandle, TernProps, Theme, ThemeOverrides } from "./index.ts";
 
@@ -626,7 +622,7 @@ Deno.test("keyed list reorder is reflected in scene order", async () => {
   const ternRoot = createRoot(renderer);
   const item = (key: string) => createElement(Text, { key, text: key });
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(Box, {}, item("a"), item("b"), item("c")));
   });
   const box = root.children[0]!;
@@ -635,20 +631,20 @@ Deno.test("keyed list reorder is reflected in scene order", async () => {
 
   // Full reorder: React repositions via appendChild on already-present
   // children (getHostSibling returns null when every trailing sibling moves).
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(Box, {}, item("c"), item("a"), item("b")));
   });
   if (order() !== "c,a,b") throw new Error(`full reorder: ${order()}`);
 
   // Partial reorder: React repositions via insertBefore with an
   // already-present child (keyed-list move).
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(Box, {}, item("b"), item("a"), item("c")));
   });
   if (order() !== "b,a,c") throw new Error(`partial reorder: ${order()}`);
 
   // Returning to the original order reuses the instances.
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(Box, {}, item("a"), item("b"), item("c")));
   });
   if (order() !== "a,b,c") throw new Error(`back to original: ${order()}`);
@@ -788,7 +784,7 @@ Deno.test("createRoot renders a tree onto the scene root", async () => {
   const { renderer, root, renderCalls } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(Box, { border_style: "rounded" }, createElement(Text, { text: "hello", bold: true })),
     );
@@ -814,13 +810,13 @@ Deno.test("updates reuse instances and commitUpdate applies new props", async ()
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(Box, { border_style: "rounded" }, createElement(Text, { text: "one" })));
   });
   const firstBox = root.children[0]!;
   const firstText = firstBox.children[0]!;
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(Box, { border_style: "plain" }, createElement(Text, { text: "two", fg: "#0f0" })));
   });
 
@@ -835,7 +831,7 @@ Deno.test("conditional children mount and unmount through tree ops", async () =>
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(Box, {}, createElement(Text, { text: "a" }), createElement(Text, { text: "b" })),
     );
@@ -843,7 +839,7 @@ Deno.test("conditional children mount and unmount through tree ops", async () =>
   const box = root.children[0]!;
   if (box.children.length !== 2) throw new Error("expected two children");
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(Box, {}, createElement(Text, { text: "a" })));
   });
   // The unmounted child is removed through removeChild -> core Node.remove(),
@@ -864,7 +860,7 @@ Deno.test("bare text children are rejected at render time", async () => {
   const ternRoot = createRoot(renderer);
   let threw: unknown = null;
   try {
-    await act(async () => {
+    await act(() => {
       ternRoot.render(createElement(Box, {}, "raw string"));
     });
   } catch (err) {
@@ -880,10 +876,10 @@ Deno.test("bare text children are rejected at render time", async () => {
 Deno.test("unmount detaches the tree without throwing", async () => {
   const { renderer } = mockRenderer();
   const ternRoot = createRoot(renderer);
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(Box, {}, createElement(Text, { text: "x" })));
   });
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
 });
@@ -891,14 +887,14 @@ Deno.test("unmount detaches the tree without throwing", async () => {
 Deno.test("render() convenience mounts synchronously and returns a root", async () => {
   const { renderer, root, renderCalls } = mockRenderer();
   let ternRoot: ReturnType<typeof render> | undefined;
-  await act(async () => {
+  await act(() => {
     ternRoot = render(createElement(Text, { text: "hi" }), renderer);
   });
   // Legacy (sync) root: the commit must have happened before render() returns.
   if (root.children.length !== 1) throw new Error("tree not mounted by render()");
   if (root.children[0]!.props.text !== "hi") throw new Error("text prop mismatch");
   if (renderCalls.length === 0) throw new Error("render() must paint");
-  await act(async () => {
+  await act(() => {
     ternRoot!.unmount();
   });
 });
@@ -918,7 +914,7 @@ Deno.test("useApp exposes the app handle inside the tree", async () => {
   }
 
   const captured: { app: AppHandle | null } = { app: null };
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(Probe, { set: (app) => (captured.app = app) }));
   });
 
@@ -941,7 +937,7 @@ Deno.test("useInput subscribes to renderer key events and detaches on unmount", 
     return createElement(Text, { text: "sub" });
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(InputProbe));
   });
 
@@ -951,7 +947,7 @@ Deno.test("useInput subscribes to renderer key events and detaches on unmount", 
     throw new Error("useInput handler must receive key events");
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
   if (keyHandlers.size >= 1) throw new Error("key handler must be detached on unmount");
@@ -966,7 +962,7 @@ Deno.test("useInput with isActive: false stays detached", async () => {
     return createElement(Text, { text: "inactive" });
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(InactiveProbe));
   });
   if (keyHandlers.size !== 0) throw new Error("inactive handler must not subscribe");
@@ -984,7 +980,7 @@ Deno.test("usePaste subscribes to renderer paste events and detaches on unmount"
     return createElement(Text, { text: "sub" });
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(PasteProbe));
   });
 
@@ -996,7 +992,7 @@ Deno.test("usePaste subscribes to renderer paste events and detaches on unmount"
     throw new Error(`usePaste handler must receive the pasted text, got ${JSON.stringify(last.text)}`);
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
   if (pasteHandlers.size >= 1) throw new Error("paste handler must be detached on unmount");
@@ -1011,7 +1007,7 @@ Deno.test("usePaste with isActive: false stays detached", async () => {
     return createElement(Text, { text: "inactive" });
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(InactivePasteProbe));
   });
   if (pasteHandlers.size !== 0) throw new Error("inactive paste handler must not subscribe");
@@ -1039,7 +1035,7 @@ Deno.test("a focused Input auto-pastes routed paste events and fires onChange", 
     });
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(App));
   });
 
@@ -1079,7 +1075,7 @@ Deno.test("a focused Input auto-pastes routed paste events and fires onChange", 
     throw new Error(`node after second paste = ${JSON.stringify(valueOf())}`);
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
   if (manager.has("main")) throw new Error("input must unregister on unmount");
@@ -1109,7 +1105,7 @@ Deno.test("a focused Textarea auto-pastes routed paste events and fires onChange
     });
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(App));
   });
 
@@ -1148,7 +1144,7 @@ Deno.test("a focused Textarea auto-pastes routed paste events and fires onChange
     throw new Error(`multi-line paste = ${JSON.stringify(second)}`);
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
   if (manager.has("main")) throw new Error("textarea must unregister on unmount");
@@ -1167,7 +1163,7 @@ Deno.test("useResize subscribes to renderer resize events, re-renders, and detac
     return createElement(Text, { text: "resize" });
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(ResizeProbe));
   });
 
@@ -1187,7 +1183,7 @@ Deno.test("useResize subscribes to renderer resize events, re-renders, and detac
     );
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
   if (resizeHandlers.size >= 1) throw new Error("resize handler must be detached on unmount");
@@ -1207,12 +1203,12 @@ Deno.test("StreamingText appends spans from an async iterable in order", async (
     yield { text: "!" };
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(StreamingText, { stream: stream(), autoScroll: false, wrap: false, width: 30 }),
     );
   });
-  await act(async () => {}); // drain the stream's microtask chain
+  await act(() => {}); // drain the stream's microtask chain
 
   const node = root.children[0]!;
   if (node.type !== "streaming_text") throw new Error(`type = ${node.type}`);
@@ -1248,21 +1244,21 @@ Deno.test("unmounting a StreamingText cancels the iteration (no appends after un
     }
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(StreamingText, { stream: gated() }));
   });
-  await act(async () => {}); // let the first span land
+  await act(() => {}); // let the first span land
 
   const node = root.children[0]!;
   if (node.spans.length !== 1 || node.spans[0]!.text !== "first") {
     throw new Error(`expected only the first span, got ${JSON.stringify(node.spans)}`);
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
   release(); // unblock the producer so the return() teardown can run
-  await act(async () => {});
+  await act(() => {});
 
   if (node.spans.length !== 1) {
     throw new Error(`appends after unmount: ${JSON.stringify(node.spans)}`);
@@ -1286,10 +1282,10 @@ Deno.test("StreamingText invokes render() after stream appends", async () => {
     yield { text: "c" };
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(StreamingText, { stream: gated() }));
   });
-  await act(async () => {}); // let "a" and "b" land
+  await act(() => {}); // let "a" and "b" land
 
   const node = root.children[0]!;
   const before = node.spans.map((span) => span.text).join("");
@@ -1297,7 +1293,7 @@ Deno.test("StreamingText invokes render() after stream appends", async () => {
   const rendersBeforeBatch = renderCalls.length;
 
   release(); // unblock the later batch
-  await act(async () => {});
+  await act(() => {});
 
   const after = node.spans.map((span) => span.text).join("");
   if (after !== "abc") throw new Error(`expected "c" to land, got ${after}`);
@@ -1307,7 +1303,7 @@ Deno.test("StreamingText invokes render() after stream appends", async () => {
       `render() must be invoked after appends (${rendersBeforeBatch} -> ${rendersAfterBatch})`,
     );
   }
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
 });
@@ -1494,23 +1490,23 @@ Deno.test("StreamingText auto-scrolls to the tail, detaches on scroll-up, re-att
     const ternRoot = createRoot(renderer);
     const source = manualSpanSource();
 
-    await act(async () => {
+    await act(() => {
       ternRoot.render(
         createElement(StreamingText, { stream: source.stream, clip_height: 2, width: 10 }),
       );
     });
-    await act(async () => {}); // mount effects; the pump parks on next()
+    await act(() => {}); // mount effects; the pump parks on next()
 
     // Three newline-terminated spans -> content 4 rows -> tail 4 - 2 = 2.
     // One push per act: each act drains the pump's microtasks, so the pump
     // parks on a fresh next() before the next push is delivered.
-    await act(async () => {
+    await act(() => {
       source.push({ text: "a\n" });
     });
-    await act(async () => {
+    await act(() => {
       source.push({ text: "b\n" });
     });
-    await act(async () => {
+    await act(() => {
       source.push({ text: "c\n" });
     });
 
@@ -1523,7 +1519,7 @@ Deno.test("StreamingText auto-scrolls to the tail, detaches on scroll-up, re-att
     // Manual scroll up above the tail: the follow detaches and pins the view.
     scrollTo(node, 0, 0);
     if (isStreamFollowing(node)) throw new Error("a scroll above the tail must detach");
-    await act(async () => {
+    await act(() => {
       source.push({ text: "d\n" }); // 5 rows now — the view stays pinned
     });
     if (y() !== 0) throw new Error(`pinned scroll_y = ${y()}`);
@@ -1534,12 +1530,12 @@ Deno.test("StreamingText auto-scrolls to the tail, detaches on scroll-up, re-att
     if (y() !== 3) throw new Error(`snap scroll_y = ${y()}`);
 
     // And follows subsequent growth again (6 rows -> tail 4).
-    await act(async () => {
+    await act(() => {
       source.push({ text: "e\n" });
     });
     if (y() !== 4) throw new Error(`follow scroll_y = ${y()}`);
 
-    await act(async () => {
+    await act(() => {
       ternRoot.unmount();
     });
   } finally {
@@ -1554,13 +1550,13 @@ Deno.test("StreamingText with autoScroll: false keeps the view pinned", async ()
     const ternRoot = createRoot(renderer);
     const source = manualSpanSource();
 
-    await act(async () => {
+    await act(() => {
       ternRoot.render(
         createElement(StreamingText, { stream: source.stream, autoScroll: false, clip_height: 2, width: 10 }),
       );
     });
-    await act(async () => {});
-    await act(async () => {
+    await act(() => {});
+    await act(() => {
       source.push({ text: "a\n" });
       source.push({ text: "b\n" });
       source.push({ text: "c\n" });
@@ -1575,7 +1571,7 @@ Deno.test("StreamingText with autoScroll: false keeps the view pinned", async ()
       throw new Error(`autoScroll leaked into props: ${JSON.stringify(node.props)}`);
     }
 
-    await act(async () => {
+    await act(() => {
       ternRoot.unmount();
     });
   } finally {
@@ -1601,19 +1597,19 @@ Deno.test("StreamingText stamps the scroll-to-bottom affordance on detach and di
     const ternRoot = createRoot(renderer);
     const source = manualSpanSource();
 
-    await act(async () => {
+    await act(() => {
       ternRoot.render(
         createElement(StreamingText, { stream: source.stream, clip_height: 2, width: 10 }),
       );
     });
-    await act(async () => {}); // mount effects; the pump parks on next()
-    await act(async () => {
+    await act(() => {}); // mount effects; the pump parks on next()
+    await act(() => {
       source.push({ text: "a\n" });
     });
-    await act(async () => {
+    await act(() => {
       source.push({ text: "b\n" });
     });
-    await act(async () => {
+    await act(() => {
       source.push({ text: "c\n" });
     });
 
@@ -1648,7 +1644,7 @@ Deno.test("StreamingText stamps the scroll-to-bottom affordance on detach and di
     // scrollToBottom: a one-shot jump to the current tail (5 - 2 = 3).
     scrollTo(node, 0, 0);
     if (count() !== 1) throw new Error(`re-shown children = ${count()}`);
-    await act(async () => {
+    await act(() => {
       source.push({ text: "d\n" }); // 5 rows now — the view stays pinned
     });
     if (y() !== 0) throw new Error(`pinned scroll_y = ${y()}`);
@@ -1657,7 +1653,7 @@ Deno.test("StreamingText stamps the scroll-to-bottom affordance on detach and di
     if (count() !== 0) throw new Error(`affordance after scrollToBottom = ${count()}`);
     if (y() !== 3) throw new Error(`jump scroll_y = ${y()}`);
 
-    await act(async () => {
+    await act(() => {
       ternRoot.unmount();
     });
   } finally {
@@ -1693,7 +1689,7 @@ Deno.test("usePanelMouseDrag resizes a panels split on gutter drags and clamps t
     const ternRoot = createRoot(renderer);
     const panelsRef: { current: Node | null } = { current: null };
 
-    await act(async () => {
+    await act(() => {
       ternRoot.render(
         createElement(DragProbe, {
           panelsRef,
@@ -1704,7 +1700,7 @@ Deno.test("usePanelMouseDrag resizes a panels split on gutter drags and clamps t
         }),
       );
     });
-    await act(async () => {}); // flush the mount effect (mouse subscription)
+    await act(() => {}); // flush the mount effect (mouse subscription)
 
     const panels = panelsRef.current;
     if (panels === null) throw new Error("ref must receive the panels node");
@@ -1742,7 +1738,7 @@ Deno.test("usePanelMouseDrag resizes a panels split on gutter drags and clamps t
       throw new Error(`post-up drag flex_basis = ${basis()}`);
     }
 
-    await act(async () => {
+    await act(() => {
       ternRoot.unmount();
     });
   } finally {
@@ -1760,7 +1756,7 @@ Deno.test("Input materializes with its text leaf and strips component props", as
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(Input, { value: "hi", caret: 1, placeholder: "type…", focusId: "f", onChange: () => {} }),
     );
@@ -1786,7 +1782,7 @@ Deno.test("StatusBar materializes left/center/right segments as text children", 
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(StatusBar, { left: "L", center: "C", right: "R" }));
   });
 
@@ -1809,7 +1805,7 @@ Deno.test("Panels materializes panel boxes with headers and honors collapsed", a
   const bodyA = CoreBox();
   const bodyB = CoreBox();
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(Panels, {
         panels: [
@@ -1842,7 +1838,7 @@ Deno.test("DiffView materializes per-hunk rows with gutter, markers, kind colors
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(DiffView, {
         hunks: [
@@ -1897,7 +1893,7 @@ Deno.test("Spinner advances while mounted and clears its interval on unmount", a
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(Spinner, { interval: 5 }));
   });
   const spinner = root.children[0];
@@ -1909,7 +1905,7 @@ Deno.test("Spinner advances while mounted and clears its interval on unmount", a
   const after = text();
   if (after === before) throw new Error("spinner must advance while mounted");
 
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
   const frozen = text();
@@ -1921,7 +1917,7 @@ Deno.test("Spinner pauses ticks while unfocused and resumes on focus regain", as
   const { renderer, root, renderCalls, focusHandlers } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(Spinner, { interval: 5 }));
   });
   const spinner = root.children[0];
@@ -1962,7 +1958,7 @@ Deno.test("Spinner pauses ticks while unfocused and resumes on focus regain", as
   }
 
   // Unmount tears the focus subscription down with the interval.
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
   if (focusHandlers.size >= 1) {
@@ -1994,7 +1990,7 @@ Deno.test("a focused Input receives routed keys and fires onChange/onSubmit", as
     });
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(App));
   });
 
@@ -2024,7 +2020,7 @@ Deno.test("a focused Input receives routed keys and fires onChange/onSubmit", as
     throw new Error(`onSubmit = ${JSON.stringify(submits)}`);
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
   if (manager.has("main")) throw new Error("input must unregister on unmount");
@@ -2055,7 +2051,7 @@ Deno.test("a focused Textarea receives routed keys and fires onChange/onSubmit",
     });
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(App));
   });
 
@@ -2089,7 +2085,7 @@ Deno.test("a focused Textarea receives routed keys and fires onChange/onSubmit",
     throw new Error(`onSubmit = ${JSON.stringify(submits)}`);
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
   if (manager.has("main")) throw new Error("textarea must unregister on unmount");
@@ -2100,7 +2096,7 @@ Deno.test("Select materializes with filter and option rows and strips component 
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(Select, {
         options: [
@@ -2135,7 +2131,7 @@ Deno.test("Table materializes with a sticky header and rows; tableKey drives the
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(Table, {
         columns: [
@@ -2232,7 +2228,7 @@ Deno.test("a focused Select receives routed keys: filter narrows and enter confi
     });
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(App));
   });
 
@@ -2268,7 +2264,7 @@ Deno.test("a focused Select receives routed keys: filter narrows and enter confi
     throw new Error(`onDismiss = ${JSON.stringify(dismisses)}`);
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
   if (manager.has("sel")) throw new Error("select must unregister on unmount");
@@ -2295,7 +2291,7 @@ Deno.test("Select multi mode toggles a checkmark through routed keys", async () 
     });
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(App));
   });
 
@@ -2308,7 +2304,7 @@ Deno.test("Select multi mode toggles a checkmark through routed keys", async () 
   if (rowText() !== "  A") throw new Error(`row = ${rowText()}`);
   if (summaryText() !== "0 selected") throw new Error(`summary = ${summaryText()}`);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
 });
@@ -2317,7 +2313,7 @@ Deno.test("Select floating mode sets a z_index prop", async () => {
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(Select, {
         options: [
@@ -2340,7 +2336,7 @@ Deno.test("Modal host materializes an overlay and strips the content prop", asyn
   const ternRoot = createRoot(renderer);
   const body = CoreBox();
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(Modal, { open: true, content: [body] }));
   });
 
@@ -2361,7 +2357,7 @@ Deno.test("Modal host materializes an overlay and strips the content prop", asyn
 });
 
 Deno.test("Modal host: openModal moves focus into the overlay and closeModal restores it", async () => {
-  const { renderer, root } = mockRenderer();
+  const { renderer } = mockRenderer();
   const ternRoot = createRoot(renderer);
   const modalRef: { current: Node | null } = { current: null };
   // A dedicated manager isolates the test from the shared focusManager (and
@@ -2380,7 +2376,7 @@ Deno.test("Modal host: openModal moves focus into the overlay and closeModal res
   }
 
   try {
-    await act(async () => {
+    await act(() => {
       ternRoot.render(createElement(App));
     });
 
@@ -2412,7 +2408,7 @@ Deno.test("Modal host: openModal moves focus into the overlay and closeModal res
       throw new Error("closeModal must hide the overlay");
     }
 
-    await act(async () => {
+    await act(() => {
       ternRoot.unmount();
     });
   } finally {
@@ -2426,7 +2422,7 @@ Deno.test("ScrollView materializes with region props, children and a scrollbar l
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(
         ScrollView,
@@ -2468,13 +2464,13 @@ Deno.test("ScrollView re-render updates scroll props and keeps the scrollbar lea
       createElement(Text, { text: "c" }),
     );
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(el(1));
   });
   const view = root.children[0]!;
   const firstLeaf = view.children[0];
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(el(3));
   });
   if (view.props.scroll_y !== 3) throw new Error(`scroll_y = ${view.props.scroll_y}`);
@@ -2485,7 +2481,7 @@ Deno.test("ScrollView resolves the scroll_view component preset from the theme",
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(
         ThemeProvider,
@@ -2516,7 +2512,7 @@ Deno.test("useFocus registers a ref'd element and routes routed keys to it", asy
     return createElement(Box, { ref: nodeRef });
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(App));
   });
 
@@ -2528,7 +2524,7 @@ Deno.test("useFocus registers a ref'd element and routes routed keys to it", asy
     throw new Error(`routed hits = ${hits.length}`);
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
   if (manager.has("probe")) throw new Error("useFocus must dispose on unmount");
@@ -2543,7 +2539,7 @@ Deno.test("useFocusManager returns the context manager or the core default", asy
     captured.manager = useFocusManager();
     return createElement(Text, { text: "d" });
   }
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(DefaultProbe));
   });
   if (captured.manager !== focusManager) {
@@ -2555,7 +2551,7 @@ Deno.test("useFocusManager returns the context manager or the core default", asy
     captured.manager = useFocusManager();
     return createElement(Text, { text: "c" });
   }
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(
         FocusManagerContext.Provider,
@@ -2591,7 +2587,7 @@ Deno.test("useFocusTraversal moves focus forward on tab and backward on backtab 
     );
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(App));
   });
 
@@ -2632,7 +2628,7 @@ Deno.test("useFocusTraversal moves focus forward on tab and backward on backtab 
     );
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.unmount();
   });
   if (keyHandlers.size >= 1) throw new Error("traversal must detach on unmount");
@@ -2663,7 +2659,7 @@ Deno.test("useFocusTraversal skips the excluded ids when moving", async () => {
     );
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(App));
   });
 
@@ -2711,7 +2707,7 @@ Deno.test("useFocusTraversal leaves focus unchanged when every id is excluded", 
     );
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(App));
   });
 
@@ -2743,7 +2739,7 @@ Deno.test("host components fall back to the default theme without a provider", a
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(Text, { text: "err", role: "danger" }));
   });
 
@@ -2764,7 +2760,7 @@ Deno.test("ThemeProvider partial theme merges over the default and stamps roles"
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(
         ThemeProvider,
@@ -2786,7 +2782,7 @@ Deno.test("ThemeProvider component presets stamp onto roadmap host components", 
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(
         ThemeProvider,
@@ -2819,7 +2815,7 @@ Deno.test("a theme change re-resolves stamped props on re-render", async () => {
     );
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(App, { theme: { palette: { danger: { fg: "#ff0000" } } } }));
   });
   const node = root.children[0]!;
@@ -2829,7 +2825,7 @@ Deno.test("a theme change re-resolves stamped props on re-render", async () => {
   const first = node.props.fg;
   if (first !== "#ff0000") throw new Error(`first fg = ${first}`);
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(createElement(App, { theme: { palette: { danger: { fg: "#00ff00" } } } }));
   });
   const second = node.props.fg;
@@ -2837,7 +2833,7 @@ Deno.test("a theme change re-resolves stamped props on re-render", async () => {
 });
 
 Deno.test("useTheme returns the provider theme and merges over the default", async () => {
-  const { renderer, root } = mockRenderer();
+  const { renderer } = mockRenderer();
   const ternRoot = createRoot(renderer);
   const captured: { theme: Theme | null } = { theme: null };
 
@@ -2846,7 +2842,7 @@ Deno.test("useTheme returns the provider theme and merges over the default", asy
     return createElement(Text, { text: "p" });
   }
 
-  await act(async () => {
+  await act(() => {
     ternRoot.render(
       createElement(
         ThemeProvider,
@@ -2909,10 +2905,10 @@ Deno.test("useWheelScroll maps wheel events onto the ref'd view and re-renders o
     const ternRoot = createRoot(renderer);
     const viewRef: { current: Node | null } = { current: null };
 
-    await act(async () => {
+    await act(() => {
       ternRoot.render(createElement(WheelScrollProbe, { viewRef }));
     });
-    await act(async () => {}); // flush the mount effect (mouse subscription)
+    await act(() => {}); // flush the mount effect (mouse subscription)
 
     const view = viewRef.current;
     if (view === null || view.type !== "scroll_view") throw new Error("ref must receive the scroll view");
@@ -2952,7 +2948,7 @@ Deno.test("useWheelScroll maps wheel events onto the ref'd view and re-renders o
       throw new Error("an unconsumed event must not re-render");
     }
 
-    await act(async () => {
+    await act(() => {
       ternRoot.unmount();
     });
   } finally {
@@ -2992,10 +2988,10 @@ Deno.test("useClickToFocus focuses the topmost registered node on a down_left an
     const manager = focusManager;
     const focused: string[] = [];
 
-    await act(async () => {
+    await act(() => {
       ternRoot.render(createElement(ClickFocusProbe, { boxRef, manager, focused }));
     });
-    await act(async () => {}); // flush the mount effects (registration + mouse subscription)
+    await act(() => {}); // flush the mount effects (registration + mouse subscription)
 
     if (!manager.has("probe")) throw new Error("useFocus must register the id");
 
@@ -3017,7 +3013,7 @@ Deno.test("useClickToFocus focuses the topmost registered node on a down_left an
     emit("down_left", 0, 0);
     if (manager.activeId !== null) throw new Error(`active after empty hit = ${manager.activeId}`);
 
-    await act(async () => {
+    await act(() => {
       ternRoot.unmount();
     });
   } finally {
