@@ -30,14 +30,22 @@ an explicit `<Text text="..." />` element.
   each span to the node and paints after every append; auto-scroll keeps
   `scroll_y` pinned to the stream tail.
 - `<Input value caret placeholder focusId onChange onSubmit />` — with a
-  `focusId`, registers with a `FocusManager` so routed keys edit it.
+  `focusId`, registers with a `FocusManager` so routed keys edit it; a
+  focused input auto-pastes routed pastes via `pasteInto` (firing
+  `onChange`).
+- `<Textarea lines row col width height scroll focusId onChange onSubmit />` —
+  multi-line editor; with a `focusId`, routed keys edit it via
+  `editTextareaKey` and routed pastes auto-paste via `pasteIntoTextarea`
+  (firing `onChange`).
 - `<Spinner value max width frames frame interval />` — determinate bar or
   indeterminate glyph; a tick interval (default 100ms) runs while mounted,
   skipping while the terminal is unfocused.
 - `<StatusBar left center right />` — single-row segment strip.
 - `<Panels panels={PanelSpec[]} active direction />` — collapsible header/body
   stack (bodies are core `Node`s from element refs).
-- `<DiffView hunks={DiffLine[]} scroll_x scroll_y wrap />` — unified-diff rows.
+- `<DiffView hunks={DiffLine[]} mode inline_highlight scroll_x scroll_y
+  wrap />` — unified or side-by-side diff rows (`mode="side"` two columns,
+  `inline_highlight` intra-line char-level).
 - `<Select options multi value highlighted filter open floating z_index
   focusId onChange onConfirm onDismiss />` — filterable option list.
 - `<ScrollView clip_x clip_y clip_width clip_height scroll_x scroll_y
@@ -50,6 +58,10 @@ an explicit `<Text text="..." />` element.
 - `useInput(handler, { isActive, focusManager })` — subscribe to key events;
   each key is routed through the `FocusManager` first, falling back to the
   tree handler.
+- `usePaste(handler, { isActive, focusManager })` — subscribe to paste
+  events (the handler receives the pasted text string); each paste is routed
+  through the `FocusManager` first (`routePaste`), falling back to the tree
+  handler. Teardown on unmount.
 - `useFocus(id, nodeRef, onKey, { manager })` — register an element's node
   (from a ref) with a `FocusManager`.
 - `useResize(handler)` — subscribe to terminal resize; re-invokes
@@ -63,8 +75,9 @@ an explicit `<Text text="..." />` element.
 `Node`, `NodeProps`, `KeyEvent`, `KeyHandler`, `Span`, `Renderer`,
 `FocusManager`, `focusManager`, `editKey`, `selectKey`, `tick`, `scrollTo` /
 `scrollBy` / `scrollTop`, `followTail` / `syncStreamTail` /
-`isStreamFollowing`, `startPanelDrag` / `dragPanels` / `endPanelDrag`,
-`defaultTheme` / `mergeTheme` / `resolveTheme`, and the theme types.
+`isStreamFollowing` / `scrollToBottom`, `pasteInto` / `pasteIntoTextarea`,
+`startPanelDrag` / `dragPanels` / `endPanelDrag`, `defaultTheme` /
+`mergeTheme` / `resolveTheme`, and the theme types.
 
 ## Example
 
