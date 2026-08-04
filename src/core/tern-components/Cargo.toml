@@ -9,3 +9,8 @@ description = "tern components: the compositor and imperative Text/Box renderabl
 [dependencies]
 tern-core = { path = "../tern-core" }
 tern-layout = { path = "../tern-layout" }
+
+# Bench/test-only: the integration-test benches flush diffs through
+# tern-terminal's write-based `flush_diff_to` (see tests/bench_timing.rs).
+[dev-dependencies]
+tern-terminal = { path = "../tern-terminal" }
