@@ -70,6 +70,7 @@
 
 import {
   createRenderer,
+  type Renderer as UniversalRenderer,
   type RendererOptions,
 } from "./universal.ts";
 import {
@@ -94,24 +95,16 @@ import {
   endPanelDrag,
   focusAt,
   focusManager,
-  followTail,
-  isStreamFollowing,
   startPanelDrag,
-  FocusManager,
+  type FocusManager,
   mergeTheme,
-  pasteInto,
   pasteIntoTextarea,
   resolveTheme,
-  scrollBy,
-  scrollTo,
-  scrollTop,
   setStreamAutoScroll,
   syncStreamTail,
-  tableKey,
   tabsKey,
   tick,
   useFocus,
-  visibleTableRows,
   wheelScroll,
   type DiffViewProps,
   type FocusHandle,
@@ -124,7 +117,6 @@ import {
   type PanelDragHandle,
   type PanelDragResult,
   type PanelsProps,
-  type PasteHandler,
   type ProgressProps,
   type Renderer,
   type ResizeHandler,
@@ -133,10 +125,7 @@ import {
   type Span,
   type SpinnerProps,
   type StatusBarProps,
-  type TableColumn,
   type TableProps,
-  type TableState,
-  type TabSpec,
   type TabsProps as CoreTabsProps,
   type TabsState,
   type TextareaProps as CoreTextareaProps,
@@ -478,7 +467,7 @@ export function replaceNode(node: Node, replacedNode: Node): void {
  * `node`; the destructured primitives below are the standard custom-renderer
  * surface (same shape solid-js/universal exports for its own DOM renderer).
  */
-const renderer = createRenderer(options);
+const renderer: UniversalRenderer<Node> = createRenderer(options);
 
 /**
  * The `RendererOptions` object wired into `createRenderer` above, exported so
@@ -492,20 +481,18 @@ export { options as rendererOptions };
 
 export { renderer };
 
-export const {
-  render,
-  insert,
-  spread,
-  createElement,
-  createTextNode,
-  insertNode,
-  setProp,
-  mergeProps,
-  effect,
-  memo,
-  createComponent,
-  use,
-} = renderer;
+export const render: UniversalRenderer<Node>["render"] = renderer.render;
+export const insert: UniversalRenderer<Node>["insert"] = renderer.insert;
+export const spread: UniversalRenderer<Node>["spread"] = renderer.spread;
+export const createElement: UniversalRenderer<Node>["createElement"] = renderer.createElement;
+export const createTextNode: UniversalRenderer<Node>["createTextNode"] = renderer.createTextNode;
+export const insertNode: UniversalRenderer<Node>["insertNode"] = renderer.insertNode;
+export const setProp: UniversalRenderer<Node>["setProp"] = renderer.setProp;
+export const mergeProps: UniversalRenderer<Node>["mergeProps"] = renderer.mergeProps;
+export const effect: UniversalRenderer<Node>["effect"] = renderer.effect;
+export const memo: UniversalRenderer<Node>["memo"] = renderer.memo;
+export const createComponent: UniversalRenderer<Node>["createComponent"] = renderer.createComponent;
+export const use: UniversalRenderer<Node>["use"] = renderer.use;
 
 /**
  * Create a `box` scene node through the solid renderer. Props (including
