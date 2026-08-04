@@ -146,6 +146,21 @@ export interface UseInputOptions {
 /** The handler signature for `useInput`: a core key event. */
 export type UseInputHandler = (event: KeyEvent) => void;
 
+/** Options for `usePaste`. */
+export interface UsePasteOptions {
+  /** When `false`, the handler is detached until reactivated (default `true`). */
+  isActive?: boolean;
+  /**
+   * The `FocusManager` consulted before the tree-level handler: when it
+   * routes the paste to a focused element (`FocusManager.routePaste`), the
+   * tree handler is skipped. Defaults to the core `focusManager`.
+   */
+  focusManager?: FocusManager;
+}
+
+/** The handler signature for `usePaste`: the pasted text string. */
+export type UsePasteHandler = (text: string) => void;
+
 // ---------------------------------------------------------------------------
 // Prop sanitizing
 // ---------------------------------------------------------------------------
@@ -697,6 +712,37 @@ export function useInput(handler: UseInputHandler, options?: UseInputOptions): v
       // tree-level handler (the current behavior).
       if (manager.routeKey(event)) return;
       handlerRef.current(event);
+    });
+  }, [renderer, isActive, manager]);
+}
+
+/**
+ * Subscribe to terminal paste events for the current tree — the paste
+ * counterpart of {@link useInput}. The handler receives the pasted text
+ * string (the core `PasteHandler` payload). Each paste is first routed
+ * through the focus manager (defaulting to the core `focusManager`): when a
+ * focused element handles it (`FocusManager.routePaste` returns `true` — e.g.
+ * a focused `<Input focusId>` / `<Textarea focusId>` auto-pasting into its
+ * node), the tree-level handler is skipped; otherwise the handler runs,
+ * mirroring the focus-first key routing. The handler is read through a ref so
+ * a parent re-render with a new handler is picked up without re-subscribing.
+ * Returns nothing; the subscription is torn down when the component unmounts
+ * or `isActive` becomes `false`.
+ */
+export function usePaste(handler: UsePasteHandler, options?: UsePasteOptions): void {
+  const { renderer } = useApp();
+  const handlerRef = useRef(handler);
+  handlerRef.current = handler;
+  const manager = options?.focusManager ?? focusManager;
+  const isActive = options?.isActive ?? true;
+
+  useEffect(() => {
+    if (!isActive) return;
+    return renderer.onPaste((text) => {
+      // A focused element's paste handler wins; otherwise fall back to the
+      // tree-level handler.
+      if (manager.routePaste(text)) return;
+      handlerRef.current(text);
     });
   }, [renderer, isActive, manager]);
 }
