@@ -31,6 +31,7 @@ import {
   SCROLLBAR_THUMB_CHAR,
   SCROLLBAR_TRACK_CHAR,
   SELECT_FILTER_PLACEHOLDER,
+  STREAM_AFFORDANCE_CHAR,
   ScrollView,
   Select,
   Spinner,
@@ -58,9 +59,12 @@ import {
   mergeTheme,
   name,
   openModal,
+  pasteInto,
+  pasteIntoTextarea,
   resolveTheme,
   scrollBy,
   scrollTo,
+  scrollToBottom,
   scrollTop,
   selectKey,
   startPanelDrag,
@@ -628,6 +632,29 @@ Deno.test("push events dispatch mouse events to onMouse", () => {
   });
 });
 
+Deno.test("push events dispatch paste events to onPaste with the pasted string", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.startEventStream();
+    const pasted: string[] = [];
+    renderer.onPaste((text) => pasted.push(text));
+    pushEvent({ type: "paste", paste: "hello\n世界" });
+    if (pasted.length !== 1 || pasted[0] !== "hello\n世界") {
+      throw new Error("onPaste must receive the pasted string payload");
+    }
+    // Unsubscribe contract mirrors onKey: the removed handler never fires.
+    let unsubscribedFired = 0;
+    const unsub = renderer.onPaste(() => {
+      unsubscribedFired++;
+    });
+    unsub();
+    pushEvent({ type: "paste", paste: "again" });
+    if (unsubscribedFired !== 0) {
+      throw new Error("unsubscribed onPaste handler must not fire");
+    }
+  });
+});
+
 Deno.test("the events async iterable yields every pushed event without loss", async () => {
   withFakeAddon(() => {
     const renderer = createRenderer();
@@ -640,6 +667,7 @@ Deno.test("the events async iterable yields every pushed event without loss", as
         type: "mouse",
         mouse: { kind: "moved", column: 1, row: 2, ctrl: false, alt: false, shift: false },
       },
+      { type: "paste", paste: "pasted 文本" },
     ];
     // Push N synthetic events through the native callback, exactly like the
     // real event loop does.
@@ -659,6 +687,25 @@ Deno.test("the events async iterable yields every pushed event without loss", as
         if (received[i] !== events[i]) {
           throw new Error(`event ${i} must be passed through verbatim`);
         }
+      }
+    })();
+  });
+});
+
+Deno.test("the events async iterable yields a paste event with the pasted text", async () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.startEventStream();
+    pushEvent({ type: "paste", paste: "multi\nline 粘贴" });
+    return (async () => {
+      for await (const event of renderer.events) {
+        if (event.type !== "paste") {
+          throw new Error(`first event type = ${event.type}, expected "paste"`);
+        }
+        if (event.paste !== "multi\nline 粘贴") {
+          throw new Error(`paste payload = ${JSON.stringify(event.paste)}`);
+        }
+        break;
       }
     })();
   });
@@ -860,6 +907,53 @@ Deno.test("editKey is multi-width aware for the caret column", () => {
   if (bs.value !== "" || bs.caret !== 0) throw new Error(`backspace wide = ${bs.value}/${bs.caret}`);
 });
 
+Deno.test("pasteInto inserts text at the caret and advances the caret", () => {
+  const input = Input({ value: "ab", caret: 1 });
+  const next = pasteInto(input, "XY");
+  if (next.value !== "aXYb") throw new Error(`value = ${next.value}`);
+  if (next.caret !== 3) throw new Error(`caret = ${next.caret}`);
+  if (input.props.value !== "aXYb") throw new Error(`node value = ${input.props.value}`);
+  if (input.children[0]?.props.text !== "aXYb") {
+    throw new Error(`leaf text = ${input.children[0]?.props.text}`);
+  }
+  if (input.children[0]?.props.caret !== 3) {
+    throw new Error(`leaf caret = ${input.children[0]?.props.caret}`);
+  }
+  // Pasting at the start / end.
+  const start = pasteInto(Input({ value: "ab", caret: 0 }), "X");
+  if (start.value !== "Xab" || start.caret !== 1) {
+    throw new Error(`start paste = ${start.value}/${start.caret}`);
+  }
+  const end = pasteInto(Input({ value: "ab", caret: 2 }), "X");
+  if (end.value !== "abX" || end.caret !== 3) {
+    throw new Error(`end paste = ${end.value}/${end.caret}`);
+  }
+  // Empty paste is a no-op edit.
+  const empty = pasteInto(Input({ value: "ab", caret: 1 }), "");
+  if (empty.value !== "ab" || empty.caret !== 1) {
+    throw new Error(`empty paste = ${empty.value}/${empty.caret}`);
+  }
+});
+
+Deno.test("pasteInto is multi-width aware at the caret", () => {
+  // コ is a 2-column char. The caret after it sits at display column 2; a
+  // 1-column paste lands between コ and a and the caret advances by 1.
+  const input = Input({ value: "コa", caret: 2 });
+  const next = pasteInto(input, "hi");
+  if (next.value !== "コhia") throw new Error(`value = ${next.value}`);
+  if (next.caret !== 4) throw new Error(`caret = ${next.caret}`);
+  // Pasting wide chars advances the caret by their display width.
+  const wide = pasteInto(Input({ value: "ab", caret: 1 }), "世");
+  if (wide.value !== "a世b") throw new Error(`wide value = ${wide.value}`);
+  if (wide.caret !== 3) throw new Error(`wide caret = ${wide.caret}`);
+  // A caret column inside a wide char snaps to that char's start; the caret
+  // still advances by the pasted width from its original column (mirroring
+  // editKey's char-insert math), landing at the start of the wide char.
+  const snap = pasteInto(Input({ value: "コa", caret: 1 }), "x");
+  if (snap.value !== "xコa") throw new Error(`snap value = ${snap.value}`);
+  if (snap.caret !== 2) throw new Error(`snap caret = ${snap.caret}`);
+});
+
 // ---------------------------------------------------------------------------
 // Roadmap elements: Textarea
 // ---------------------------------------------------------------------------
@@ -1021,6 +1115,76 @@ Deno.test("editTextareaKey scrolls vertically to keep the caret visible", () => 
   if (scrollOf(ta) !== 1) throw new Error(`scroll stays while visible = ${scrollOf(ta)}`);
   editTextareaKey(ta, { name: "up", ...base }); // (0,0) — above the window
   if (scrollOf(ta) !== 0) throw new Error(`scroll after up past the top = ${scrollOf(ta)}`);
+});
+
+Deno.test("pasteIntoTextarea inserts text at the caret (single line)", () => {
+  const ta = Textarea({ lines: ["ab", "cd"], row: 1, col: 1 });
+  const next = pasteIntoTextarea(ta, "XY");
+  if (next.lines.join(",") !== "ab,cXYd") throw new Error(`lines = ${next.lines.join(",")}`);
+  if (next.row !== 1 || next.col !== 3) {
+    throw new Error(`row/col = ${next.row}/${next.col}`);
+  }
+  if ((ta.props as TextareaProps).lines?.join(",") !== "ab,cXYd") {
+    throw new Error(`node lines = ${JSON.stringify(ta.props.lines)}`);
+  }
+  if (ta.children[1]?.props.text !== "cXYd" || ta.children[1]?.props.caret !== 3) {
+    throw new Error(`node leaf = ${JSON.stringify(ta.children[1]?.props)}`);
+  }
+  // Pasting at the start / end stays on the same line.
+  const start = pasteIntoTextarea(Textarea({ lines: ["ab"], row: 0, col: 0 }), "X");
+  if (start.lines.join(",") !== "Xab" || start.col !== 1) {
+    throw new Error(`start paste = ${start.lines.join(",")}/${start.col}`);
+  }
+  const end = pasteIntoTextarea(Textarea({ lines: ["ab"], row: 0, col: 2 }), "X");
+  if (end.lines.join(",") !== "abX" || end.col !== 3) {
+    throw new Error(`end paste = ${end.lines.join(",")}/${end.col}`);
+  }
+});
+
+Deno.test("pasteIntoTextarea splits lines on pasted newlines", () => {
+  const ta = Textarea({ lines: ["ab", "cd"], row: 1, col: 1 });
+  const next = pasteIntoTextarea(ta, "X\nYZ");
+  if (next.lines.join(",") !== "ab,cX,YZd") throw new Error(`lines = ${next.lines.join(",")}`);
+  if (next.row !== 2 || next.col !== 2) {
+    throw new Error(`row/col = ${next.row}/${next.col}`);
+  }
+  // The tail of the original line joins the last pasted segment.
+  if (ta.children.length !== 3) throw new Error(`leaves after split = ${ta.children.length}`);
+  if (ta.children[2]?.props.text !== "YZd" || ta.children[2]?.props.caret !== 2) {
+    throw new Error(`tail leaf = ${JSON.stringify(ta.children[2]?.props)}`);
+  }
+  // A leading newline pastes an empty first line (pure line split).
+  const lead = pasteIntoTextarea(Textarea({ lines: ["ab"], row: 0, col: 0 }), "\nxy");
+  if (lead.lines.join(",") !== ",xyab" || lead.row !== 1 || lead.col !== 2) {
+    throw new Error(`leading newline = ${lead.lines.join(",")}/${lead.row}/${lead.col}`);
+  }
+  // A trailing newline moves the tail to a fresh line.
+  const trail = pasteIntoTextarea(Textarea({ lines: ["ab"], row: 0, col: 1 }), "x\n");
+  if (trail.lines.join(",") !== "ax,b" || trail.row !== 1 || trail.col !== 0) {
+    throw new Error(`trailing newline = ${trail.lines.join(",")}/${trail.row}/${trail.col}`);
+  }
+});
+
+Deno.test("pasteIntoTextarea is multi-width aware for wide pastes", () => {
+  // コ is a 2-column char. The caret column is a code-unit index (like
+  // editTextareaKey): "aコb" is 3 code units, so col 2 is after コ and a
+  // paste there lands between コ and b, advancing the caret by the pasted
+  // code units.
+  const ta = Textarea({ lines: ["aコb"], row: 0, col: 2 });
+  const next = pasteIntoTextarea(ta, "世");
+  if (next.lines[0] !== "aコ世b") throw new Error(`value = ${next.lines[0]}`);
+  if (next.row !== 0 || next.col !== 3) {
+    throw new Error(`row/col = ${next.row}/${next.col}`);
+  }
+  if (ta.children[0]?.props.text !== "aコ世b" || ta.children[0]?.props.caret !== 5) {
+    throw new Error(`leaf = ${JSON.stringify(ta.children[0]?.props)}`);
+  }
+  // A wide paste between wide chars keeps the code-unit caret consistent:
+  // "コa" is 2 code units, col 1 is between コ and a.
+  const mid = pasteIntoTextarea(Textarea({ lines: ["コa"], row: 0, col: 1 }), "文");
+  if (mid.lines[0] !== "コ文a" || mid.col !== 2) {
+    throw new Error(`mid wide = ${mid.lines[0]}/${mid.col}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1514,6 +1678,197 @@ Deno.test("DiffView with no hunks yields an empty column", () => {
   if ("hunks" in diff.props) throw new Error("hunks must not reach the scene props");
 });
 
+/** Flatten one diff row's leaves into their text, in scene order. */
+function diffRowTexts(row: Node): string[] {
+  return row.children.map((leaf) => leaf.props.text as string);
+}
+
+/** The golden style snapshot of one text leaf: its text plus the keys the
+ * intra-line highlighting stamps (`fg` kind color, `bold` / `underline`). */
+function diffLeafStyle(leaf: Node): { text: string; fg: unknown; bold: unknown; underline: unknown } {
+  return {
+    text: leaf.props.text as string,
+    fg: leaf.props.fg,
+    bold: leaf.props.bold,
+    underline: leaf.props.underline,
+  };
+}
+
+Deno.test("DiffView inline_highlight splits paired add/del lines at char granularity", () => {
+  const diff = DiffView({
+    hunks: [
+      { kind: "del", old_line: 2, new_line: 0, text: "    let x = 1;" },
+      { kind: "add", old_line: 0, new_line: 2, text: "    let x = 2;" },
+    ],
+    inline_highlight: true,
+  });
+  const delRow = diff.children[0]!;
+  const addRow = diff.children[1]!;
+  // Gutter + marker are unchanged from unified mode (width-1 gutters).
+  if (diffRowTexts(delRow).slice(0, 2).join("|") !== "2  |-") {
+    throw new Error(`del gutter|marker = ${JSON.stringify(diffRowTexts(delRow).slice(0, 2))}`);
+  }
+  if (diffRowTexts(addRow).slice(0, 2).join("|") !== "  2|+") {
+    throw new Error(`add gutter|marker = ${JSON.stringify(diffRowTexts(addRow).slice(0, 2))}`);
+  }
+  // The paired content splits into per-segment leaves inside a row box.
+  const delContent = delRow.children[2]!;
+  const addContent = addRow.children[2]!;
+  if (delContent.type !== "box" || delContent.props.flex_direction !== "row") {
+    throw new Error("split del content must be a row box");
+  }
+  if (addContent.type !== "box" || addContent.props.flex_direction !== "row") {
+    throw new Error("split add content must be a row box");
+  }
+  const expect = (
+    content: Node,
+    golden: Array<{ text: string; fg: string; bold?: boolean }>,
+  ): void => {
+    const segs = content.children;
+    if (segs.length !== golden.length) {
+      throw new Error(`segments = ${segs.length}, want ${golden.length}`);
+    }
+    for (let i = 0; i < golden.length; i++) {
+      const got = diffLeafStyle(segs[i]!);
+      const want = golden[i]!;
+      if (got.text !== want.text || got.fg !== want.fg || got.bold !== want.bold) {
+        throw new Error(`segment ${i} = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+      }
+      // Changed chars are additionally underlined; plain chars are not.
+      if (want.bold && got.underline !== true) {
+        throw new Error(`changed segment ${i} must be underlined`);
+      }
+      if (!want.bold && got.underline !== undefined) {
+        throw new Error(`plain segment ${i} must not be underlined`);
+      }
+    }
+  };
+  // Golden buffer: unchanged chars keep the kind color plain; the changed
+  // digit renders bold + underlined on top of it.
+  expect(delContent, [
+    { text: "    let x = ", fg: DIFF_DEL_FG },
+    { text: "1", fg: DIFF_DEL_FG, bold: true },
+    { text: ";", fg: DIFF_DEL_FG },
+  ]);
+  expect(addContent, [
+    { text: "    let x = ", fg: DIFF_ADD_FG },
+    { text: "2", fg: DIFF_ADD_FG, bold: true },
+    { text: ";", fg: DIFF_ADD_FG },
+  ]);
+  // The segments always re-join the original line text exactly.
+  const join = (content: Node): string =>
+    content.children.map((seg) => seg.props.text as string).join("");
+  if (join(delContent) !== "    let x = 1;") {
+    throw new Error(`del text = ${JSON.stringify(join(delContent))}`);
+  }
+  if (join(addContent) !== "    let x = 2;") {
+    throw new Error(`add text = ${JSON.stringify(join(addContent))}`);
+  }
+});
+
+Deno.test("DiffView inline_highlight keeps unpaired lines plain and whole-line changes uniform", () => {
+  const diff = DiffView({
+    hunks: [
+      { kind: "del", old_line: 1, new_line: 0, text: "foo" }, // no adjacent add
+      { kind: "ctx", old_line: 2, new_line: 1, text: "same" },
+      { kind: "del", old_line: 3, new_line: 0, text: "aaa" },
+      { kind: "add", old_line: 0, new_line: 2, text: "bbb" }, // whole-line change
+    ],
+    inline_highlight: true,
+  });
+  // A deleted line with no adjacent add stays a single plain text leaf.
+  const lone = diff.children[0]!;
+  const loneContent = lone.children[2]!;
+  if (loneContent.type !== "text" || loneContent.props.text !== "foo") {
+    throw new Error(`unpaired del content = ${JSON.stringify(diffLeafStyle(loneContent))}`);
+  }
+  if (loneContent.props.bold !== undefined) {
+    throw new Error("unpaired del must not be highlighted");
+  }
+  // A pair with no common chars is one all-changed segment per side — still a
+  // single leaf, but bold + underlined (the whole line changed).
+  const delAll = diff.children[2]!;
+  const addAll = diff.children[3]!;
+  for (const [row, text] of [[delAll, "aaa"], [addAll, "bbb"]] as const) {
+    const content = row.children[2]!;
+    if (content.type !== "text" || content.props.text !== text) {
+      throw new Error(`all-changed content = ${JSON.stringify(diffLeafStyle(content))}`);
+    }
+    if (content.props.bold !== true || content.props.underline !== true) {
+      throw new Error("all-changed content must be bold + underlined");
+    }
+  }
+});
+
+Deno.test("DiffView mode=side composes two aligned columns with per-column gutters", () => {
+  const diff = DiffView({ hunks: [...diffHunks], mode: "side" });
+  if (diff.type !== "diff") throw new Error(`type = ${diff.type}`);
+  if (diff.props.flex_direction !== "row") {
+    throw new Error(`flex_direction = ${diff.props.flex_direction}`);
+  }
+  if (diff.props.gap !== 1) throw new Error(`gap = ${diff.props.gap}`);
+  if ("hunks" in diff.props || "mode" in diff.props || "inline_highlight" in diff.props) {
+    throw new Error("hunks/mode/inline_highlight must not reach the scene props");
+  }
+  const oldCol = diff.children[0]!;
+  const newCol = diff.children[1]!;
+  if (oldCol.type !== "box" || oldCol.props.flex_direction !== "column") {
+    throw new Error("the old side must be a column box");
+  }
+  if (newCol.type !== "box" || newCol.props.flex_direction !== "column") {
+    throw new Error("the new side must be a column box");
+  }
+  // Aligned by line pair: one row per hunk line in both columns.
+  if (oldCol.children.length !== diffHunks.length || newCol.children.length !== diffHunks.length) {
+    throw new Error("columns must carry one row per hunk line");
+  }
+  const row = (col: Node, i: number): string => diffRowTexts(col.children[i]!).join("|");
+  // Old column: deletions + context, additions blank; its gutter right-aligns
+  // on the old line numbers (width 2: 1, 2, 3, 10, 11).
+  if (row(oldCol, 0) !== " 1| |  fn main() {") throw new Error(`old[0] = ${JSON.stringify(row(oldCol, 0))}`);
+  if (row(oldCol, 1) !== " 2|-|    let x = 1;") throw new Error(`old[1] = ${JSON.stringify(row(oldCol, 1))}`);
+  if (row(oldCol, 2) !== "  | |") throw new Error(`old[2] = ${JSON.stringify(row(oldCol, 2))}`);
+  if (row(oldCol, 3) !== " 3| |  }") throw new Error(`old[3] = ${JSON.stringify(row(oldCol, 3))}`);
+  if (row(oldCol, 4) !== "10| |  宽度对齐测试") throw new Error(`old[4] = ${JSON.stringify(row(oldCol, 4))}`);
+  if (row(oldCol, 5) !== "11|-|    old line") throw new Error(`old[5] = ${JSON.stringify(row(oldCol, 5))}`);
+  if (row(oldCol, 6) !== "  | |") throw new Error(`old[6] = ${JSON.stringify(row(oldCol, 6))}`);
+  // New column: additions + context, deletions blank; its gutter right-aligns
+  // on the new line numbers (width 2: 1, 2, 3, 11, 12).
+  if (row(newCol, 0) !== " 1| |  fn main() {") throw new Error(`new[0] = ${JSON.stringify(row(newCol, 0))}`);
+  if (row(newCol, 1) !== "  | |") throw new Error(`new[1] = ${JSON.stringify(row(newCol, 1))}`);
+  if (row(newCol, 2) !== " 2|+|    let x = 2;") throw new Error(`new[2] = ${JSON.stringify(row(newCol, 2))}`);
+  if (row(newCol, 3) !== " 3| |  }") throw new Error(`new[3] = ${JSON.stringify(row(newCol, 3))}`);
+  if (row(newCol, 4) !== "11| |  宽度对齐测试") throw new Error(`new[4] = ${JSON.stringify(row(newCol, 4))}`);
+  if (row(newCol, 5) !== "  | |") throw new Error(`new[5] = ${JSON.stringify(row(newCol, 5))}`);
+  if (row(newCol, 6) !== "12|+|    new line") throw new Error(`new[6] = ${JSON.stringify(row(newCol, 6))}`);
+});
+
+Deno.test("DiffView mode=side aligned pairs fit a wide viewport without overflow", () => {
+  const diff = DiffView({ hunks: [...diffHunks], mode: "side" });
+  const oldCol = diff.children[0]!;
+  const newCol = diff.children[1]!;
+  // Display width of one column cell's composed text (CJK chars measure 2
+  // cells, matching the engine's multi-width handling).
+  const cellWidth = (cell: Node): number => {
+    let w = 0;
+    for (const leaf of cell.children) {
+      for (const ch of leaf.props.text as string) w += ch.codePointAt(0)! > 0x2e80 ? 2 : 1;
+    }
+    return w;
+  };
+  // Each aligned line pair spans both columns plus the 1-cell split gap.
+  const pairs = oldCol.children.map((cell, i) =>
+    cellWidth(cell) + 1 + cellWidth(newCol.children[i]!)
+  );
+  const widest = Math.max(...pairs);
+  // A 40-cell viewport comfortably holds every aligned pair — nothing would
+  // overflow the clip region's right edge. The widest pair is the CJK
+  // context line: 17 + 1 + 17 = 35 cells.
+  if (widest > 40) throw new Error(`widest aligned pair = ${widest} cells (viewport 40)`);
+  if (widest !== 35) throw new Error(`widest aligned pair = ${widest}, want 35`);
+});
+
+
 // ---------------------------------------------------------------------------
 // Roadmap elements: Select
 // ---------------------------------------------------------------------------
@@ -1915,6 +2270,94 @@ Deno.test("sticky_header: false moves the header into the scrollable content reg
   }
 });
 
+Deno.test("a 10k-row table materializes a bounded row window and still clamps and highlights", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const rows: (string | number)[][] = [];
+    for (let i = 0; i < 10000; i++) rows.push([`row-${i}`, i]);
+    const table = Table({
+      columns: [
+        { key: "name", header: "Name", width: 10 },
+        { key: "n", header: "N", width: 4, align: "right" },
+      ],
+      rows,
+      clip_height: 12,
+    });
+
+    // The window is bounded near the clip height — not one node per row.
+    let region = table.children[1]!;
+    if (region.children.length !== 12) throw new Error(`window = ${region.children.length}`);
+    if (region.props.scroll_y !== 0) throw new Error(`region scroll_y = ${region.props.scroll_y}`);
+
+    // visibleTableRows reports the full dataset window at the offset.
+    let visible = visibleTableRows(table);
+    if (visible.length !== 12) throw new Error(`visible = ${visible.length}`);
+    if (visible[0]?.[0] !== "row-0" || visible[11]?.[0] !== "row-11") {
+      throw new Error(`visible = ${JSON.stringify(visible.map((r) => r[0]).slice(0, 3))}`);
+    }
+
+    // tableKey navigates the dataset: the highlight moves and the window
+    // follows (auto-scroll), never materializing beyond the clip height.
+    let state: TableState = { highlight: 0, scroll_x: 0, scroll_y: 0 };
+    for (let i = 0; i < 30; i++) state = tableKey(table, { name: "down", ...tableKeyBase });
+    if (state.highlight !== 30 || state.scroll_y !== 30 - 12 + 1) {
+      throw new Error(`mid-nav = ${JSON.stringify(state)}`);
+    }
+    const midWindow = visibleTableRows(table);
+    if (midWindow[0]?.[0] !== "row-19") {
+      throw new Error(`mid window = ${midWindow[0]?.[0]}`);
+    }
+    // All the way down: the highlight clamps at the dataset end and the
+    // scroll clamps against the full virtual height (10000 - 12).
+    for (let i = 0; i < 10000 - 30 + 2; i++) state = tableKey(table, { name: "down", ...tableKeyBase });
+    if (state.highlight !== 9999) throw new Error(`highlight = ${state.highlight}`);
+    if (state.scroll_y !== 10000 - 12) throw new Error(`scroll_y clamp = ${state.scroll_y}`);
+    region = table.children[1]!;
+    if (region.children.length !== 12) throw new Error(`bottom window = ${region.children.length}`);
+    visible = visibleTableRows(table);
+    if (visible.length !== 12 || visible[0]?.[0] !== "row-9988" || visible[11]?.[0] !== "row-9999") {
+      throw new Error(`tail = ${JSON.stringify(visible.map((r) => r[0]).slice(0, 3))}`);
+    }
+    // The highlighted row — the last materialized row — is reversed, and
+    // only it.
+    if (region.children[11]?.children.every((cell) => cell.props.reversed === true) !== true) {
+      throw new Error("the last windowed row must be the reversed highlight");
+    }
+    if (region.children[0]?.children.some((cell) => cell.props.reversed === true)) {
+      throw new Error("only the highlighted row may be reversed");
+    }
+
+    // Attach for the scene-geometry paths (scrollTo / wheelScroll).
+    renderer.root.addChild(table);
+
+    // The scroll clamp measures the JS-known full height even though the
+    // scene content is only the window: a scroll far past the dataset end
+    // pins at rows.length - clip_height.
+    scrollTo(table.children[1]!, 0, 1e9);
+    const y = (): number => table.children[1]!.props.scroll_y as number;
+    if (y() !== 10000 - 12) throw new Error(`scrollTo clamp = ${y()}`);
+
+    // wheelScroll refreshes the window and clamps against the full height: at
+    // the bottom a down-wheel is consumed but pinned; an up-wheel pans back
+    // into the dataset and re-windows.
+    if (wheelScroll(table, mouse("scroll_down", 0, 0)) !== true) {
+      throw new Error("a wheel at the table's bound must stay consumed");
+    }
+    if (y() !== 9988) throw new Error(`wheel clamp = ${y()}`);
+    if (wheelScroll(table, mouse("scroll_up", 0, 0)) !== true) {
+      throw new Error("a wheel up on the table must be consumed");
+    }
+    if (y() !== 9987) throw new Error(`wheel up = ${y()}`);
+    visible = visibleTableRows(table);
+    if (visible[0]?.[0] !== "row-9987") {
+      throw new Error(`window after wheel = ${visible[0]?.[0]}`);
+    }
+    if (table.props.scroll_y !== undefined) {
+      throw new Error("the table root must not scroll (the sticky header stays pinned)");
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Focus manager
 // ---------------------------------------------------------------------------
@@ -1947,6 +2390,75 @@ Deno.test("routeKey with an explicit node routes to that node's handler", () => 
   const key: KeyEvent = { name: "enter", ctrl: false, alt: false, shift: false };
   manager.routeKey(key, bNode);
   if (hits !== 10) throw new Error(`explicit node route = ${hits}`);
+});
+
+Deno.test("FocusManager routes paste to the focused element's paste handler", () => {
+  const manager = new FocusManager();
+  const pasted: Array<{ id: string; text: string }> = [];
+  // Length read through a function: TS narrows a const-typed array's `length`
+  // to the literal of the last checked comparison, which would flag the
+  // follow-up `!== 2` as unintentional.
+  const pasteCount = () => pasted.length;
+  manager.register({
+    id: "a",
+    node: Text({ text: "a" }),
+    onKey: () => {},
+    onPaste: (text) => pasted.push({ id: "a", text }),
+  });
+  manager.register({
+    id: "b",
+    node: Text({ text: "b" }),
+    onKey: () => {},
+    onPaste: (text) => pasted.push({ id: "b", text }),
+  });
+  if (manager.routePaste("xy") !== false) throw new Error("nothing focused must not route");
+  if (manager.focus("a") !== true) throw new Error("focus(a) must succeed");
+  if (manager.routePaste("xy") !== true) throw new Error("focused paste must be handled");
+  if (pasteCount() !== 1 || pasted[0]?.id !== "a" || pasted[0]?.text !== "xy") {
+    throw new Error(`paste must route to a verbatim (${JSON.stringify(pasted)})`);
+  }
+  manager.focus("b");
+  manager.routePaste("z");
+  if (pasteCount() !== 2 || pasted[1]?.id !== "b" || pasted[1]?.text !== "z") {
+    throw new Error(`paste must route to b (${JSON.stringify(pasted)})`);
+  }
+});
+
+Deno.test("routePaste falls through when the focused element registers no paste handler", () => {
+  const manager = new FocusManager();
+  const pasted: string[] = [];
+  // Only `a` handles paste; `b` is a key-only focusable.
+  manager.register({ id: "a", node: Text({ text: "a" }), onKey: () => {}, onPaste: (t) => pasted.push(t) });
+  manager.register({ id: "b", node: Text({ text: "b" }), onKey: () => {} });
+  manager.focus("b");
+  if (manager.routePaste("xy") !== false) throw new Error("a paste-blind element must not consume");
+  if (pasted.length !== 0) throw new Error(`no dispatch without an onPaste handler (${pasted.length})`);
+  manager.focus("a");
+  if (manager.routePaste("xy") !== true) throw new Error("a paste-handling element must consume");
+  if (pasted.join(",") !== "xy") throw new Error(`pasted = ${pasted.join(",")}`);
+});
+
+Deno.test("routePaste with an explicit node routes to that node's paste handler", () => {
+  const manager = new FocusManager();
+  const bNode = Text({ text: "b" });
+  const pasted: string[] = [];
+  manager.register({ id: "a", node: Text({ text: "a" }), onKey: () => {}, onPaste: (t) => pasted.push("a:" + t) });
+  manager.register({ id: "b", node: bNode, onKey: () => {}, onPaste: (t) => pasted.push("b:" + t) });
+  manager.routePaste("xy", bNode);
+  if (pasted.join(",") !== "b:xy") throw new Error(`explicit node paste = ${pasted.join(",")}`);
+});
+
+Deno.test("useFocus with an onPaste handler registers paste routing", () => {
+  const manager = new FocusManager();
+  const node = Text({ text: "x" });
+  const pasted: string[] = [];
+  const handle = useFocus("f", node, () => {}, manager, (text) => pasted.push(text));
+  handle.focus();
+  if (manager.routePaste("hi") !== true) throw new Error("routed paste must be handled");
+  if (pasted.join(",") !== "hi") throw new Error(`pasted = ${pasted.join(",")}`);
+  handle.dispose();
+  if (manager.has("f")) throw new Error("dispose() must unregister the id");
+  if (manager.routePaste("hi") !== false) throw new Error("disposed handle must not route");
 });
 
 Deno.test("unregister clears the active focus and stops dispatch", () => {
@@ -2770,6 +3282,127 @@ Deno.test("followTail on a plain streaming node enables auto-scroll from scratch
 });
 
 // ---------------------------------------------------------------------------
+// StreamingText scroll-to-bottom affordance
+//
+// A manual scroll above the tail detaches the follow and stamps a small
+// `▼` indicator leaf (a 1x1 text cell, absolutely positioned at the clip
+// region's bottom-right with a z_index above in-flow content) so the user
+// can see the stream is still growing above. `followTail` (re-attach) and
+// `scrollToBottom` (a one-shot jump to the tail) dismiss it.
+// ---------------------------------------------------------------------------
+
+Deno.test("a manual scroll above the tail stamps the scroll-to-bottom affordance (dismissed by followTail)", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    const node = StreamingText({ clip_height: 2, width: 10 });
+    renderer.root.addChild(node);
+    for (const t of ["a\n", "b\n", "c\n"]) {
+      node.appendSpan(t);
+      syncStreamTail(node);
+    }
+    // Fresh reads per assertion — TS property-access narrowing would otherwise
+    // reject later comparisons against a different literal (see above).
+    const count = (): number => node.children.length;
+    // While following the tail there is no affordance (no children).
+    if (count() !== 0) throw new Error(`following children = ${count()}`);
+
+    // Scrolling above the tail detaches the follow and stamps the affordance
+    // at the clip region's bottom-right: a 1x1 text cell with the ▼ char,
+    // absolutely positioned, right-aligned, at the bottom row of the 2-row
+    // viewport (top = clip 2 - 1 + scroll 0), above in-flow content.
+    scrollTo(node, 0, 0);
+    if (isStreamFollowing(node)) throw new Error("a scroll above the tail must detach the follow");
+    if (count() !== 1) throw new Error(`affordance children = ${count()}`);
+    const leaf = node.children[0]!;
+    if (leaf.type !== "text") throw new Error(`affordance type = ${leaf.type}`);
+    if (leaf.props.text !== STREAM_AFFORDANCE_CHAR) {
+      throw new Error(`affordance text = ${JSON.stringify(leaf.props.text)}`);
+    }
+    if (leaf.props.position !== "absolute" || leaf.props.right !== 0) {
+      throw new Error(`affordance position = ${JSON.stringify(leaf.props)}`);
+    }
+    if (leaf.props.width !== 1 || leaf.props.height !== 1) {
+      throw new Error(`affordance size = ${JSON.stringify(leaf.props)}`);
+    }
+    if (leaf.props.z_index !== 2) throw new Error(`affordance z_index = ${leaf.props.z_index}`);
+    const top = (): number => leaf.props.top as number;
+    if (top() !== 1) throw new Error(`affordance top = ${top()}`);
+
+    // The cell stays fixed at the viewport's bottom row as the content
+    // scrolls: the `top` inset is scroll-compensated (clip 2 - 1 + scroll 1).
+    scrollTo(node, 0, 1);
+    if (top() !== 2) throw new Error(`compensated top = ${top()}`);
+
+    // Further scrolls while detached keep a single affordance leaf (no dup).
+    scrollTo(node, 0, 0);
+    if (count() !== 1) throw new Error(`re-scroll children = ${count()}`);
+
+    // followTail re-attaches, snaps back to the tail, and dismisses the
+    // affordance.
+    followTail(node);
+    if (!isStreamFollowing(node)) throw new Error("followTail must re-attach the follow");
+    if (count() !== 0) throw new Error(`affordance after followTail = ${count()}`);
+    if (node.props.scroll_y !== 2) throw new Error(`snap scroll_y = ${node.props.scroll_y}`);
+  });
+});
+
+Deno.test("scrollToBottom jumps to the tail and dismisses the affordance (without re-attaching)", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    const node = StreamingText({ clip_height: 2, width: 10 });
+    renderer.root.addChild(node);
+    const y = (): number => node.props.scroll_y as number;
+    for (const t of ["a\n", "b\n", "c\n"]) {
+      node.appendSpan(t);
+      syncStreamTail(node);
+    }
+    // Fresh read per assertion (see the tail-follow tests above).
+    const count = (): number => node.children.length;
+    // Detach (stamps the affordance), then the stream grows while detached.
+    scrollTo(node, 0, 0);
+    if (count() !== 1) throw new Error(`affordance children = ${count()}`);
+    node.appendSpan("d\n"); // 5 rows now; sync is a no-op while detached
+    syncStreamTail(node);
+    if (y() !== 0) throw new Error(`pinned scroll_y = ${y()}`);
+
+    // scrollToBottom: a one-shot jump to the current tail (5 - 2 = 3) and
+    // the affordance is dismissed; the follow stays detached.
+    const applied = scrollToBottom(node);
+    if (applied.x !== 0 || applied.y !== 3) throw new Error(`applied = ${JSON.stringify(applied)}`);
+    if (y() !== 3) throw new Error(`scrollToBottom scroll_y = ${y()}`);
+    if (count() !== 0) throw new Error(`affordance after scrollToBottom = ${count()}`);
+    if (isStreamFollowing(node)) throw new Error("scrollToBottom must not re-attach the follow");
+
+    // Growth after the one-shot jump does not pin the view (still detached).
+    node.appendSpan("e\n"); // 6 rows now; the view stays at the old tail
+    syncStreamTail(node);
+    if (y() !== 3) throw new Error(`post-jump scroll_y = ${y()}`);
+
+    // The next scroll above the tail re-stamps the affordance.
+    scrollTo(node, 0, 0);
+    if (count() !== 1) throw new Error(`re-show children = ${count()}`);
+    if (y() !== 0) throw new Error(`re-scroll scroll_y = ${y()}`);
+  });
+});
+
+Deno.test("autoScroll: false nodes never stamp the affordance on a manual scroll", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    const node = StreamingText({ autoScroll: false, clip_height: 2, width: 10 });
+    renderer.root.addChild(node);
+    for (const t of ["a\n", "b\n", "c\n"]) {
+      node.appendSpan(t);
+      syncStreamTail(node);
+    }
+    // A manual scroll above the tail never follows, so there is no follow to
+    // detach and no affordance to show.
+    scrollTo(node, 0, 0);
+    if (node.children.length !== 0) throw new Error(`children = ${node.children.length}`);
+    if (isStreamFollowing(node)) throw new Error("autoScroll: false must stay detached");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Mouse wheel scroll + click-to-focus
 //
 // `wheelScroll` maps terminal wheel events (`scroll_up` / `scroll_down` /
@@ -2870,11 +3503,12 @@ Deno.test("wheelScroll on a table scrolls its content region (sticky header pinn
       clip_height: 3,
     });
     renderer.root.addChild(table);
-    // Region viewport 3 rows; the first row leaf measures 5 rows, so the
-    // content overflows: maxScroll.y = 5 - 3 = 2.
+    // The region's viewport is its clip_height (3). The content region is
+    // windowed — only the visible rows are materialized — so the scroll clamp
+    // measures the JS-known full content height (4 rows): maxScroll.y =
+    // 4 - 3 = 1.
     const region = table.children[1]!;
-    fakeContentSizes.set(region.handle, { width: 11, height: 3 });
-    fakeContentSizes.set(region.children[0]!.handle, { width: 11, height: 5 });
+    if (region.children.length !== 3) throw new Error(`windowed rows = ${region.children.length}`);
 
     if (wheelScroll(table, mouse("scroll_down", 0, 0)) !== true) {
       throw new Error("a wheel event on a table must be consumed");
@@ -2886,9 +3520,12 @@ Deno.test("wheelScroll on a table scrolls its content region (sticky header pinn
     if (table.props.scroll_y !== undefined) {
       throw new Error("the table root must not scroll (the sticky header stays pinned)");
     }
-    // A second wheel clamps at the content bound (max 2).
-    wheelScroll(table, mouse("scroll_down", 0, 0));
-    if (regionY() !== 2) throw new Error(`clamped region scroll_y = ${regionY()}`);
+    // A second wheel clamps at the full-content bound (max 1) and stays
+    // consumed.
+    if (wheelScroll(table, mouse("scroll_down", 0, 0)) !== true) {
+      throw new Error("a wheel event at the table's scroll bound must stay consumed");
+    }
+    if (regionY() !== 1) throw new Error(`clamped region scroll_y = ${regionY()}`);
   });
 });
 
