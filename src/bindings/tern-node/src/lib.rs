@@ -4,14 +4,17 @@
 //! two surfaces:
 //!
 //! * **`TuiRenderer`** — owns the terminal lifecycle (raw mode + alternate
-//!   screen via tern-terminal), the scene, and the render loop: `root()`
-//!   returns a handle to the scene root, `start_event_stream(callback)`
-//!   pushes terminal events (keys, resizes, focus changes, mouse, and paste)
-//!   to the JS thread through a napi `ThreadsafeFunction` fed by
-//!   tern-terminal's background event loop, `render()` paints the scene to
-//!   the terminal, and `destroy()` tears the terminal state back down. The
-//!   pull-based `poll_events` fallback remains available behind the
-//!   `poll-fallback` cargo feature (default build ships push delivery).
+//!   screen via tern-terminal, skippable with `use_alt_screen` for inline
+//!   rendering), the scene, and the render loop: `root()` returns a handle to
+//!   the scene root, `start_event_stream(callback)` pushes terminal events
+//!   (keys, resizes, focus changes, mouse, and paste) to the JS thread
+//!   through a napi `ThreadsafeFunction` fed by tern-terminal's background
+//!   event loop, `render()` paints the scene to the terminal,
+//!   `set_title(title)` sets the terminal window title, `capabilities`
+//!   reports the detected color support, and `destroy()` tears the terminal
+//!   state back down. The pull-based `poll_events` fallback remains
+//!   available behind the `poll-fallback` cargo feature (default build ships
+//!   push delivery).
 //! * **Scene construction** — `create_node(type, props)` builds a node
 //!   handle (backed by the tern-components node model), and `NodeHandle`
 //!   methods (`add_child` / `remove` / `set_props`) mutate the shared scene
@@ -85,6 +88,36 @@ fn shared_scene() -> &'static Arc<Mutex<Scene>> {
 fn shared_viewport_ref() -> &'static Mutex<(u32, u32)> {
     static VIEWPORT: OnceLock<Mutex<(u32, u32)>> = OnceLock::new();
     VIEWPORT.get_or_init(|| Mutex::new((80, 24)))
+}
+
+/// Convert a painted buffer to one string per row, mapping masked
+/// continuation cells (the zero-width right halves of wide glyphs) to spaces
+/// so every row has exactly `buffer.width` display columns. Multi-width
+/// aware by construction: a wide character occupies its lead cell plus the
+/// masked neighbor, so the row string keeps the buffer's true display
+/// width.
+fn buffer_rows(buffer: &Buffer) -> Vec<String> {
+    (0..buffer.height)
+        .map(|y| {
+            (0..buffer.width)
+                .map(|x| {
+                    buffer
+                        .cell(x, y)
+                        .map(|cell| if cell.is_masked() { ' ' } else { cell.ch })
+                        .unwrap_or(' ')
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Paint `scene` at `viewport` and return the frame as one string per row
+/// (see [`buffer_rows`]). Performs no terminal I/O — the pure snapshot both
+/// [`TuiRenderer::render_to_buffer`] and its unit test use, so the tested
+/// path is the shipped path.
+fn paint_scene_rows(scene: &Scene, viewport: Size) -> Vec<String> {
+    let buffer = Compositor::new().paint_scene(scene, viewport);
+    buffer_rows(&buffer)
 }
 
 /// The laid-out content size of a scene node, in cells.
@@ -306,6 +339,25 @@ pub struct TuiRendererOptions {
     /// being surfaced as an event.
     #[napi(js_name = "exit_on_ctrl_c")]
     pub exit_on_ctrl_c: Option<bool>,
+    /// When `false`, the renderer skips the alternate screen: it renders
+    /// inline in the terminal's main screen (and never emits the alternate-
+    /// screen enter/leave escapes). Default `true`.
+    #[napi(js_name = "use_alt_screen")]
+    pub use_alt_screen: Option<bool>,
+    /// The terminal window title, applied on construction (OSC 0). `None`
+    /// leaves the title untouched.
+    #[napi(js_name = "title")]
+    pub title: Option<String>,
+}
+
+/// The terminal's color capabilities, detected by the backend.
+#[napi(object)]
+pub struct RendererCapabilities {
+    /// Whether 24-bit (16M) RGB truecolor is supported.
+    pub truecolor: bool,
+    /// The terminal's color palette size: 16_777_216 for truecolor, 256 for
+    /// a 256-color palette, 16 for basic ANSI, 0 when none.
+    pub colors: u32,
 }
 
 /// The terminal-facing renderer: owns raw mode + alternate screen, pushes
@@ -323,6 +375,9 @@ struct RendererInner {
     last: Option<Buffer>,
     #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
     exit_on_ctrl_c: bool,
+    /// Whether the alternate screen was entered: `false` renders inline in
+    /// the main screen, so teardown must skip `exit_alt_screen` to match.
+    use_alt_screen: bool,
     destroyed: bool,
     /// The background push event loop (`push-events` feature): stopped when
     /// the renderer is destroyed so the loop thread exits and releases the
@@ -333,30 +388,28 @@ struct RendererInner {
 
 #[napi]
 impl TuiRenderer {
-    /// Enter raw mode + the alternate screen, ready to render. Mouse and
-    /// focus-change event delivery is enabled so the event stream (or
-    /// `poll_events`, with the fallback feature) can surface them.
+    /// Enter raw mode + the alternate screen (unless `use_alt_screen` is
+    /// `false`), apply the window title, and enable mouse / focus-change /
+    /// bracketed-paste event delivery, ready to render.
     ///
     /// If any terminal transition fails the already-entered states are rolled
     /// back before the error is returned, so a failed constructor never leaves
     /// the terminal in raw mode.
     #[napi(constructor, js_name = "TuiRenderer")]
     pub fn new(options: TuiRendererOptions) -> Result<Self> {
+        let use_alt_screen = options.use_alt_screen.unwrap_or(true);
+        let title = options.title.clone();
         let backend = Backend::new();
         backend
             .enter_raw_mode()
             .map_err(|e| Error::from_reason(format!("enter raw mode: {e}")))?;
-        if let Err(e) = backend.enter_alt_screen() {
+        if let Err(e) = backend.startup(use_alt_screen, title.as_deref()) {
             let _ = backend.exit_raw_mode();
+            if use_alt_screen {
+                let _ = backend.exit_alt_screen();
+            }
             return Err(Error::from_reason(format!(
                 "enter alternate screen: {e}"
-            )));
-        }
-        if let Err(e) = backend.enable_event_listening() {
-            let _ = backend.exit_alt_screen();
-            let _ = backend.exit_raw_mode();
-            return Err(Error::from_reason(format!(
-                "enable event listening: {e}"
             )));
         }
         Ok(Self {
@@ -367,6 +420,7 @@ impl TuiRenderer {
                 last: None,
                 #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
                 exit_on_ctrl_c: options.exit_on_ctrl_c.unwrap_or(false),
+                use_alt_screen,
                 destroyed: false,
                 #[cfg(feature = "push-events")]
                 event_loop: None,
@@ -446,6 +500,35 @@ impl TuiRenderer {
         Ok(())
     }
 
+    /// Paint the shared scene into a fresh buffer at the given viewport —
+    /// `width`/`height` in cells, each defaulting to the most recent
+    /// [`render`](Self::render) terminal size — and return the frame as one
+    /// string per row. Masked/continuation cells (the zero-width right
+    /// halves of wide glyphs) are spaces, so every row has exactly `width`
+    /// display columns (multi-width aware). Performs no terminal I/O; the
+    /// result is a pure snapshot for JS-side testing and golden
+    /// comparisons.
+    #[napi(js_name = "render_to_buffer")]
+    pub fn render_to_buffer(&self, width: Option<u32>, height: Option<u32>) -> Result<Vec<String>> {
+        let inner = self.inner.lock().expect("renderer inner poisoned");
+        if inner.destroyed {
+            return Err(Error::from_reason("renderer is destroyed"));
+        }
+        let (vw, vh) = *shared_viewport_ref()
+            .lock()
+            .expect("viewport poisoned");
+        let viewport = Size::new(
+            width.map(|w| w as u16).unwrap_or(vw as u16),
+            height.map(|h| h as u16).unwrap_or(vh as u16),
+        );
+        let scene = inner.scene.clone();
+        let rows = {
+            let scene_guard = scene.lock().expect("scene poisoned");
+            paint_scene_rows(&scene_guard, viewport)
+        };
+        Ok(rows)
+    }
+
     /// Leave the alternate screen and raw mode and stop event listening,
     /// restoring the terminal. Also stops the push event loop (with the
     /// default `push-events` feature) so the loop thread exits. Safe to call
@@ -461,7 +544,9 @@ impl TuiRenderer {
             event_loop.stop();
         }
         let _ = inner.backend.disable_event_listening();
-        let _ = inner.backend.exit_alt_screen();
+        if inner.use_alt_screen {
+            let _ = inner.backend.exit_alt_screen();
+        }
         let _ = inner.backend.exit_raw_mode();
         inner.destroyed = true;
         Ok(())
@@ -472,6 +557,31 @@ impl TuiRenderer {
     #[napi(getter, js_name = "destroyed")]
     pub fn destroyed(&self) -> bool {
         self.inner.lock().expect("renderer inner poisoned").destroyed
+    }
+
+    /// The terminal's color capabilities (`{ truecolor, colors }`), detected
+    /// once by the backend (see `tern-terminal`'s `Backend::capabilities`).
+    #[napi(getter, js_name = "capabilities")]
+    pub fn capabilities(&self) -> RendererCapabilities {
+        let caps = tern_terminal::backend::capabilities();
+        RendererCapabilities {
+            truecolor: caps.truecolor,
+            colors: caps.colors,
+        }
+    }
+
+    /// Set the terminal window title (OSC 0). Errors on a destroyed
+    /// renderer.
+    #[napi(js_name = "set_title")]
+    pub fn set_title(&self, title: String) -> Result<()> {
+        let inner = self.inner.lock().expect("renderer inner poisoned");
+        if inner.destroyed {
+            return Err(Error::from_reason("renderer is destroyed"));
+        }
+        inner
+            .backend
+            .set_title(&title)
+            .map_err(|e| Error::from_reason(format!("set title: {e}")))
     }
 }
 
@@ -527,7 +637,9 @@ impl TuiRenderer {
                 // the renderer destroyed, exactly like the pull path did.
                 if let Ok(mut inner) = inner_for_loop.lock() {
                     let _ = inner.backend.disable_event_listening();
-                    let _ = inner.backend.exit_alt_screen();
+                    if inner.use_alt_screen {
+                        let _ = inner.backend.exit_alt_screen();
+                    }
                     let _ = inner.backend.exit_raw_mode();
                     inner.destroyed = true;
                 }
@@ -568,7 +680,9 @@ impl TuiRenderer {
             let ctrl_c = is_ctrl_c(&ev);
             if inner.exit_on_ctrl_c && ctrl_c {
                 let _ = inner.backend.disable_event_listening();
-                let _ = inner.backend.exit_alt_screen();
+                if inner.use_alt_screen {
+                    let _ = inner.backend.exit_alt_screen();
+                }
                 let _ = inner.backend.exit_raw_mode();
                 inner.destroyed = true;
                 return Ok(out);
@@ -1307,6 +1421,70 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.to_string().contains("streaming_text"), "{err}");
+    }
+
+    #[test]
+    fn render_to_buffer_paints_known_scene_into_expected_rows() {
+        // The canonical golden scene (mirrored by the JS fake-addon golden
+        // test): a rounded-border box with 1-cell padding around Text('Hi'),
+        // attached to the scene root, painted at a 6x3 viewport. The box
+        // sizes to its content (2 text columns + 2 padding = 4 wide, 1 + 2
+        // padding = 3 tall) at the origin, so the frame is
+        //   ┌──┐
+        //   │Hi│
+        //   └──┘
+        // with trailing blanks padded to the 6-column viewport width.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let box_id = scene
+            .add_child(
+                root,
+                NodeKind::Box,
+                Style::new().border_style(BorderStyle::Rounded),
+            )
+            .expect("add box");
+        scene.set_prop(box_id, "padding", PropValue::Int(1));
+        scene.add_text(box_id, "Hi", Style::new()).expect("add text");
+
+        let rows = paint_scene_rows(&scene, Size::new(6, 3));
+        assert_eq!(rows, vec!["┌──┐  ", "│Hi│  ", "└──┘  "]);
+    }
+
+    #[test]
+    fn render_to_buffer_masks_wide_char_continuation_cells() {
+        // A wide glyph occupies two columns: the lead cell carries the glyph
+        // and the continuation cell is masked (NUL). `buffer_rows` maps the
+        // mask to a space so the row string keeps the buffer's full display
+        // width — the wide character is never dropped nor doubled.
+        let mut buffer = Buffer::new(4, 1);
+        buffer.set_string(0, 0, "コa", Style::new());
+        assert_eq!(buffer_rows(&buffer), vec!["コ a "]);
+    }
+
+    #[test]
+    fn render_to_buffer_errors_when_destroyed() {
+        // The napi method guards on the destroyed flag, so a torn-down
+        // renderer cannot snapshot (mirrors `render`).
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let inner = RendererInner {
+            backend: Backend::new(),
+            compositor: Compositor::new(),
+            scene,
+            last: None,
+            #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
+            exit_on_ctrl_c: false,
+            use_alt_screen: false,
+            destroyed: true,
+            #[cfg(feature = "push-events")]
+            event_loop: None,
+        };
+        let renderer = TuiRenderer {
+            inner: Arc::new(Mutex::new(inner)),
+        };
+        let err = renderer
+            .render_to_buffer(None, None)
+            .expect_err("destroyed renderer must error");
+        assert!(err.to_string().contains("destroyed"), "{err}");
     }
 
     #[test]

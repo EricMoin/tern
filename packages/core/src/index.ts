@@ -17,10 +17,11 @@
  *   tail vs the `clip_height` viewport, a manual scroll above the tail
  *   detaches, and `followTail` re-attaches.
  * - `Input` / `Spinner` / `StatusBar` / `Panels` / `DiffView` / `Select` /
- *   `ScrollView` / `Table` / `Modal` / `MarkdownView` are roadmap element
- *   factories that compose the primitive kinds into richer widgets (all
- *   editing/caret/selection/scroll math stays in the element, the Rust
- *   compositor paints it), and a
+ *   `ScrollView` / `Table` / `Tabs` / `Progress` / `Modal` / `MarkdownView`
+ *   are roadmap
+ *   element factories that compose the primitive kinds into richer widgets
+ *   (all editing/caret/selection/scroll/tab math stays in the element, the
+ *   Rust compositor paints it), and a
  *   `FocusManager`
  *   (with a `useFocus` helper) routes key events to the focused element's
  *   key handler — and paste events to the focused element's paste handler
@@ -83,6 +84,7 @@ export type {
   KeyEvent,
   MouseEventJs,
   NodeHandle,
+  RendererCapabilities,
   TernEventJs,
   TuiRenderer,
   TuiRendererOptions,
@@ -97,17 +99,19 @@ import type {
   KeyEvent,
   MouseEventJs,
   NodeHandle as NativeNodeHandle,
+  RendererCapabilities,
   TernEventJs,
   TuiRenderer as NativeTuiRenderer,
+  TuiRendererOptions,
 } from "../../../src/bindings/tern-node/index.d.ts";
 import { loadAddon } from "./addon.ts";
 
 /**
  * The scene node kinds. `box`/`text`/`streaming_text` are materialized by the
  * binding; `input`/`textarea`/`spinner`/`status_bar`/`panels`/`diff`/`select`/
- * `scroll_view`/`table`/`modal`/`markdown` are JS-only element kinds that
- * materialize as compositions over the primitive kinds (their root primitive
- * is fixed by {@link NATIVE_KIND}).
+ * `scroll_view`/`table`/`tabs`/`progress`/`modal`/`markdown` are JS-only
+ * element kinds that materialize as compositions over the primitive kinds
+ * (their root primitive is fixed by {@link NATIVE_KIND}).
  */
 export type NodeType =
   | "box"
@@ -122,6 +126,8 @@ export type NodeType =
   | "select"
   | "scroll_view"
   | "table"
+  | "tabs"
+  | "progress"
   | "modal"
   | "markdown";
 
@@ -131,8 +137,8 @@ export type NodeType =
  * kinds are pure JS compositions over those primitives (constitution: no new
  * engine kinds in the binding), so each maps to the root primitive of its
  * composition: an `input` is a framed box, a `spinner` is a text leaf, a
- * `status_bar` / `panels` / `diff` / `select` / `table` / `markdown` is a
- * flex box.
+ * `status_bar` / `panels` / `diff` / `select` / `table` / `tabs` / `progress`
+ * / `modal` / `markdown` is a flex box.
  */
 const NATIVE_KIND: Record<NodeType, NodeType> = {
   box: "box",
@@ -147,6 +153,8 @@ const NATIVE_KIND: Record<NodeType, NodeType> = {
   select: "box",
   scroll_view: "box",
   table: "box",
+  tabs: "box",
+  progress: "box",
   modal: "box",
   markdown: "box",
 };
@@ -214,6 +222,18 @@ export interface CreateRendererOptions {
    * being surfaced as an event. Maps to the native `exit_on_ctrl_c`.
    */
   exitOnCtrlC?: boolean;
+  /**
+   * When `false`, the renderer skips the alternate screen: it renders inline
+   * in the terminal's main screen, and never emits the alternate-screen
+   * enter/leave escapes. Default `true`. Maps to the native
+   * `use_alt_screen`.
+   */
+  useAltScreen?: boolean;
+  /**
+   * The terminal window title, applied when the renderer is constructed.
+   * Maps to the native `title`.
+   */
+  title?: string;
 }
 
 /**
@@ -3083,6 +3103,476 @@ export function tableKey(table: Node, event: KeyEvent): TableState {
 }
 
 // ---------------------------------------------------------------------------
+// Tabs
+//
+// A `tabs` element is a flex column of box/text leaves: a tab bar row (one
+// `Text` leaf per tab, the active tab painted with the theme's `primary`
+// palette colors and reversed, its label prefixed with a top-border marker)
+// plus a content region box holding the *active* tab's content nodes. The
+// tab list is JS bookkeeping (never scene props, mirroring `Panels`' `panels`
+// / `Table`'s `rows`); the interactive state (`active`) lives on the root
+// box's props, and `activateTab` / `closeTab` / `tabsKey` mutate it and
+// rebuild the composition in place (mirroring `selectKey` / `tableKey`). No
+// new napi node kind: the `tabs` element materializes as a `box`
+// (constitution).
+// ---------------------------------------------------------------------------
+
+/** One tab in a `Tabs` element: a label plus the content nodes rendered in
+ * the content region while the tab is active. */
+export interface TabSpec {
+  /** The tab's label text (rendered in the tab bar). */
+  label: string;
+  /** The tab's content nodes, rendered in the content region while the tab is
+   * active (the same node instances are re-attached on every activation,
+   * mirroring `Panels`' collapsed-body restore). */
+  content: Node[];
+  /** Show a close affordance on this tab (defaults to the element's
+   * `closable`). */
+  closable?: boolean;
+}
+
+/** The state reported by {@link tabsKey} after a routed key. */
+export interface TabsState {
+  /** The active tab index (clamped into the tabs). */
+  active: number;
+  /** The tab count after the key (a `ctrl+w` close shrinks it). */
+  count: number;
+}
+
+/**
+ * Props for the `Tabs` element. `tabs` / `closable` are consumed by the
+ * factory (the tab list is JS bookkeeping — it never reaches the scene props,
+ * mirroring `Panels`' `panels`); the interactive state (`active`) and the
+ * remaining style/layout props flow to the root box, which is a flex column
+ * of the tab bar row and the content region.
+ */
+export interface TabsProps extends NodeProps {
+  /** The tabs, in display order (left to right). */
+  tabs: TabSpec[];
+  /** The active tab index (default 0). */
+  active?: number;
+  /** Show a close affordance on every tab (default `false`; a per-tab
+   * `closable` overrides it). */
+  closable?: boolean;
+}
+
+/** The fg of the active tab's primary styling — the default theme's
+ * `primary` palette fg (docs/components.md "Tabs"; mirroring `DIFF_ADD_FG`
+ * mirroring the `success` palette). */
+export const TAB_PRIMARY_FG = "#61afef";
+/** The bg of the active tab's primary styling — the default theme's `primary`
+ * palette bg. */
+export const TAB_PRIMARY_BG = "#21252b";
+/** The top-border marker prefixed to the active tab's label — a top-border
+ * fragment that visually caps the active tab. */
+export const TAB_ACTIVE_MARKER = "▔";
+/** The close glyph appended to a closable tab's label. */
+export const TAB_CLOSE_CHAR = "×";
+
+/** The normalized tab spec list of a tabs node (JS bookkeeping — never scene
+ * props, mirroring `Table`'s `tableRows`). */
+const tabSpecs = new WeakMap<Node, TabSpec[]>();
+
+/** The element-level close-affordance default of a tabs node (JS bookkeeping —
+ * never scene props, mirroring `Select`'s `floating` mapping to `z_index`).
+ * Captured at creation because the `closable` flag is consumed by the factory
+ * (like `Panels`' `panels` / `Table`'s `rows`). */
+const tabClosables = new WeakMap<Node, boolean>();
+
+/** The element-level `closable` default of a tabs node (`false` when unset). */
+function tabsElementClosable(tabs: Node): boolean {
+  return tabClosables.get(tabs) ?? false;
+}
+
+/** Clamp `index` into `[0, count - 1]` (0 when `count` is 0). */
+function clampTabIndex(index: number, count: number): number {
+  return Math.max(0, Math.min(index, Math.max(0, count - 1)));
+}
+
+/** Whether the tab at `index` shows a close affordance: its own `closable`
+ * flag wins, falling back to the element's `closable` default. */
+function tabClosable(spec: TabSpec, elementClosable: boolean): boolean {
+  return spec.closable ?? elementClosable;
+}
+
+/** The text of one tab leaf: the label — prefixed by the top-border marker
+ * when active, suffixed by the close glyph when closable. */
+function tabLeafText(spec: TabSpec, isActive: boolean, closable: boolean): string {
+  const text = isActive ? TAB_ACTIVE_MARKER + spec.label : spec.label;
+  return closable ? `${text} ${TAB_CLOSE_CHAR}` : text;
+}
+
+/** The props of one tab leaf: active tabs are painted with the `primary`
+ * palette colors and reversed; closable tabs carry the close glyph. */
+function tabLeafProps(spec: TabSpec, isActive: boolean, closable: boolean): NodeProps {
+  const props: NodeProps = { text: tabLeafText(spec, isActive, closable) };
+  if (isActive) {
+    props.fg = TAB_PRIMARY_FG;
+    props.bg = TAB_PRIMARY_BG;
+    props.reversed = true;
+  }
+  return props;
+}
+
+/**
+ * Rebuild a tabs node's children from its current props (the source of truth,
+ * mirroring `rebuildTable`): the tab bar row — a flex row box holding one
+ * `Text` leaf per tab (the active one reversed + primary + top-border
+ * marker, closable tabs carrying the close glyph) — plus the content region
+ * box (a flex column) holding the active tab's content nodes. The same
+ * content node instances are re-attached on every rebuild, mirroring
+ * `Panels`' collapsed-body restore. Runs at creation and after every
+ * `activateTab` / `closeTab` / `tabsKey` mutation.
+ */
+function rebuildTabs(tabs: Node): void {
+  const props = tabs.props as TabsProps;
+  const specs = tabSpecs.get(tabs) ?? [];
+  const active = clampTabIndex(typeof props.active === "number" ? props.active : 0, specs.length);
+  const elementClosable = tabsElementClosable(tabs);
+
+  for (const child of [...tabs.children]) child.remove();
+
+  const bar = Box({ flex_direction: "row" });
+  specs.forEach((spec, index) => {
+    bar.addChild(Text(tabLeafProps(spec, index === active, tabClosable(spec, elementClosable))));
+  });
+  tabs.addChild(bar);
+
+  const region = Box({ flex_direction: "column" });
+  const content = specs[active]?.content ?? [];
+  for (const node of content) region.addChild(node);
+  tabs.addChild(region);
+}
+
+/**
+ * Create a `tabs` element: a flex column of box/text leaves — a tab bar row
+ * (one `Text` leaf per tab; the active tab painted with the theme's `primary`
+ * palette colors and reversed, its label prefixed with a top-border marker)
+ * plus a content region box (a flex column) holding the active tab's content
+ * nodes. The tab list is JS bookkeeping (never scene props); the interactive
+ * state (`active`) lives on the root box's props. Drive it with
+ * {@link activateTab} / {@link closeTab} / {@link tabsKey}. No new napi node
+ * kind: the `tabs` element materializes as a `box` (constitution).
+ */
+export function Tabs(props: TabsProps): Node {
+  const specs = props.tabs.map((spec) => ({ ...spec, content: [...spec.content] }));
+  const rootProps: NodeProps = {
+    ...props,
+    active: clampTabIndex(typeof props.active === "number" ? props.active : 0, specs.length),
+    flex_direction: "column",
+  };
+  const plain = rootProps as Record<string, unknown>;
+  delete plain.tabs;
+  delete plain.closable;
+  const tabs = Node.create("tabs", rootProps, []);
+  tabSpecs.set(tabs, specs);
+  tabClosables.set(tabs, props.closable ?? false);
+  rebuildTabs(tabs);
+  return tabs;
+}
+
+/**
+ * Make the tab at `index` the active tab (clamped into the tabs), restyling
+ * the tab bar and swapping the content region to the tab's content. A no-op
+ * when `index` is out of range or already active.
+ */
+export function activateTab(tabs: Node, index: number): void {
+  const specs = tabSpecs.get(tabs) ?? [];
+  const clamped = clampTabIndex(index, specs.length);
+  const current = clampTabIndex(typeof tabs.props.active === "number" ? tabs.props.active : 0, specs.length);
+  if (clamped === current) return;
+  tabs.setProps({ ...tabs.props, active: clamped });
+  rebuildTabs(tabs);
+}
+
+/**
+ * Close the tab at `index`: remove it from the tab list and re-clamp the
+ * active index — closing a tab before the active one shifts it down, closing
+ * the active one leaves the tab that slid into its slot (the new last tab
+ * when the closed one was last; index 0 when the last tab closed). A no-op
+ * when `index` is out of range.
+ */
+export function closeTab(tabs: Node, index: number): void {
+  const specs = tabSpecs.get(tabs);
+  if (specs === undefined) return;
+  if (index < 0 || index >= specs.length) return;
+  const props = tabs.props as TabsProps;
+  const oldActive = clampTabIndex(typeof props.active === "number" ? props.active : 0, specs.length);
+  specs.splice(index, 1);
+  const nextActive = clampTabIndex(index < oldActive ? oldActive - 1 : oldActive, specs.length);
+  tabs.setProps({ ...props, active: nextActive });
+  rebuildTabs(tabs);
+}
+
+/**
+ * Apply a key to a tabs node, mutating its state and rebuilding the
+ * composition in place — the Tabs counterpart of {@link selectKey}.
+ *
+ * - `left` / `right` move the active tab (clamped at the ends).
+ * - `ctrl+tab` / `ctrl+shift+tab` move to the next / previous tab, wrapping
+ *   around the ends.
+ * - `ctrl+w` closes the active tab (the active index re-clamps into the
+ *   shorter list).
+ *
+ * Returns the new state; any other key leaves the tabs unchanged.
+ */
+export function tabsKey(tabs: Node, event: KeyEvent): TabsState {
+  const specs = tabSpecs.get(tabs) ?? [];
+  const active = clampTabIndex(typeof tabs.props.active === "number" ? tabs.props.active : 0, specs.length);
+  const name = event.name;
+
+  if (name === "left") {
+    activateTab(tabs, active - 1);
+  } else if (name === "right") {
+    activateTab(tabs, active + 1);
+  } else if (name === "tab" && event.ctrl && !event.shift) {
+    // ctrl+tab: next, wrapping to the first tab.
+    if (specs.length > 1) activateTab(tabs, (active + 1) % specs.length);
+  } else if (name === "tab" && event.ctrl && event.shift) {
+    // ctrl+shift+tab: previous, wrapping to the last tab.
+    if (specs.length > 1) activateTab(tabs, (active - 1 + specs.length) % specs.length);
+  } else if (name === "w" && event.ctrl) {
+    // ctrl+w: close the active tab (closeTab re-clamps the active index).
+    closeTab(tabs, active);
+  }
+
+  // Re-read the live state: a ctrl+w close changed the tab count.
+  const after = tabSpecs.get(tabs) ?? [];
+  const nextActive = clampTabIndex(typeof tabs.props.active === "number" ? tabs.props.active : 0, after.length);
+  return { active: nextActive, count: after.length };
+}
+
+// ---------------------------------------------------------------------------
+// Progress
+//
+// A `progress` element is a framed box (ratatui Gauge parity): a single-row
+// gauge whose frame (default `plain`) wraps a filled bar — `'▓'` fill cells
+// computed exactly as `ceil(value/max * inner_width)` over the inner width
+// (the outer `width` minus the frame's border columns), the rest `'░'` — with
+// an optional label text leaf left-aligned inside the bar area (composed only
+// when it fits alongside the percentage readout) and an optional percentage
+// readout (`ceil(value/max*100)%`) right-aligned inside it. The label and the
+// readout are absolutely positioned overlays on top of the fill leaf
+// (mirroring ratatui, where the label/percentage replace the fill glyphs in
+// their cells), so the fill-cell math stays exact regardless of them. The
+// bar model (`value`/`max`, or a `ratio` 0..1 float directly) lives on the
+// root box's props; the composition bookkeeping (`label` /
+// `show_percentage`) lives in WeakMaps (never scene props, mirroring `Tabs`'
+// `tabSpecs`), and `setProgress` mutates the model and repaints the bar and
+// readout in place — no rebuild. No new napi node kind: the `progress`
+// element materializes as a `box` (constitution).
+// ---------------------------------------------------------------------------
+
+/** Props for the `Progress` element. Style/layout keys flow to the framed
+ * box; `value`/`max` (or `ratio`) drive the fill math; `label` /
+ * `show_percentage` / `width` are consumed by the factory. */
+export interface ProgressProps extends NodeProps {
+  /** The current progress value (default 0). */
+  value?: number;
+  /** The maximum value (default 100); the bar is full at `value === max`. */
+  max?: number;
+  /**
+   * A 0..1 fill ratio as an alternative to `value`/`max`. When given, it
+   * wins over `value`/`max` for both the bar fill and the percentage
+   * readout (`ceil(ratio*100)%`). {@link setProgress} replaces it with an
+   * explicit `value`/`max`.
+   */
+  ratio?: number;
+  /** The optional label text, left-aligned inside the bar area when there is
+   * room (composed only when it fits alongside the percentage readout). */
+  label?: string;
+  /** Whether the percentage readout renders on the right (default `true`). */
+  show_percentage?: boolean;
+  /**
+   * The outer width in cells, including the frame (default
+   * {@link PROGRESS_DEFAULT_WIDTH}); the inner bar width is this minus the
+   * frame's border columns (2 for a visible `border_style`, 0 for `none`).
+   */
+  width?: number;
+}
+
+/** The default outer width of a progress gauge, in cells. */
+export const PROGRESS_DEFAULT_WIDTH = 20;
+/** The fill glyph of a progress bar's filled cells. */
+export const PROGRESS_FILL_CHAR = "▓";
+/** The fill glyph of a progress bar's unfilled cells. */
+export const PROGRESS_EMPTY_CHAR = "░";
+/**
+ * The cell width reserved for the percentage readout in the label's room
+ * check — the readout's widest form (`"100%"`). Reserving the widest form
+ * keeps label presence stable as the value changes, so {@link setProgress}
+ * never has to add or remove leaves (it repaints in place).
+ */
+const PROGRESS_PERCENT_RESERVE = 4;
+
+/** The label text of a progress node (JS bookkeeping — never scene props,
+ * mirroring `Tabs`' `tabSpecs`). Captured at creation because the label key
+ * is consumed by the factory. */
+const progressLabels = new WeakMap<Node, string>();
+
+/** Whether a progress node renders its percentage readout (JS bookkeeping —
+ * never scene props, mirroring `Select`'s `floating` mapping to `z_index`). */
+const progressShowPercentages = new WeakMap<Node, boolean>();
+
+/** The ratio (0..1) of a progress node's props: the explicit `ratio` wins;
+ * otherwise `value`/`max` (defaults 0/100, clamped into [0, 1]). */
+function progressRatio(props: ProgressProps): number {
+  const ratio = props.ratio;
+  if (typeof ratio === "number" && Number.isFinite(ratio)) {
+    return Math.max(0, Math.min(1, ratio));
+  }
+  const value = typeof props.value === "number" && Number.isFinite(props.value)
+    ? Math.max(0, props.value)
+    : 0;
+  const max = typeof props.max === "number" && Number.isFinite(props.max) && props.max > 0
+    ? props.max
+    : 100;
+  return Math.max(0, Math.min(1, value / max));
+}
+
+/** The outer width of a progress node (default {@link PROGRESS_DEFAULT_WIDTH}). */
+function progressOuterWidth(props: ProgressProps): number {
+  const width = props.width;
+  return typeof width === "number" && Number.isFinite(width) && width > 0
+    ? Math.floor(width)
+    : PROGRESS_DEFAULT_WIDTH;
+}
+
+/** The frame's horizontal border columns: 2 for a visible `border_style`,
+ * 0 for `"none"` or unset. */
+function progressFrameWidth(props: ProgressProps): number {
+  const border = props.border_style;
+  return border !== undefined && border !== "none" ? 2 : 0;
+}
+
+/** The bar area width (inside the frame): the outer width minus the border
+ * columns. */
+function progressInnerWidth(props: ProgressProps): number {
+  return Math.max(0, progressOuterWidth(props) - progressFrameWidth(props));
+}
+
+/** The percentage readout text: `ceil(ratio*100)%` (e.g. `"50%"`). */
+function progressPercentText(props: ProgressProps): string {
+  return `${Math.ceil(progressRatio(props) * 100)}%`;
+}
+
+/** Whether the label leaf is composed: a non-empty `label` that fits inside
+ * the bar area alongside the percentage readout (which reserves its widest
+ * form, so the check is stable across value changes). */
+function progressLabelFits(
+  label: string,
+  props: ProgressProps,
+  showPercentage: boolean,
+): boolean {
+  if (label === "") return false;
+  const reserve = showPercentage ? PROGRESS_PERCENT_RESERVE : 0;
+  return textWidth(label) + reserve <= progressInnerWidth(props);
+}
+
+/** The bar text of a progress node's fill leaf: exactly
+ * `ceil(ratio * inner_width)` `'▓'` cells followed by `'░'` for the rest of
+ * the inner width. */
+function progressBarText(props: ProgressProps): string {
+  const inner = progressInnerWidth(props);
+  const filled = Math.max(0, Math.min(inner, Math.ceil(progressRatio(props) * inner)));
+  return PROGRESS_FILL_CHAR.repeat(filled) + PROGRESS_EMPTY_CHAR.repeat(inner - filled);
+}
+
+/**
+ * Rebuild a progress node's children from its current props (the source of
+ * truth, mirroring `rebuildTabs`): the in-flow fill leaf (the bar text at the
+ * inner width) plus the optional label overlay (left-aligned, dimmed, only
+ * when it fits) and the optional percentage readout overlay (right-aligned).
+ * The overlays carry a `z_index` so they paint above the fill leaf. Runs at
+ * creation and after a {@link setProgress} call that changes the composition
+ * (the label's room check is stable, so in practice `setProgress` repaints in
+ * place without rebuilding).
+ */
+function rebuildProgress(node: Node): void {
+  const props = node.props as ProgressProps;
+  const showPercentage = progressShowPercentages.get(node) ?? true;
+  for (const child of [...node.children]) child.remove();
+
+  // The fill leaf: in-flow, sized to the full inner width — the label and
+  // readout overlay it, mirroring ratatui Gauge, so the fill count is exact.
+  node.addChild(Text({ text: progressBarText(props), width: progressInnerWidth(props) }));
+  // The label overlay: left-aligned inside the bar area when there is room.
+  const label = progressLabels.get(node) ?? "";
+  if (progressLabelFits(label, props, showPercentage)) {
+    node.addChild(
+      Text({ text: label, position: "absolute", left: 0, z_index: 1, dim: true }),
+    );
+  }
+  // The percentage readout overlay: right side of the bar area.
+  if (showPercentage) {
+    node.addChild(
+      Text({ text: progressPercentText(props), position: "absolute", right: 0, z_index: 1 }),
+    );
+  }
+}
+
+/**
+ * Create a `progress` element (ratatui Gauge parity): a framed box — the
+ * frame defaults to `border_style: "plain"`, the outer `width` (default
+ * {@link PROGRESS_DEFAULT_WIDTH}) minus the border columns is the inner bar
+ * width — holding an in-flow fill leaf (`'▓'` × `ceil(value/max * inner)`,
+ * `'░'` for the rest) plus an optional dimmed label leaf left-aligned inside
+ * the bar area (composed only when it fits alongside the readout) and an
+ * optional percentage readout (`ceil(value/max*100)%`) right-aligned inside
+ * it. The label and readout are absolutely positioned overlays on the fill,
+ * so the fill-cell math is exact regardless of them. A `ratio` prop (0..1)
+ * drives the bar directly as an alternative to `value`/`max`. Update a live
+ * bar without rebuilding with {@link setProgress}. No new napi node kind: the
+ * `progress` element materializes as a `box` (constitution).
+ */
+export function Progress(props: ProgressProps = {}): Node {
+  const rootProps: NodeProps = {
+    ...props,
+    // The gauge is framed by default (ratatui parity); `border_style: "none"`
+    // opts out and the inner width becomes the full outer width.
+    border_style: props.border_style ?? "plain",
+    flex_direction: "row",
+    height: 1,
+    width: progressOuterWidth(props),
+  };
+  const plain = rootProps as Record<string, unknown>;
+  delete plain.label;
+  delete plain.show_percentage;
+  const node = Node.create("progress", rootProps, []);
+  progressLabels.set(node, typeof props.label === "string" ? props.label : "");
+  progressShowPercentages.set(node, props.show_percentage !== false);
+  rebuildProgress(node);
+  return node;
+}
+
+/**
+ * Update a live progress bar's value without rebuilding its composition:
+ * sets `value`/`max` on the node's props (the explicit `max` argument wins,
+ * falling back to the node's current `max`) and repaints the fill leaf and
+ * the percentage readout in place. The label leaf's presence is stable (its
+ * room check reserves the readout's widest form), so no leaves are added or
+ * removed — a pure in-place update.
+ */
+export function setProgress(node: Node, value: number, max?: number): void {
+  const props = node.props as ProgressProps;
+  const nextMax = max ?? (typeof props.max === "number" ? props.max : 100);
+  const next: ProgressProps = { ...props, value, max: nextMax };
+  // `value`/`max` now govern the bar — the `ratio` prop (if any) is dropped.
+  delete next.ratio;
+  node.setProps(next);
+  const bar = node.children[0];
+  if (bar !== undefined && bar.type === "text") {
+    bar.setProps({ ...bar.props, text: progressBarText(next), width: progressInnerWidth(next) });
+  }
+  if (progressShowPercentages.get(node) ?? true) {
+    const readout = node.children[node.children.length - 1];
+    if (readout !== undefined && readout.type === "text") {
+      readout.setProps({ ...readout.props, text: progressPercentText(next) });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Modal
 //
 // A `modal` element is a full-bleed overlay: an absolutely positioned root
@@ -3898,6 +4388,7 @@ export const THEME_COMPONENTS = [
   "scroll_view",
   "table",
   "markdown",
+  "progress",
 ] as const;
 
 /** A themeable component kind ("input", "diff", ...). */
@@ -3977,6 +4468,7 @@ export const defaultTheme: Theme = {
     scroll_view: {},
     table: {},
     markdown: {},
+    progress: {},
   },
 };
 
@@ -4519,9 +5011,29 @@ export class Renderer {
   /** @internal — use `createRenderer`. */
   constructor(options: CreateRendererOptions = {}) {
     const addon = loadAddon();
-    const nativeOptions = { exit_on_ctrl_c: options.exitOnCtrlC ?? false };
+    const nativeOptions: TuiRendererOptions = {
+      exit_on_ctrl_c: options.exitOnCtrlC ?? false,
+      use_alt_screen: options.useAltScreen ?? true,
+    };
+    if (options.title !== undefined) nativeOptions.title = options.title;
     this.#native = new addon.TuiRenderer(nativeOptions);
     this.root = Node.wrapRoot(this.#native.root());
+  }
+
+  /**
+   * The terminal's color capabilities: `{ truecolor, colors }` — whether
+   * 24-bit RGB is supported, and the palette size (16_777_216 for
+   * truecolor, 256, 16, or 0). Detected once by the native backend.
+   */
+  get capabilities(): RendererCapabilities {
+    return this.#native.capabilities;
+  }
+
+  /**
+   * Set the terminal window title (OSC 0). Throws on a destroyed renderer.
+   */
+  setTitle(title: string): void {
+    this.#native.set_title(title);
   }
 
   /**
@@ -4590,6 +5102,19 @@ export class Renderer {
   /** Paint the shared scene to the terminal (minimal diff vs the last frame). */
   render(): void {
     this.#native.render();
+  }
+
+  /**
+   * Paint the shared scene into a fresh buffer at the given viewport —
+   * `width`/`height` in cells, each defaulting to the most recent
+   * `render`'s terminal size — and return the frame as one string per row.
+   * Masked/continuation cells (the zero-width right halves of wide glyphs)
+   * are spaces, so every row has exactly `width` display columns
+   * (multi-width aware). Performs no terminal I/O: the result is a pure
+   * snapshot for testing and golden comparisons (see {@link framesEqual}).
+   */
+  snapshotFrame(width?: number, height?: number): string[] {
+    return this.#native.render_to_buffer(width, height);
   }
 
   /**
@@ -4689,4 +5214,18 @@ export class Renderer {
  */
 export function createRenderer(options: CreateRendererOptions = {}): Renderer {
   return new Renderer(options);
+}
+
+/**
+ * Whether two snapshot frames (from {@link Renderer.snapshotFrame}) are
+ * identical: the same number of rows, each row string equal. Frames are
+ * row-aligned by construction — every row has exactly the viewport width —
+ * so plain string comparison is the full equality contract.
+ */
+export function framesEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }

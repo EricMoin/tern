@@ -74,9 +74,9 @@ export declare class NodeHandle {
  */
 export declare class TuiRenderer {
   /**
-   * Enter raw mode + the alternate screen, ready to render. Mouse and
-   * focus-change event delivery is enabled so the event stream (or
-   * `poll_events`, with the fallback feature) can surface them.
+   * Enter raw mode + the alternate screen (unless `use_alt_screen` is
+   * `false`), apply the window title, and enable mouse / focus-change /
+   * bracketed-paste event delivery, ready to render.
    *
    * If any terminal transition fails the already-entered states are rolled
    * back before the error is returned, so a failed constructor never leaves
@@ -102,6 +102,16 @@ export declare class TuiRenderer {
    */
   render(): void
   /**
+   * Paint the shared scene into a fresh buffer at the given viewport —
+   * `width`/`height` in cells, each defaulting to the most recent
+   * `render` terminal size — and return the frame as one string per row.
+   * Masked/continuation cells (the zero-width right halves of wide glyphs)
+   * are spaces, so every row has exactly `width` display columns
+   * (multi-width aware). Performs no terminal I/O; the result is a pure
+   * snapshot for JS-side testing and golden comparisons.
+   */
+  render_to_buffer(width?: number, height?: number): Array<string>
+  /**
    * Leave the alternate screen and raw mode and stop event listening,
    * restoring the terminal. Also stops the push event loop (with the
    * default `push-events` feature) so the loop thread exits. Safe to call
@@ -113,6 +123,16 @@ export declare class TuiRenderer {
    * `exit_on_ctrl_c`).
    */
   get destroyed(): boolean
+  /**
+   * The terminal's color capabilities (`{ truecolor, colors }`), detected
+   * once by the backend (see `tern-terminal`'s `Backend::capabilities`).
+   */
+  get capabilities(): RendererCapabilities
+  /**
+   * Set the terminal window title (OSC 0). Errors on a destroyed
+   * renderer.
+   */
+  set_title(title: string): void
   /**
    * Start push-based event delivery: spawn tern-terminal's background
    * event loop and deliver every normalized terminal event to `callback`
@@ -232,6 +252,17 @@ export interface MouseEventJs {
   shift: boolean
 }
 
+/** The terminal's color capabilities, detected by the backend. */
+export interface RendererCapabilities {
+  /** Whether 24-bit (16M) RGB truecolor is supported. */
+  truecolor: boolean
+  /**
+   * The terminal's color palette size: 16_777_216 for truecolor, 256 for
+   * a 256-color palette, 16 for basic ANSI, 0 when none.
+   */
+  colors: number
+}
+
 /**
  * A terminal event surfaced to JS as a tagged-union plain object: `type`
  * discriminates (`"key"`, `"resize"`, `"focus"`, `"mouse"`, `"paste"`) and
@@ -270,4 +301,15 @@ export interface TuiRendererOptions {
    * being surfaced as an event.
    */
   exit_on_ctrl_c?: boolean
+  /**
+   * When `false`, the renderer skips the alternate screen: it renders
+   * inline in the terminal's main screen (and never emits the alternate-
+   * screen enter/leave escapes). Default `true`.
+   */
+  use_alt_screen?: boolean
+  /**
+   * The terminal window title, applied on construction (OSC 0). `None`
+   * leaves the title untouched.
+   */
+  title?: string
 }
