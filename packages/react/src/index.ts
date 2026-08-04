@@ -10,18 +10,22 @@
  *   explicit `<Text text="..." />` element.
  * - The roadmap host components `<Input>` / `<Spinner>` / `<StatusBar>` /
  *   `<Panels>` / `<DiffView>` / `<Select>` / `<ScrollView>` / `<Table>` /
- *   `<Modal>`
+ *   `<Tabs>` / `<Progress>` / `<Modal>`
  *   materialize the core factories of the same name. `<Spinner>` runs its
- *   tick timer while mounted (cleared on unmount); `<Input>` / `<Select>`
+ *   tick timer while mounted (cleared on unmount); `<Input>` / `<Select>` /
+ *   `<Tabs>`
  *   with a `focusId` register with a `FocusManager` so routed keys edit them
- *   (`onChange` / `onSubmit`, `onChange` / `onConfirm` / `onDismiss`).
+ *   (`onChange` / `onSubmit`, `onChange` / `onConfirm` / `onDismiss`, and
+ *   `onChange` / `onClose` for tabs).
  *   `<ScrollView>` is a clip/scroll region box (the engine's `clip_*` /
  *   `scroll_*` props); the core `scrollTo` / `scrollBy` / `scrollTop`
  *   helpers drive its offsets (clamped against `Node.contentSize()`),
  *   optionally with a track + thumb scrollbar leaf. `<Table>` composes a
  *   sticky header row above a scrollable content region of per-column rows;
  *   the core `tableKey` / `visibleTableRows` helpers drive its highlight and
- *   scroll window. `<Modal>` is a full-bleed overlay (dimmed backdrop +
+ *   scroll window. `<Progress>` is a framed gauge (ratatui Gauge parity)
+ *   driven with the core `setProgress` on its scene node. `<Modal>` is a
+ *   full-bleed overlay (dimmed backdrop +
  *   centered content box) stamped with a high `z_index`; the core
  *   `openModal` / `closeModal` helpers toggle it and move focus into/out of
  *   the overlay through the `FocusManager`.
@@ -36,9 +40,14 @@
  *   paste handler first (a focused `<Input focusId>` / `<Textarea focusId>`
  *   auto-pastes into its node) and falls back to the tree handler.
  *   `useFocus()` hooks
- *   an arbitrary element's node into a `FocusManager`. `useResize(handler)`
- *   subscribes to terminal resize events, re-invoking `renderer.render()`
- *   after each so the compositor re-lays out at the new terminal size.
+ *   an arbitrary element's node into a `FocusManager`; `useFocusManager()`
+ *   reads the tree's current `FocusManager` (the `FocusManagerContext`
+ *   provider, or the core default `focusManager`), and `useFocusTraversal()`
+ *   wires Tab / Shift+Tab to the manager's `next()` / `prev()` traversal,
+ *   skipping an exclude list.
+ *   `useResize(handler)` subscribes to terminal resize events, re-invoking
+ *   `renderer.render()` after each so the compositor re-lays out at the new
+ *   terminal size.
  *
  * See `./reconciler.ts` for the HostConfig mapping table.
  */
@@ -55,6 +64,8 @@ import {
   type RefObject,
 } from "react";
 import {
+  activateTab,
+  closeTab,
   defaultTheme,
   dragPanels,
   editKey,
@@ -70,10 +81,12 @@ import {
   scrollTo,
   scrollTop,
   selectKey,
+  setProgress,
   setStreamAutoScroll,
   startPanelDrag,
   syncStreamTail,
   tableKey,
+  tabsKey,
   tick,
   useFocus as coreUseFocus,
   visibleTableRows,
@@ -94,8 +107,10 @@ import {
   type SelectState,
   type Span,
   type StatusBarSegment,
+  type TabSpec,
   type TableColumn,
   type TableState,
+  type TabsState,
   type TextareaState,
   type Theme,
   type ThemeComponent,
@@ -336,6 +351,8 @@ const HOST_DIFF: string = "diff";
 const HOST_SELECT: string = "select";
 const HOST_SCROLL_VIEW: string = "scroll_view";
 const HOST_TABLE: string = "table";
+const HOST_TABS: string = "tabs";
+const HOST_PROGRESS: string = "progress";
 const HOST_MODAL: string = "modal";
 
 /** The state reported by `<Input>` callbacks after a routed key. */
@@ -364,8 +381,8 @@ export interface InputProps extends TernNodeProps {
    * input inert to keys.
    */
   focusId?: string;
-  /** The `FocusManager` to register with (defaults to the core
-   *  `focusManager`). */
+  /** The `FocusManager` to register with (defaults to the tree's current
+   *  manager — `useFocusManager()`). */
   focusManager?: FocusManager;
   /** Fired after a routed key changes the value or caret. */
   onChange?: (state: InputState) => void;
@@ -475,8 +492,8 @@ export interface SelectProps extends TernNodeProps {
    * the select inert to keys.
    */
   focusId?: string;
-  /** The `FocusManager` to register with (defaults to the core
-   *  `focusManager`). */
+  /** The `FocusManager` to register with (defaults to the tree's current
+   *  manager — `useFocusManager()`). */
   focusManager?: FocusManager;
   /** Fired after a routed key changes the highlight, filter or selection. */
   onChange?: (state: SelectState) => void;
@@ -501,7 +518,7 @@ export interface SelectProps extends TernNodeProps {
 export function Input(props: InputProps): ReactElement<InputProps> {
   const theme = useTheme();
   const nodeRef = useRef<Node | null>(null);
-  const manager = props.focusManager ?? focusManager;
+  const manager = props.focusManager ?? useFocusManager();
   // The callbacks are read through refs so a parent re-render with new
   // callbacks is picked up without re-registering the element.
   const onChangeRef = useRef(props.onChange);
@@ -563,8 +580,8 @@ export interface TextareaProps extends TernNodeProps {
    * leave the textarea inert to keys.
    */
   focusId?: string;
-  /** The `FocusManager` to register with (defaults to the core
-   *  `focusManager`). */
+  /** The `FocusManager` to register with (defaults to the tree's current
+   *  manager — `useFocusManager()`). */
   focusManager?: FocusManager;
   /** Fired after a routed key changes the lines, row or col. */
   onChange?: (state: TextareaState) => void;
@@ -589,7 +606,7 @@ export interface TextareaProps extends TernNodeProps {
 export function Textarea(props: TextareaProps): ReactElement<TextareaProps> {
   const theme = useTheme();
   const nodeRef = useRef<Node | null>(null);
-  const manager = props.focusManager ?? focusManager;
+  const manager = props.focusManager ?? useFocusManager();
   // The callbacks are read through refs so a parent re-render with new
   // callbacks is picked up without re-registering the element.
   const onChangeRef = useRef(props.onChange);
@@ -732,7 +749,7 @@ export function DiffView(props: DiffViewProps): ReactElement<DiffViewProps> {
 export function Select(props: SelectProps): ReactElement<SelectProps> {
   const theme = useTheme();
   const nodeRef = useRef<Node | null>(null);
-  const manager = props.focusManager ?? focusManager;
+  const manager = props.focusManager ?? useFocusManager();
   // The callbacks are read through refs so a parent re-render with new
   // callbacks is picked up without re-registering the element.
   const onChangeRef = useRef(props.onChange);
@@ -887,14 +904,156 @@ export function Modal(props: ModalProps): ReactElement<ModalProps> {
   return createElement(HOST_MODAL, resolveTheme(theme, props) as ModalProps);
 }
 
+/**
+ * Props for `<Tabs>`: the tern node props plus the tab spec list, the
+ * interactive state and the focus/callback wiring. `tabs` / `active` /
+ * `closable` flow to the core `Tabs` factory (the spec list is JS
+ * bookkeeping and never reaches the scene props); the remaining keys are
+ * consumed by the component.
+ */
+export interface TabsProps extends TernNodeProps {
+  /** The tabs, in display order (left to right). Each spec's `content` nodes
+   * are core `Node`s (e.g. obtained from host element refs) rendered in the
+   * content region while the tab is active. */
+  tabs: TabSpec[];
+  /** The active tab index (default 0). */
+  active?: number;
+  /** Show a close affordance on every tab (default `false`; a per-tab
+   * `closable` overrides it). */
+  closable?: boolean;
+  /**
+   * Register the tabs with a `FocusManager` under this id so routed keys
+   * (via `useInput`) drive it through the core `tabsKey`. Omit to leave the
+   * tabs inert to keys.
+   */
+  focusId?: string;
+  /** The `FocusManager` to register with (defaults to the tree's current
+   *  manager — `useFocusManager()`). */
+  focusManager?: FocusManager;
+  /** Fired after a routed key moves the active tab. */
+  onChange?: (state: TabsState) => void;
+  /** Fired after `ctrl+w` routes to the tabs and closes the active tab. */
+  onClose?: (state: TabsState) => void;
+}
+
+/**
+ * The `<Tabs>` host component: a flex column of box/text leaves — a tab bar
+ * row (one `Text` leaf per tab; the active tab painted with the theme's
+ * `primary` palette colors and reversed, its label prefixed with a top-border
+ * marker, closable tabs carrying a close glyph) plus a content region box
+ * holding the active tab's content nodes (core `Tabs` factory). When
+ * `focusId` is given, the tabs register with a `FocusManager` on mount and
+ * routed keys (via `useInput`) drive them through the core `tabsKey` —
+ * `onChange` fires when the active tab moves, `onClose` when `ctrl+w` closes
+ * the active tab. The tabs' ref is managed internally; the element takes no
+ * React children — its composition is fixed by the factory.
+ */
+export function Tabs(props: TabsProps): ReactElement<TabsProps> {
+  const theme = useTheme();
+  const nodeRef = useRef<Node | null>(null);
+  const manager = props.focusManager ?? useFocusManager();
+  // The callbacks are read through refs so a parent re-render with new
+  // callbacks is picked up without re-registering the element.
+  const onChangeRef = useRef(props.onChange);
+  onChangeRef.current = props.onChange;
+  const onCloseRef = useRef(props.onClose);
+  onCloseRef.current = props.onClose;
+
+  useEffect(() => {
+    const node = nodeRef.current;
+    if (node === null || props.focusId === undefined) return;
+    return coreUseFocus(props.focusId, node, (event) => {
+      const before = node.props as TabsProps;
+      const beforeActive = typeof before.active === "number" ? before.active : 0;
+      const barBefore = node.children[0]?.children.length ?? 0;
+      const next = tabsKey(node, event);
+      // A ctrl+w close shrinks the tab bar (tabsKey rebuilds the
+      // composition); any other routed key leaves the bar count alone.
+      const closed = (node.children[0]?.children.length ?? 0) < barBefore;
+      if (closed) {
+        onCloseRef.current?.(next);
+      } else if (next.active !== beforeActive) {
+        onChangeRef.current?.(next);
+      }
+    }, manager).dispose;
+  }, [props.focusId, manager]);
+
+  return createElement(HOST_TABS, {
+    ...(resolveTheme(theme, props) as TabsProps),
+    ref: nodeRef,
+  });
+}
+
+/**
+ * Props for `<Progress>`: the tern node props plus the bar model
+ * (`value`/`max` or `ratio`), the label and the readout flag, forwarded
+ * verbatim to the core `Progress` factory (the label / `show_percentage` keys
+ * are consumed there and never reach the scene props).
+ */
+export interface ProgressProps extends TernNodeProps {
+  /** The current progress value (default 0). */
+  value?: number;
+  /** The maximum value (default 100); the bar is full at `value === max`. */
+  max?: number;
+  /**
+   * A 0..1 fill ratio as an alternative to `value`/`max`; when given it wins
+   * over `value`/`max` for both the bar fill and the percentage readout.
+   */
+  ratio?: number;
+  /** The optional label text, left-aligned inside the bar area when there is
+   * room (composed only when it fits alongside the percentage readout). */
+  label?: string;
+  /** Whether the percentage readout renders on the right (default `true`). */
+  show_percentage?: boolean;
+  /** The outer width in cells including the frame (default
+   *  {@link PROGRESS_DEFAULT_WIDTH} — the inner bar width is this minus the
+   *  frame's border columns). */
+  width?: number;
+}
+
+/**
+ * The `<Progress>` host component: a framed box (ratatui Gauge parity)
+ * holding an in-flow fill leaf (`'▓'` × `ceil(value/max * inner)`, `'░'` for
+ * the rest), an optional dimmed label leaf left-aligned inside the bar area
+ * (composed only when it fits), and an optional percentage readout
+ * (`ceil(value/max*100)%`) right-aligned inside it (core `Progress` factory).
+ * The `progress` component preset is resolved onto the frame's props at
+ * element-creation time. Drive a live bar without rebuilding with the core
+ * `setProgress` on the scene node (the `ref` forwards to it). Takes no React
+ * children.
+ */
+export function Progress(props: ProgressProps): ReactElement<ProgressProps> {
+  const theme = useTheme();
+  return createElement(HOST_PROGRESS, {
+    ...(resolveTheme(theme, { ...props, component: "progress" }) as ProgressProps),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Focus hooks
 // ---------------------------------------------------------------------------
 
+/**
+ * The tree's `FocusManager`, provided through React context. Defaults to the
+ * core `focusManager`, so the focus hooks work without a provider; wrap the
+ * tree (or a subtree) in `<FocusManagerContext.Provider value={manager}>` to
+ * route the tree's focus wiring — `useFocusManager`, `useFocus` and
+ * `useFocusTraversal` — through your own manager.
+ */
+export const FocusManagerContext = createContext<FocusManager>(focusManager);
+
+/**
+ * The current `FocusManager` for this tree: the one provided by
+ * `FocusManagerContext` (if any), or the core default `focusManager`.
+ */
+export function useFocusManager(): FocusManager {
+  return useContext(FocusManagerContext);
+}
+
 /** Options for `useFocus`. */
 export interface UseFocusOptions {
-  /** The `FocusManager` to register with (defaults to the core
-   *  `focusManager`). */
+  /** The `FocusManager` to register with (defaults to the tree's current
+   *  manager — `useFocusManager()`). */
   manager?: FocusManager;
 }
 
@@ -912,7 +1071,7 @@ export function useFocus(
   onKey: KeyHandler,
   options?: UseFocusOptions,
 ): FocusHandle {
-  const manager = options?.manager ?? focusManager;
+  const manager = options?.manager ?? useFocusManager();
   // The handler is read through a ref so a parent re-render with a new
   // handler is picked up without re-registering the element.
   const onKeyRef = useRef(onKey);
@@ -933,6 +1092,82 @@ export function useFocus(
     }),
     [id, manager],
   );
+}
+
+/** Options for `useFocusTraversal`. */
+export interface UseFocusTraversalOptions {
+  /** The `FocusManager` to traverse (defaults to the tree's current manager
+   *  — `useFocusManager()`). */
+  manager?: FocusManager;
+  /** Focus ids to skip when moving: Tab / Shift+Tab never land on a listed
+   *  id (when every registered id is excluded, focus stays put). */
+  exclude?: string[];
+}
+
+/**
+ * Wire Tab / Shift+Tab focus traversal for the tree: Tab calls
+ * `manager.next()` and Shift+Tab (the `backtab` key) calls `manager.prev()`,
+ * skipping the ids in `exclude`, re-invoking `renderer.render()` after each
+ * move so the compositor repaints the newly focused element.
+ *
+ * The subscription listens on the renderer's key channel (the same channel
+ * `useInput` subscribes to) but handles Tab / Shift+Tab ahead of
+ * focused-element routing: traversal keys always move focus, even while an
+ * element is focused (standard TUI behavior — element handlers leave bare
+ * Tab / Shift+Tab untouched). All other keys fall through to the remaining
+ * subscribers untouched.
+ *
+ * The `exclude` list is read through a ref so a parent re-render with a new
+ * list is picked up without re-subscribing. Returns nothing; the subscription
+ * is torn down when the component unmounts.
+ */
+export function useFocusTraversal(options?: UseFocusTraversalOptions): void {
+  const { renderer } = useApp();
+  const manager = options?.manager ?? useFocusManager();
+  // The exclude list is read through a ref so a parent re-render with a new
+  // list is picked up without re-subscribing.
+  const excludeRef = useRef(options?.exclude);
+  excludeRef.current = options?.exclude;
+
+  useEffect(() => {
+    return renderer.onKey((event) => {
+      const excluded =
+        excludeRef.current === undefined ? undefined : new Set(excludeRef.current);
+      if (event.name === "tab") {
+        if (traverseFocus(manager, excluded, true)) renderer.render();
+      } else if (event.name === "backtab") {
+        if (traverseFocus(manager, excluded, false)) renderer.render();
+      }
+    });
+  }, [renderer, manager]);
+}
+
+/**
+ * Move the active focus one step forward (`forward`) or backward, skipping
+ * the ids in `exclude` (wrapping around the registration order). Returns
+ * whether the focus landed on a non-excluded id; when nothing is registered
+ * or every registered id is excluded, the focus is left unchanged and `false`
+ * is returned (the caller then skips the repaint).
+ */
+function traverseFocus(
+  manager: FocusManager,
+  exclude: ReadonlySet<string> | undefined,
+  forward: boolean,
+): boolean {
+  const start = manager.activeId;
+  const step = forward ? () => manager.next() : () => manager.prev();
+  // One step beyond the excluded set: the worst case walks past every
+  // excluded id (or wraps back to the start) before landing on a keeper.
+  const maxSteps = (exclude?.size ?? 0) + 1;
+  for (let i = 0; i < maxSteps; i++) {
+    if (!step()) return false; // nothing registered — no move
+    const id = manager.activeId;
+    if (id !== null && (exclude === undefined || !exclude.has(id))) return true;
+  }
+  // Every registered id is excluded: undo the probe so the focus is unchanged.
+  if (start === null) manager.blur();
+  else if (manager.has(start)) manager.focus(start);
+  return false;
 }
 
 /**
@@ -1088,8 +1323,10 @@ export type {
   SelectState,
   Span,
   StatusBarSegment,
+  TabSpec,
   TableColumn,
   TableState,
+  TabsState,
   TextareaState,
 } from "@tern/core";
 // Core values re-exported: the focus machinery, the element edit helpers
@@ -1100,6 +1337,8 @@ export type {
 // the `STREAM_AFFORDANCE_CHAR` scroll-to-bottom indicator), the panel
 // drag-resize helpers, the modal helpers, and the theme surface.
 export {
+  activateTab,
+  closeTab,
   closeModal,
   defaultTheme,
   dragPanels,
@@ -1122,10 +1361,12 @@ export {
   scrollToBottom,
   scrollTop,
   selectKey,
+  setProgress,
   startPanelDrag,
   STREAM_AFFORDANCE_CHAR,
   syncStreamTail,
   tableKey,
+  tabsKey,
   tick,
   visibleTableRows,
   wheelScroll,

@@ -13,6 +13,7 @@
 import { act, createElement } from "react";
 import {
   Box as CoreBox,
+  Text as CoreText,
   FocusManager,
   MODAL_Z_INDEX,
   STREAM_AFFORDANCE_CHAR,
@@ -42,15 +43,18 @@ import type { TernAddon } from "../../core/src/addon.ts";
 import {
   Box,
   DiffView,
+  FocusManagerContext,
   Input,
   Modal,
   Panels,
+  Progress,
   ScrollView,
   Select,
   Spinner,
   StatusBar,
   StreamingText,
   Table,
+  Tabs,
   Text,
   Textarea,
   ThemeProvider,
@@ -66,6 +70,8 @@ import {
   useApp,
   useClickToFocus,
   useFocus,
+  useFocusManager,
+  useFocusTraversal,
   useInput,
   usePanelMouseDrag,
   usePaste,
@@ -157,7 +163,11 @@ Deno.test("public API surface is exported", () => {
     DiffView,
     ScrollView,
     Table,
+    Tabs,
+    Progress,
     useFocus,
+    useFocusManager,
+    useFocusTraversal,
     useResize,
     createRoot,
     render,
@@ -388,6 +398,71 @@ Deno.test("createInstance maps modal to the core Modal factory", () => {
   }
   // The content node list is JS bookkeeping, never a scene prop.
   if ("content" in modal.props) throw new Error("content must not reach the scene props");
+});
+
+Deno.test("createInstance maps tabs to the core Tabs factory", () => {
+  const container = { root: CoreBox(), renderer: mockRenderer().renderer };
+  const tabs = hc.createInstance(
+    "tabs",
+    {
+      tabs: [
+        { label: "logs", content: [CoreText({ text: "log line" })] },
+        { label: "files", content: [CoreText({ text: "file list" })] },
+      ],
+    } as never,
+    container,
+    {},
+    null,
+  );
+  if (tabs.type !== "tabs") throw new Error(`type = ${tabs.type}`);
+  if (tabs.props.flex_direction !== "column") throw new Error(`flex_direction = ${tabs.props.flex_direction}`);
+  // Composition: the tab bar row (child 0) + the content region (child 1).
+  if (tabs.children.length !== 2) throw new Error(`children = ${tabs.children.length}`);
+  const bar = tabs.children[0];
+  if (bar?.type !== "box" || bar?.props.flex_direction !== "row") {
+    throw new Error("the tab bar must be a row box");
+  }
+  if (bar.children.length !== 2) throw new Error(`tab leaves = ${bar.children.length}`);
+  const region = tabs.children[1];
+  // Only the active tab's content is materialized in the region.
+  if (region?.children.length !== 1 || region?.children[0]?.props.text !== "log line") {
+    throw new Error("the content region must hold the active tab's content");
+  }
+  // The tab spec list is JS bookkeeping, never a scene prop.
+  if ("tabs" in tabs.props) throw new Error("tabs must not reach the scene props");
+});
+
+Deno.test("createInstance maps progress to the core Progress factory", () => {
+  const container = { root: CoreBox(), renderer: mockRenderer().renderer };
+  const node = hc.createInstance(
+    "progress",
+    { value: 5, max: 10, label: "work", width: 12 } as never,
+    container,
+    {},
+    null,
+  );
+  if (node.type !== "progress") throw new Error(`type = ${node.type}`);
+  // The bar model state lives on the root box's props (like Tabs' `active`).
+  if (node.props.value !== 5 || node.props.max !== 10) {
+    throw new Error(`bar model = ${JSON.stringify(node.props)}`);
+  }
+  if (node.props.width !== 12 || node.props.border_style !== "plain") {
+    throw new Error(`frame = ${JSON.stringify(node.props)}`);
+  }
+  // The label is JS bookkeeping, never a scene prop.
+  if ("label" in node.props) throw new Error("label must not reach the scene props");
+  // Composition: the fill leaf (child 0) + the label overlay + the readout.
+  const bar = node.children[0];
+  if (bar === undefined || bar.type !== "text") throw new Error("the fill must be a text leaf");
+  if (bar.props.text !== "▓▓▓▓▓░░░░░") {
+    throw new Error(`fill = ${JSON.stringify(bar.props.text)}`);
+  }
+  if (node.children[1]?.props.text !== "work" || node.children[1]?.props.dim !== true) {
+    throw new Error("the label overlay must be composed");
+  }
+  if (node.children[2]?.props.text !== "50%") {
+    throw new Error(`readout = ${JSON.stringify(node.children[2]?.props.text)}`);
+  }
 });
 
 Deno.test("createInstance strips React-only props before the factories", () => {
@@ -676,6 +751,32 @@ Deno.test("toNodeProps strips component-level props for input and spinner", () =
   }
   for (const key of ["focusId", "focusManager", "onChange", "onSubmit"]) {
     if (key in textareaOut) throw new Error(`textarea component prop leaked: ${key}`);
+  }
+
+  // Tabs: the tab spec list and the active state flow through (JS bookkeeping
+  // the core factory consumes); the callbacks and the focus wiring are
+  // stripped (mirroring select/textarea).
+  const tabsOut = toNodeProps(
+    {
+      tabs: [{ label: "a", content: [] }],
+      active: 1,
+      closable: true,
+      focusId: "t",
+      focusManager: new FocusManager(),
+      onChange: () => {},
+      onClose: () => {},
+    } as unknown as TernProps,
+    "tabs",
+  );
+  if (
+    (tabsOut.tabs as Array<{ label: string }>)[0]?.label !== "a" ||
+    tabsOut.active !== 1 ||
+    tabsOut.closable !== true
+  ) {
+    throw new Error(`tabs tern props lost: ${JSON.stringify(tabsOut)}`);
+  }
+  for (const key of ["focusId", "focusManager", "onChange", "onClose"]) {
+    if (key in tabsOut) throw new Error(`tabs component prop leaked: ${key}`);
   }
 });
 
@@ -2431,6 +2532,207 @@ Deno.test("useFocus registers a ref'd element and routes routed keys to it", asy
     ternRoot.unmount();
   });
   if (manager.has("probe")) throw new Error("useFocus must dispose on unmount");
+});
+
+Deno.test("useFocusManager returns the context manager or the core default", async () => {
+  const { renderer } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const captured: { manager: FocusManager | null } = { manager: null };
+
+  function DefaultProbe() {
+    captured.manager = useFocusManager();
+    return createElement(Text, { text: "d" });
+  }
+  await act(async () => {
+    ternRoot.render(createElement(DefaultProbe));
+  });
+  if (captured.manager !== focusManager) {
+    throw new Error("useFocusManager must default to the core focusManager");
+  }
+
+  const custom = new FocusManager();
+  function CustomProbe() {
+    captured.manager = useFocusManager();
+    return createElement(Text, { text: "c" });
+  }
+  await act(async () => {
+    ternRoot.render(
+      createElement(
+        FocusManagerContext.Provider,
+        { value: custom },
+        createElement(CustomProbe),
+      ),
+    );
+  });
+  if (captured.manager !== custom) {
+    throw new Error("useFocusManager must return the provider's manager");
+  }
+});
+
+Deno.test("useFocusTraversal moves focus forward on tab and backward on backtab with wrap", async () => {
+  const { renderer, keyHandlers, renderCalls } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const manager = new FocusManager();
+  const refA: { current: Node | null } = { current: null };
+  const refB: { current: Node | null } = { current: null };
+  const refC: { current: Node | null } = { current: null };
+
+  function App() {
+    useFocusTraversal({ manager });
+    useFocus("a", refA, () => {}, { manager });
+    useFocus("b", refB, () => {}, { manager });
+    useFocus("c", refC, () => {}, { manager });
+    return createElement(
+      Box,
+      null,
+      createElement(Box, { ref: refA }),
+      createElement(Box, { ref: refB }),
+      createElement(Box, { ref: refC }),
+    );
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(App));
+  });
+
+  if (manager.activeId !== null) throw new Error("nothing must be focused initially");
+  // The mount already painted (prepareForCommit + resetAfterCommit); traversal
+  // must add exactly one render per key press on top of that baseline.
+  const baseline = renderCalls.length;
+  const tab = () => {
+    for (const handler of keyHandlers) handler(keyEvent({ name: "tab", shift: false }));
+  };
+  const backtab = () => {
+    for (const handler of keyHandlers) handler(keyEvent({ name: "backtab", shift: true }));
+  };
+
+  tab();
+  if (manager.activeId !== "a") {
+    throw new Error(`tab with nothing focused must focus the first, got ${manager.activeId}`);
+  }
+  tab();
+  if (manager.activeId !== "b") throw new Error(`tab must move forward, got ${manager.activeId}`);
+  tab();
+  if (manager.activeId !== "c") throw new Error(`tab must reach the last, got ${manager.activeId}`);
+  tab();
+  if (manager.activeId !== "a") throw new Error(`tab must wrap to the first, got ${manager.activeId}`);
+  backtab();
+  if (manager.activeId !== "c") {
+    throw new Error(`backtab must wrap to the last, got ${manager.activeId}`);
+  }
+  backtab();
+  if (manager.activeId !== "b") {
+    throw new Error(`backtab must move backward, got ${manager.activeId}`);
+  }
+  backtab();
+  if (manager.activeId !== "a") throw new Error(`backtab must reach the first, got ${manager.activeId}`);
+  if (renderCalls.length !== baseline + 7) {
+    throw new Error(
+      `each traversal must re-render once, renders = ${renderCalls.length} (baseline ${baseline})`,
+    );
+  }
+
+  await act(async () => {
+    ternRoot.unmount();
+  });
+  if (keyHandlers.size >= 1) throw new Error("traversal must detach on unmount");
+});
+
+Deno.test("useFocusTraversal skips the excluded ids when moving", async () => {
+  const { renderer, keyHandlers, renderCalls } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const manager = new FocusManager();
+  const refA: { current: Node | null } = { current: null };
+  const refB: { current: Node | null } = { current: null };
+  const refC: { current: Node | null } = { current: null };
+  const refD: { current: Node | null } = { current: null };
+
+  function App() {
+    useFocusTraversal({ manager, exclude: ["b", "c"] });
+    useFocus("a", refA, () => {}, { manager });
+    useFocus("b", refB, () => {}, { manager });
+    useFocus("c", refC, () => {}, { manager });
+    useFocus("d", refD, () => {}, { manager });
+    return createElement(
+      Box,
+      null,
+      createElement(Box, { ref: refA }),
+      createElement(Box, { ref: refB }),
+      createElement(Box, { ref: refC }),
+      createElement(Box, { ref: refD }),
+    );
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(App));
+  });
+
+  if (!manager.focus("a")) throw new Error("focus(a) must succeed");
+  // The mount already painted; each successful traversal must add one render.
+  const baseline = renderCalls.length;
+
+  for (const handler of keyHandlers) handler(keyEvent({ name: "tab", shift: false }));
+  const afterTab = manager.activeId;
+  if (afterTab !== "d") {
+    throw new Error(`tab must skip b and c, got ${afterTab}`);
+  }
+
+  for (const handler of keyHandlers) handler(keyEvent({ name: "backtab", shift: true }));
+  const afterBacktab = manager.activeId;
+  if (afterBacktab !== "a") {
+    throw new Error(`backtab must skip c and b, got ${afterBacktab}`);
+  }
+  if (renderCalls.length !== baseline + 2) {
+    throw new Error(
+      `each traversal must re-render once, renders = ${renderCalls.length} (baseline ${baseline})`,
+    );
+  }
+});
+
+Deno.test("useFocusTraversal leaves focus unchanged when every id is excluded", async () => {
+  const { renderer, keyHandlers, renderCalls } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const manager = new FocusManager();
+  const refA: { current: Node | null } = { current: null };
+  const refB: { current: Node | null } = { current: null };
+  const refC: { current: Node | null } = { current: null };
+
+  function App() {
+    useFocusTraversal({ manager, exclude: ["a", "b", "c"] });
+    useFocus("a", refA, () => {}, { manager });
+    useFocus("b", refB, () => {}, { manager });
+    useFocus("c", refC, () => {}, { manager });
+    return createElement(
+      Box,
+      null,
+      createElement(Box, { ref: refA }),
+      createElement(Box, { ref: refB }),
+      createElement(Box, { ref: refC }),
+    );
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(App));
+  });
+
+  if (!manager.focus("a")) throw new Error("focus(a) must succeed");
+  // The mount already painted; a fully-excluded traversal is a no-op and must
+  // not add any render on top of that baseline.
+  const baseline = renderCalls.length;
+
+  for (const handler of keyHandlers) handler(keyEvent({ name: "tab", shift: false }));
+  if (manager.activeId !== "a") {
+    throw new Error(`fully-excluded tab must not move, got ${manager.activeId}`);
+  }
+  for (const handler of keyHandlers) handler(keyEvent({ name: "backtab", shift: true }));
+  if (manager.activeId !== "a") {
+    throw new Error(`fully-excluded backtab must not move, got ${manager.activeId}`);
+  }
+  if (renderCalls.length !== baseline) {
+    throw new Error(
+      `no-op traversal must not re-render, renders = ${renderCalls.length} (baseline ${baseline})`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
