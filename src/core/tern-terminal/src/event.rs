@@ -3,7 +3,7 @@
 //! Only [`KeyEventKind::Press`] key events are surfaced; repeat and release
 //! key events are dropped. Resize, focus gained/lost, and mouse events
 //! (press, release, drag, move, wheel) are all surfaced with their modifier
-//! state; paste events are not (out of scope for the MVP). [`poll_events`]
+//! state; paste events are surfaced as [`TernEvent::Paste`]. [`poll_events`]
 //! waits up to a caller-supplied timeout for the first event, then drains
 //! everything currently buffered into a batch.
 
@@ -228,7 +228,7 @@ impl From<KeyEvent> for TernKey {
 }
 
 /// A normalized terminal event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TernEvent {
     /// A key was pressed.
     Key(TernKey),
@@ -240,12 +240,14 @@ pub enum TernEvent {
     FocusLost,
     /// A mouse event occurred.
     Mouse(TernMouse),
+    /// Text pasted into the terminal (bracketed paste mode).
+    Paste(String),
 }
 
 /// Normalize a single crossterm event into a tern event.
 ///
 /// Returns `None` for events tern does not surface: key events that are not
-/// presses (repeat / release) and paste events.
+/// presses (repeat / release).
 pub fn normalize(event: CrosstermEvent) -> Option<TernEvent> {
     match event {
         CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
@@ -256,8 +258,7 @@ pub fn normalize(event: CrosstermEvent) -> Option<TernEvent> {
         CrosstermEvent::FocusGained => Some(TernEvent::FocusGained),
         CrosstermEvent::FocusLost => Some(TernEvent::FocusLost),
         CrosstermEvent::Mouse(mouse) => Some(TernEvent::Mouse(TernMouse::from(mouse))),
-        // Paste events are not surfaced in the MVP.
-        _ => None,
+        CrosstermEvent::Paste(text) => Some(TernEvent::Paste(text)),
     }
 }
 
@@ -620,9 +621,22 @@ mod tests {
     }
 
     #[test]
-    fn paste_events_map_to_none() {
-        // Paste is out of scope for the MVP.
-        assert_eq!(normalize(CrosstermEvent::Paste("pasted".into())), None);
+    fn paste_events_map_to_paste() {
+        assert_eq!(
+            normalize(CrosstermEvent::Paste("pasted".into())),
+            Some(TernEvent::Paste("pasted".into()))
+        );
+    }
+
+    #[test]
+    fn paste_payload_round_trips_losslessly() {
+        // Multiline, tabbed, and non-ASCII paste payloads must arrive intact.
+        for payload in ["line1\nline2\ttabbed", "héllo 世界"] {
+            assert_eq!(
+                normalize(CrosstermEvent::Paste(payload.into())),
+                Some(TernEvent::Paste(payload.into()))
+            );
+        }
     }
 
     /// A fake reader that yields the given event batches, then sets the stop

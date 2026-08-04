@@ -6,12 +6,12 @@
 //! * **`TuiRenderer`** — owns the terminal lifecycle (raw mode + alternate
 //!   screen via tern-terminal), the scene, and the render loop: `root()`
 //!   returns a handle to the scene root, `start_event_stream(callback)`
-//!   pushes terminal events (keys, resizes, focus changes, and mouse) to the
-//!   JS thread through a napi `ThreadsafeFunction` fed by tern-terminal's
-//!   background event loop, `render()` paints the scene to the terminal, and
-//!   `destroy()` tears the terminal state back down. The pull-based
-//!   `poll_events` fallback remains available behind the `poll-fallback`
-//!   cargo feature (default build ships push delivery).
+//!   pushes terminal events (keys, resizes, focus changes, mouse, and paste)
+//!   to the JS thread through a napi `ThreadsafeFunction` fed by
+//!   tern-terminal's background event loop, `render()` paints the scene to
+//!   the terminal, and `destroy()` tears the terminal state back down. The
+//!   pull-based `poll_events` fallback remains available behind the
+//!   `poll-fallback` cargo feature (default build ships push delivery).
 //! * **Scene construction** — `create_node(type, props)` builds a node
 //!   handle (backed by the tern-components node model), and `NodeHandle`
 //!   methods (`add_child` / `remove` / `set_props`) mutate the shared scene
@@ -210,12 +210,14 @@ fn mouse_button_str(button: MouseButton) -> &'static str {
 }
 
 /// A terminal event surfaced to JS as a tagged-union plain object: `type`
-/// discriminates (`"key"`, `"resize"`, `"focus"`, `"mouse"`) and exactly one
-/// of `key` / `width`+`height` / `focus_gained` / `mouse` is set. For
-/// `"focus"`, `focus_gained` is `true` on gained and `false` on lost.
+/// discriminates (`"key"`, `"resize"`, `"focus"`, `"mouse"`, `"paste"`) and
+/// exactly one of `key` / `width`+`height` / `focus_gained` / `mouse` /
+/// `paste` is set. For `"focus"`, `focus_gained` is `true` on gained and
+/// `false` on lost.
 #[napi(object)]
 pub struct TernEventJs {
-    /// The event kind: `"key"`, `"resize"`, `"focus"`, or `"mouse"`.
+    /// The event kind: `"key"`, `"resize"`, `"focus"`, `"mouse"`, or
+    /// `"paste"`.
     #[napi(js_name = "type")]
     pub r#type: String,
     /// The key event, when `type` is `"key"`.
@@ -230,6 +232,8 @@ pub struct TernEventJs {
     pub focus_gained: Option<bool>,
     /// The mouse event, when `type` is `"mouse"`.
     pub mouse: Option<MouseEventJs>,
+    /// The pasted text, when `type` is `"paste"`.
+    pub paste: Option<String>,
 }
 
 #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
@@ -243,6 +247,7 @@ impl TernEventJs {
                 height: None,
                 focus_gained: None,
                 mouse: None,
+                paste: None,
             },
             TernEvent::Resize { w, h } => Self {
                 r#type: "resize".to_string(),
@@ -251,6 +256,7 @@ impl TernEventJs {
                 height: Some(h),
                 focus_gained: None,
                 mouse: None,
+                paste: None,
             },
             TernEvent::FocusGained => Self {
                 r#type: "focus".to_string(),
@@ -259,6 +265,7 @@ impl TernEventJs {
                 height: None,
                 focus_gained: Some(true),
                 mouse: None,
+                paste: None,
             },
             TernEvent::FocusLost => Self {
                 r#type: "focus".to_string(),
@@ -267,6 +274,7 @@ impl TernEventJs {
                 height: None,
                 focus_gained: Some(false),
                 mouse: None,
+                paste: None,
             },
             TernEvent::Mouse(mouse) => Self {
                 r#type: "mouse".to_string(),
@@ -275,6 +283,16 @@ impl TernEventJs {
                 height: None,
                 focus_gained: None,
                 mouse: Some(MouseEventJs::from_tern(mouse)),
+                paste: None,
+            },
+            TernEvent::Paste(text) => Self {
+                r#type: "paste".to_string(),
+                key: None,
+                width: None,
+                height: None,
+                focus_gained: None,
+                mouse: None,
+                paste: Some(text),
             },
         }
     }
@@ -468,12 +486,12 @@ impl TuiRenderer {
     ///
     /// Events arrive in arrival order and none are dropped (the threadsafe
     /// queue is unbounded), so the JS renderer subscribes instead of polling.
-    /// Key, resize, focus, and mouse events are all delivered (mouse and
-    /// focus delivery is enabled in the constructor). With `exit_on_ctrl_c`
-    /// enabled, a Ctrl+C press is delivered and then tears the renderer down
-    /// (marked destroyed; the loop stops). Destroying the renderer also stops
-    /// the loop. Errors if the renderer is already destroyed or a stream was
-    /// already started.
+    /// Key, resize, focus, mouse, and paste events are all delivered (mouse,
+    /// focus, and bracketed-paste delivery is enabled in the constructor).
+    /// With `exit_on_ctrl_c` enabled, a Ctrl+C press is delivered and then
+    /// tears the renderer down (marked destroyed; the loop stops). Destroying
+    /// the renderer also stops the loop. Errors if the renderer is already
+    /// destroyed or a stream was already started.
     #[napi(js_name = "start_event_stream")]
     pub fn start_event_stream(&self, callback: ThreadsafeFunction<TernEventJs>) -> Result<()> {
         let tsfn = Arc::new(callback);
@@ -532,10 +550,11 @@ impl TuiRenderer {
     /// Block up to `timeout_ms` for input, returning every event that arrived
     /// in that window (a burst of events comes back as one batch).
     ///
-    /// Key, resize, focus, and mouse events are all surfaced (mouse and focus
-    /// delivery is enabled in the constructor). With `exit_on_ctrl_c` enabled,
-    /// a Ctrl+C press tears the renderer down instead of being returned;
-    /// subsequent calls error until a new renderer is constructed.
+    /// Key, resize, focus, mouse, and paste events are all surfaced (mouse,
+    /// focus, and bracketed-paste delivery is enabled in the constructor).
+    /// With `exit_on_ctrl_c` enabled, a Ctrl+C press tears the renderer down
+    /// instead of being returned; subsequent calls error until a new renderer
+    /// is constructed.
     #[napi(js_name = "poll_events")]
     pub fn poll_events(&self, timeout_ms: u32) -> Result<Vec<TernEventJs>> {
         let mut inner = self.inner.lock().expect("renderer inner poisoned");
@@ -814,7 +833,7 @@ fn push_event_batch(
         if exit_on_ctrl_c && is_ctrl_c(event) {
             teardown = true;
         }
-        push(TernEventJs::from_tern(*event));
+        push(TernEventJs::from_tern(event.clone()));
     }
     teardown
 }
@@ -1064,6 +1083,7 @@ mod tests {
         assert!(ev.key.is_none());
         assert!(ev.focus_gained.is_none());
         assert!(ev.mouse.is_none());
+        assert!(ev.paste.is_none());
     }
 
     #[test]
@@ -1075,6 +1095,7 @@ mod tests {
         assert!(gained.width.is_none());
         assert!(gained.height.is_none());
         assert!(gained.mouse.is_none());
+        assert!(gained.paste.is_none());
 
         let lost = TernEventJs::from_tern(TernEvent::FocusLost);
         assert_eq!(lost.r#type, "focus");
@@ -1104,6 +1125,19 @@ mod tests {
         assert!(ev.width.is_none());
         assert!(ev.height.is_none());
         assert!(ev.focus_gained.is_none());
+        assert!(ev.paste.is_none());
+    }
+
+    #[test]
+    fn tern_event_js_paste_maps() {
+        let ev = TernEventJs::from_tern(TernEvent::Paste("pasted".to_string()));
+        assert_eq!(ev.r#type, "paste");
+        assert_eq!(ev.paste.as_deref(), Some("pasted"));
+        assert!(ev.key.is_none());
+        assert!(ev.width.is_none());
+        assert!(ev.height.is_none());
+        assert!(ev.focus_gained.is_none());
+        assert!(ev.mouse.is_none());
     }
 
     #[test]
@@ -1169,6 +1203,7 @@ mod tests {
         assert!(ev.height.is_none());
         assert!(ev.focus_gained.is_none());
         assert!(ev.mouse.is_none());
+        assert!(ev.paste.is_none());
     }
 
     #[test]
@@ -1574,11 +1609,11 @@ mod tests {
     /// A synthetic tern event of the given index, cycling the event kinds so
     /// every payload shape is exercised.
     fn synthetic_event(i: usize) -> TernEvent {
-        match i % 4 {
+        match i % 5 {
             0 => TernEvent::Key(TernKey::new(KeyName::Char, Some('a'), false, false, false)),
             1 => TernEvent::Resize { w: 80, h: (i + 1) as u16 },
             2 => TernEvent::FocusGained,
-            _ => TernEvent::Mouse(TernMouse {
+            3 => TernEvent::Mouse(TernMouse {
                 kind: MouseEventKind::Moved,
                 column: (i % 100) as u16,
                 row: 0,
@@ -1586,6 +1621,7 @@ mod tests {
                 alt: false,
                 shift: false,
             }),
+            _ => TernEvent::Paste(format!("pasted-{i}")),
         }
     }
 
@@ -1621,6 +1657,10 @@ mod tests {
                 TernEvent::Mouse(_) => {
                     assert_eq!(js.r#type, "mouse", "event {i} tagged mouse");
                     assert_eq!(js.mouse.as_ref().expect("mouse payload present").kind, "moved");
+                }
+                TernEvent::Paste(text) => {
+                    assert_eq!(js.r#type, "paste", "event {i} tagged paste");
+                    assert_eq!(js.paste.as_deref(), Some(text.as_str()), "event {i} payload");
                 }
             }
         }

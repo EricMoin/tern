@@ -120,12 +120,12 @@ export declare class TuiRenderer {
    *
    * Events arrive in arrival order and none are dropped (the threadsafe
    * queue is unbounded), so the JS renderer subscribes instead of polling.
-   * Key, resize, focus, and mouse events are all delivered (mouse and
-   * focus delivery is enabled in the constructor). With `exit_on_ctrl_c`
-   * enabled, a Ctrl+C press is delivered and then tears the renderer down
-   * (marked destroyed; the loop stops). Destroying the renderer also stops
-   * the loop. Errors if the renderer is already destroyed or a stream was
-   * already started.
+   * Key, resize, focus, mouse, and paste events are all delivered (mouse,
+   * focus, and bracketed-paste delivery is enabled in the constructor).
+   * With `exit_on_ctrl_c` enabled, a Ctrl+C press is delivered and then
+   * tears the renderer down (marked destroyed; the loop stops). Destroying
+   * the renderer also stops the loop. Errors if the renderer is already
+   * destroyed or a stream was already started.
    */
   start_event_stream(callback: ((err: Error | null, arg: TernEventJs) => any)): void
 }
@@ -234,12 +234,16 @@ export interface MouseEventJs {
 
 /**
  * A terminal event surfaced to JS as a tagged-union plain object: `type`
- * discriminates (`"key"`, `"resize"`, `"focus"`, `"mouse"`) and exactly one
- * of `key` / `width`+`height` / `focus_gained` / `mouse` is set. For
- * `"focus"`, `focus_gained` is `true` on gained and `false` on lost.
+ * discriminates (`"key"`, `"resize"`, `"focus"`, `"mouse"`, `"paste"`) and
+ * exactly one of `key` / `width`+`height` / `focus_gained` / `mouse` /
+ * `paste` is set. For `"focus"`, `focus_gained` is `true` on gained and
+ * `false` on lost.
  */
 export interface TernEventJs {
-  /** The event kind: `"key"`, `"resize"`, `"focus"`, or `"mouse"`. */
+  /**
+   * The event kind: `"key"`, `"resize"`, `"focus"`, `"mouse"`, or
+   * `"paste"`.
+   */
   type: string
   /** The key event, when `type` is `"key"`. */
   key?: KeyEvent
@@ -254,6 +258,8 @@ export interface TernEventJs {
   focus_gained?: boolean
   /** The mouse event, when `type` is `"mouse"`. */
   mouse?: MouseEventJs
+  /** The pasted text, when `type` is `"paste"`. */
+  paste?: string
 }
 
 /** Constructor options for [`TuiRenderer`]. */
