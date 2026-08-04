@@ -188,11 +188,26 @@ fn build_node(
         };
     }
 
-    // Text and StreamingText nodes are leaves; build their (by construction
-    // empty) children list and register the content for measurement.
+    // Text and StreamingText nodes are leaves: they measure only their own
+    // content (registered below for the measure closure), so their in-flow
+    // children are dropped. Absolutely positioned children — the only
+    // children a leaf carries today (e.g. a streaming node's scroll-to-bottom
+    // affordance cell, mirroring the scroll_view scrollbar leaf) — are laid
+    // out against the leaf, so the compositor paints them z-ordered above
+    // the in-flow content.
     let is_leaf = matches!(node.kind, NodeKind::Text | NodeKind::StreamingText);
     let children: Vec<TaffyNodeId> = if is_leaf {
-        Vec::new()
+        node.children
+            .iter()
+            .filter(|&&child| {
+                scene
+                    .node(child)
+                    .is_some_and(|c| prop_str(&c.props, "position") == Some("absolute"))
+            })
+            .filter_map(|&child| {
+                build_node(scene, child, viewport, false, taffy, node_map, text_map)
+            })
+            .collect()
     } else {
         node.children
             .iter()
@@ -202,14 +217,22 @@ fn build_node(
 
     let taffy_node = match node.kind {
         NodeKind::Text => {
-            let t = taffy.new_leaf(style).ok()?;
+            let t = if children.is_empty() {
+                taffy.new_leaf(style).ok()?
+            } else {
+                taffy.new_with_children(style, &children).ok()?
+            };
             if let Some(PropValue::Str(content)) = node.props.get("text") {
                 text_map.insert(t, content.clone());
             }
             t
         }
         NodeKind::StreamingText => {
-            let t = taffy.new_leaf(style).ok()?;
+            let t = if children.is_empty() {
+                taffy.new_leaf(style).ok()?
+            } else {
+                taffy.new_with_children(style, &children).ok()?
+            };
             // The compositor renders the node's accumulated stream; register
             // the concatenated span texts so the measure closure sizes the
             // leaf to its display width (same path as `text` content).

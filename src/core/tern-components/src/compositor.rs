@@ -1820,6 +1820,62 @@ mod tests {
         assert_eq!(rows[2], "+---+");
     }
 
+    #[test]
+    fn streaming_leaf_absolute_child_paints_at_clip_bottom_right() {
+        // The scroll-to-bottom affordance: a streaming leaf with a clip rect
+        // and scroll offset whose absolutely positioned 1x1 ▼ child (right 0,
+        // top = clip 2 - 1 + scroll 1 = 2, z_index 2) stays pinned to the
+        // clip region's bottom-right row over the scrolled content — the
+        // leaf's in-flow children are dropped, but its absolute decorations
+        // lay out against it and paint above the in-flow content.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let s = scene
+            .add_child(root, NodeKind::StreamingText, Style::new())
+            .expect("stream");
+        scene.set_prop(s, "width", PropValue::Int(6));
+        scene.set_prop(s, "height", PropValue::Int(2));
+        scene.set_clip_rect(s, Rect::new(0, 0, 6, 2));
+        scene.set_scroll_offset(s, 0, 1);
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "aaaa\nbbbb".to_string(),
+                style: Style::new(),
+            }
+        ));
+        let cell = scene.add_text(s, "▼", Style::new()).expect("affordance cell");
+        scene.set_prop(cell, "position", PropValue::Str("absolute".into()));
+        scene.set_prop(cell, "right", PropValue::Int(0));
+        scene.set_prop(cell, "top", PropValue::Int(2)); // (clip 2 - 1) + scroll 1
+        scene.set_prop(cell, "width", PropValue::Int(1));
+        scene.set_prop(cell, "height", PropValue::Int(1));
+        scene.set_prop(cell, "z_index", PropValue::Int(2));
+
+        let rows = render_scene_rows(&scene, Size::new(6, 2));
+        // Stream row 0 ('aaaa') scrolled out; stream row 1 ('bbbb') pans to
+        // the clip's top row; the ▼ cell is pinned at the clip's bottom-right
+        // (right: 0 aligns its right edge with the 6-wide clip, so it paints
+        // at the rightmost column).
+        assert_eq!(rows[0], "bbbb  ");
+        assert_eq!(rows[1], "     ▼");
+
+        // A leaf's in-flow child stays dropped (it is not a decoration).
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let t = scene
+            .add_child(root, NodeKind::StreamingText, Style::new())
+            .expect("stream");
+        scene.set_prop(t, "width", PropValue::Int(4));
+        scene.set_prop(t, "height", PropValue::Int(1));
+        scene.append_span(t, Span { text: "aaaa".to_string(), style: Style::new() });
+        let flow = scene.add_text(t, "x", Style::new()).expect("in-flow child");
+        scene.set_prop(flow, "position", PropValue::Str("relative".into()));
+        let rows = render_scene_rows(&scene, Size::new(4, 1));
+        // Only the leaf's own content paints; the in-flow child is dropped.
+        assert_eq!(rows[0], "aaaa");
+    }
+
     // --- Scene geometry queries (hit_test / content_size) ----------------
 
     #[test]
