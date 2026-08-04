@@ -43,6 +43,12 @@ theme hints)
 - `subscribeInput(renderer, handler, { isActive, focusManager })` — the
   Solid-flavored `useInput`: routes each key through the core `FocusManager`
   first, then the tree handler.
+- `subscribePaste(renderer, handler, { isActive, focusManager })` — the
+  Solid-flavored `usePaste`: routes each paste (the handler receives the
+  pasted text string) through the core `FocusManager` (`routePaste`) first,
+  then the tree handler. A focused `Textarea({ focusId, ... })` auto-pastes
+  via `pasteIntoTextarea`, firing `onChange`; a plain `Input` is wired
+  manually via `useFocus(id, node, onKey, manager, onPaste)` + `pasteInto`.
 - `subscribeStream(node, stream)` — feed an `AsyncIterable<Span>` to a
   `streaming_text` node (auto-scroll via `syncStreamTail`; the disposer
   cancels the pump).
@@ -62,8 +68,9 @@ the core `defaultTheme`) and the re-exported `defaultTheme` / `mergeTheme` /
 **Re-exports** — the core surface: `Node`, `NodeProps`, `KeyEvent`,
 `KeyHandler`, `Span`, `Renderer`, `FocusManager`, `focusManager`, `useFocus`,
 `editKey`, `selectKey`, `tick`, `scrollTo` / `scrollBy` / `scrollTop`,
-`followTail` / `syncStreamTail` / `isStreamFollowing`, `startPanelDrag` /
-`dragPanels` / `endPanelDrag`, and the theme / element prop types.
+`followTail` / `syncStreamTail` / `isStreamFollowing` / `scrollToBottom`,
+`pasteInto` / `pasteIntoTextarea`, `startPanelDrag` / `dragPanels` /
+`endPanelDrag`, and the theme / element prop types.
 
 ## Example
 
