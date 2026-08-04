@@ -344,7 +344,7 @@ where
     std::thread::Builder::new()
         .name("tern-event-loop".to_string())
         .spawn(move || {
-            let _ = run_event_loop(&mut sink, |timeout| poll_events(timeout), &thread_stop);
+            let _ = run_event_loop(&mut sink, poll_events, &thread_stop);
         })?;
     Ok(EventLoopHandle { stop })
 }

@@ -624,9 +624,8 @@ fn wrap_line_with_offsets(line: &str, width: usize) -> Vec<(String, usize)> {
     let mut token = String::new();
     let mut token_start = 0usize;
 
-    // The char index (within `line`) of the next char to process.
-    let mut idx = 0usize;
-    for ch in line.chars() {
+    // The char index (within `line`) of the char being processed.
+    for (idx, ch) in line.chars().enumerate() {
         match ch {
             // Hard break: flush the pending token, then start a new row.
             '\n' => {
@@ -658,7 +657,7 @@ fn wrap_line_with_offsets(line: &str, width: usize) -> Vec<(String, usize)> {
                     width,
                 );
                 token.clear();
-                if row_width + 1 <= width {
+                if row_width < width {
                     row.push(' ');
                     row_width += 1;
                 }
@@ -670,7 +669,6 @@ fn wrap_line_with_offsets(line: &str, width: usize) -> Vec<(String, usize)> {
                 token.push(ch);
             }
         }
-        idx += 1;
     }
     flush_token(
         &mut rows,

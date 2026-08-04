@@ -691,16 +691,7 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &m
             match ch {
                 // Hard break: flush the pending word, then start a new row.
                 '\n' => {
-                    paint_word(
-                        &word,
-                        word_style,
-                        rect,
-                        right,
-                        bottom,
-                        &mut cursor,
-                        region,
-                        buffer,
-                    );
+                    paint_word(&word, word_style, rect, &mut cursor, region, buffer);
                     word.clear();
                     cursor.row += 1;
                     cursor.col = rect.x;
@@ -712,16 +703,7 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &m
                 // only when it fits; a trailing space at a row's end is
                 // dropped (the wrap would collapse it anyway).
                 ' ' => {
-                    paint_word(
-                        &word,
-                        word_style,
-                        rect,
-                        right,
-                        bottom,
-                        &mut cursor,
-                        region,
-                        buffer,
-                    );
+                    paint_word(&word, word_style, rect, &mut cursor, region, buffer);
                     word.clear();
                     if cursor.row < bottom
                         && cursor.col < right
@@ -740,16 +722,7 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &m
             }
         }
         // Span boundary: flush so per-span styles stay exact across spans.
-        paint_word(
-            &word,
-            word_style,
-            rect,
-            right,
-            bottom,
-            &mut cursor,
-            region,
-            buffer,
-        );
+        paint_word(&word, word_style, rect, &mut cursor, region, buffer);
         word.clear();
         if cursor.row >= bottom {
             return;
@@ -909,8 +882,6 @@ fn paint_word(
     word: &str,
     style: Style,
     frame: Rect,
-    right: i32,
-    bottom: i32,
     cursor: &mut WrapCursor,
     region: Region,
     buffer: &mut Buffer,
@@ -919,6 +890,11 @@ fn paint_word(
     if word.is_empty() {
         return;
     }
+    // Paint bounds derived from frame + region exactly as the caller does:
+    // right clips at the region's right edge (plus horizontal scroll), and
+    // the content pan bound runs to the frame's bottom plus vertical scroll.
+    let right = frame.right().min(region.clip.right() + region.scroll_x);
+    let bottom = frame.bottom() + region.scroll_y;
     let width: i32 = word.chars().map(|c| char_width(c) as i32).sum();
     // Wrap the whole token when it does not fit on the current row and can fit
     // on a fresh row; a token wider than the row itself is hard-broken below.
@@ -1327,7 +1303,7 @@ mod tests {
         assert!(rows[6].trim().is_empty(), "row6 = {:?}", rows[6]);
         // The reserved row belongs to the status bar: its left/right segments
         // pin to the strip's edges.
-        assert_eq!(rows[7].chars().nth(0), Some('L'), "row7 = {:?}", rows[7]);
+        assert_eq!(rows[7].chars().next(), Some('L'), "row7 = {:?}", rows[7]);
         assert_eq!(rows[7].chars().nth(19), Some('R'), "row7 = {:?}", rows[7]);
         // No segment leaked above the reserved row, and no panel content
         // leaked onto it.
