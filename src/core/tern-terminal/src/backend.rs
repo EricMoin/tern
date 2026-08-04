@@ -18,7 +18,8 @@ use std::io::{self, Write};
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
-    DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture,
 };
 use crossterm::style::{
     Attribute, Color as CrosstermColor, Print, ResetColor, SetAttribute, SetBackgroundColor,
@@ -71,18 +72,20 @@ impl Backend {
         out.flush()
     }
 
-    /// Tell the terminal to report mouse and focus-change events so
-    /// [`poll_events`](crate::event::poll_events) can surface them.
+    /// Tell the terminal to report mouse, focus-change, and bracketed-paste
+    /// events so [`poll_events`](crate::event::poll_events) can surface them.
     ///
     /// crossterm only emits these events once the terminal has been told to
-    /// track them; without this, mouse and focus events never reach the
-    /// event loop. Pair with [`disable_event_listening`](Backend::disable_event_listening).
+    /// track them; without this, mouse, focus, and paste events never reach
+    /// the event loop. Pair with
+    /// [`disable_event_listening`](Backend::disable_event_listening).
     pub fn enable_event_listening(&self) -> io::Result<()> {
         let mut out = io::stdout();
         enable_event_listening_to(&mut out)
     }
 
-    /// Tell the terminal to stop reporting mouse and focus-change events.
+    /// Tell the terminal to stop reporting mouse, focus-change, and
+    /// bracketed-paste events.
     pub fn disable_event_listening(&self) -> io::Result<()> {
         let mut out = io::stdout();
         disable_event_listening_to(&mut out)
@@ -151,26 +154,31 @@ impl Backend {
     }
 }
 
-/// Enable mouse and focus-change event reporting on any `Write` target.
+/// Enable mouse, focus-change, and bracketed-paste event reporting on any
+/// `Write` target.
 ///
 /// Emits the crossterm enable sequences: mouse capture (normal, button-event,
-/// any-event, rxvt, and SGR tracking modes) followed by focus-change
-/// reporting. Without these, crossterm never surfaces mouse or focus events
-/// to [`poll_events`](crate::event::poll_events). Pair with
-/// [`disable_event_listening_to`] at shutdown.
+/// any-event, rxvt, and SGR tracking modes), focus-change reporting, then
+/// bracketed-paste mode. Without these, crossterm never surfaces mouse,
+/// focus, or paste events to [`poll_events`](crate::event::poll_events). Pair
+/// with [`disable_event_listening_to`] at shutdown.
 pub fn enable_event_listening_to<W: Write>(w: &mut W) -> io::Result<()> {
     w.queue(EnableMouseCapture)?;
     w.queue(EnableFocusChange)?;
+    w.queue(EnableBracketedPaste)?;
     w.flush()
 }
 
-/// Disable mouse and focus-change event reporting on any `Write` target.
+/// Disable mouse, focus-change, and bracketed-paste event reporting on any
+/// `Write` target.
 ///
-/// Emits the inverse of [`enable_event_listening_to`]: focus-change
-/// reporting off, then the mouse capture modes off in reverse order.
+/// Emits the inverse of [`enable_event_listening_to`]: bracketed-paste mode
+/// off, focus-change reporting off, then the mouse capture modes off in
+/// reverse order.
 pub fn disable_event_listening_to<W: Write>(w: &mut W) -> io::Result<()> {
     w.queue(DisableMouseCapture)?;
     w.queue(DisableFocusChange)?;
+    w.queue(DisableBracketedPaste)?;
     w.flush()
 }
 
@@ -334,10 +342,11 @@ mod tests {
         enable_event_listening_to(&mut out).expect("enable should succeed");
         let s = String::from_utf8(out).unwrap();
         // Mouse capture: normal (?1000h), button-event (?1002h), any-event
-        // (?1003h), rxvt (?1015h), sgr (?1006h); then focus change (?1004h).
+        // (?1003h), rxvt (?1015h), sgr (?1006h); then focus change (?1004h)
+        // and bracketed paste (?2004h).
         assert_eq!(
             s,
-            "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h\x1b[?1004h",
+            "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h\x1b[?1004h\x1b[?2004h",
             "got: {s:?}"
         );
     }
@@ -348,10 +357,10 @@ mod tests {
         disable_event_listening_to(&mut out).expect("disable should succeed");
         let s = String::from_utf8(out).unwrap();
         // The inverse of enable, in reverse order; focus change (?1004l)
-        // last, then the mouse modes back off.
+        // next, then bracketed paste (?2004l), then the mouse modes back off.
         assert_eq!(
             s,
-            "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1004l",
+            "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1004l\x1b[?2004l",
             "got: {s:?}"
         );
     }
