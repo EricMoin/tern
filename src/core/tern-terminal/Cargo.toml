@@ -9,3 +9,4 @@ description = "tern terminal: diff-flushes painted buffers to the terminal"
 [dependencies]
 tern-core = { path = "../tern-core" }
 crossterm = "0.29"
+supports-color = "3"
