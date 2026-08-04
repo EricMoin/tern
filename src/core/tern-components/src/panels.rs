@@ -329,7 +329,10 @@ mod tests {
 
     #[test]
     fn panels_materialize_in_stack_order() {
-        let panels = Panels::new(vec![Panel::new("first", body("1")), Panel::new("second", body("2"))]);
+        let panels = Panels::new(vec![
+            Panel::new("first", body("1")),
+            Panel::new("second", body("2")),
+        ]);
         let mut scene = Scene::new();
         let root = scene.root_id();
         let container = Renderable::from(panels).materialize(&mut scene, root);
@@ -355,7 +358,8 @@ mod tests {
 
     #[test]
     fn row_direction_lays_panels_horizontally() {
-        let panels = Panels::new(vec![Panel::new("a", body("x")), Panel::new("b", body("y"))]).row();
+        let panels =
+            Panels::new(vec![Panel::new("a", body("x")), Panel::new("b", body("y"))]).row();
         let mut scene = Scene::new();
         let root = scene.root_id();
         let container = Renderable::from(panels).materialize(&mut scene, root);
@@ -373,7 +377,8 @@ mod tests {
             Panel::new("one", body("body-a")).collapsed(),
             Panel::new("two", body("body-b")),
         ]);
-        let buffer = crate::compositor::Compositor::new().paint(panels, tern_core::Size::new(20, 5));
+        let buffer =
+            crate::compositor::Compositor::new().paint(panels, tern_core::Size::new(20, 5));
         let rows: Vec<String> = (0..5)
             .map(|y| (0..20).map(|x| buffer.cell(x, y).unwrap().ch).collect())
             .collect();
@@ -395,7 +400,8 @@ mod tests {
             Panel::new("first", body("1")),
             Panel::new("second", body("2")),
         ]);
-        let buffer = crate::compositor::Compositor::new().paint(panels, tern_core::Size::new(20, 5));
+        let buffer =
+            crate::compositor::Compositor::new().paint(panels, tern_core::Size::new(20, 5));
         let rows: Vec<String> = (0..5)
             .map(|y| (0..20).map(|x| buffer.cell(x, y).unwrap().ch).collect())
             .collect();

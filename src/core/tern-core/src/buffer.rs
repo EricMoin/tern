@@ -231,14 +231,7 @@ impl Buffer {
     /// stops at the clip rect's right edge (in buffer coordinates) so no wide
     /// character is ever truncated mid-glyph; combining marks (width 0) are
     /// skipped, as in [`set_string`](Self::set_string).
-    pub fn set_string_region(
-        &mut self,
-        x: i32,
-        y: i32,
-        text: &str,
-        style: Style,
-        region: Region,
-    ) {
+    pub fn set_string_region(&mut self, x: i32, y: i32, text: &str, style: Style, region: Region) {
         let mut cx = x;
         for ch in text.chars() {
             let w = char_width(ch);
@@ -291,7 +284,11 @@ impl Buffer {
         };
         // Colors override when the caret sets them; the caret's modifiers are
         // added on top of the cell's own (e.g. REVERSED on a bold title).
-        cell.style = cell.style.fg(fg).bg(bg).add_modifier(cursor.style.modifiers);
+        cell.style = cell
+            .style
+            .fg(fg)
+            .bg(bg)
+            .add_modifier(cursor.style.modifiers);
         true
     }
 
@@ -657,10 +654,25 @@ mod tests {
         assert!(b.render_caret(caret));
         // The character is untouched; the caret's modifier is added.
         assert_eq!(b.cell(1, 0).unwrap().ch, 'b');
-        assert!(b.cell(1, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        assert!(b
+            .cell(1, 0)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::REVERSED));
         // Neighboring cells are unaffected.
-        assert!(!b.cell(0, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
-        assert!(!b.cell(2, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        assert!(!b
+            .cell(0, 0)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::REVERSED));
+        assert!(!b
+            .cell(2, 0)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::REVERSED));
     }
 
     #[test]
@@ -675,8 +687,18 @@ mod tests {
         assert!(m.contains(Modifiers::BOLD));
         assert!(m.contains(Modifiers::REVERSED));
         // Neighboring cells keep exactly their own modifiers.
-        assert!(b.cell(1, 0).unwrap().style.modifiers.contains(Modifiers::BOLD));
-        assert!(!b.cell(1, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        assert!(b
+            .cell(1, 0)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::BOLD));
+        assert!(!b
+            .cell(1, 0)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::REVERSED));
     }
 
     #[test]
@@ -712,7 +734,9 @@ mod tests {
         let before = b.clone();
 
         // A hidden caret paints nothing.
-        let hidden = Cursor::new(1, 0).hide().styled(Style::new().add_modifier(Modifiers::REVERSED));
+        let hidden = Cursor::new(1, 0)
+            .hide()
+            .styled(Style::new().add_modifier(Modifiers::REVERSED));
         assert!(!b.render_caret(hidden));
         assert_eq!(b, before);
 
@@ -731,11 +755,23 @@ mod tests {
         let caret = Cursor::new(1, 0).styled(Style::new().add_modifier(Modifiers::REVERSED));
         assert!(!b.render_caret(caret));
         assert!(b.cell(1, 0).unwrap().is_masked());
-        assert!(!b.cell(1, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        assert!(!b
+            .cell(1, 0)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::REVERSED));
 
         // The caret still paints on real cells either side of the mask.
-        assert!(b.render_caret(Cursor::new(2, 0).styled(Style::new().add_modifier(Modifiers::REVERSED))));
-        assert!(b.cell(2, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        assert!(b.render_caret(
+            Cursor::new(2, 0).styled(Style::new().add_modifier(Modifiers::REVERSED))
+        ));
+        assert!(b
+            .cell(2, 0)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::REVERSED));
     }
 
     #[test]
@@ -743,7 +779,9 @@ mod tests {
         let mut prev = Buffer::new(3, 1);
         prev.set_string(0, 0, "abc", Style::new());
         let mut next = prev.clone();
-        assert!(next.render_caret(Cursor::new(1, 0).styled(Style::new().add_modifier(Modifiers::REVERSED))));
+        assert!(next.render_caret(
+            Cursor::new(1, 0).styled(Style::new().add_modifier(Modifiers::REVERSED))
+        ));
 
         let u = diff(&prev, &next);
         // Only the caret cell changed: 'b' gains the REVERSED modifier.
@@ -755,7 +793,9 @@ mod tests {
 
         // A second render of the same caret produces no further updates.
         let mut same = next.clone();
-        assert!(same.render_caret(Cursor::new(1, 0).styled(Style::new().add_modifier(Modifiers::REVERSED))));
+        assert!(same.render_caret(
+            Cursor::new(1, 0).styled(Style::new().add_modifier(Modifiers::REVERSED))
+        ));
         assert!(diff(&next, &same).is_empty());
     }
 

@@ -315,11 +315,7 @@ impl EventLoopHandle {
 /// feeds each to `sink`, in arrival order. The interval also bounds how long
 /// a stop request can go unnoticed. Errors from `read` propagate to the
 /// caller and end the loop.
-pub fn run_event_loop<F, R>(
-    mut sink: F,
-    mut read: R,
-    stop: &AtomicBool,
-) -> io::Result<()>
+pub fn run_event_loop<F, R>(mut sink: F, mut read: R, stop: &AtomicBool) -> io::Result<()>
 where
     F: FnMut(TernEvent),
     R: FnMut(Duration) -> io::Result<Vec<TernEvent>>,
@@ -525,7 +521,12 @@ mod tests {
     #[test]
     fn mouse_move_maps_to_moved() {
         assert_eq!(
-            normalize(mouse(CrosstermMouseEventKind::Moved, 7, 8, KeyModifiers::NONE)),
+            normalize(mouse(
+                CrosstermMouseEventKind::Moved,
+                7,
+                8,
+                KeyModifiers::NONE
+            )),
             Some(TernEvent::Mouse(TernMouse {
                 kind: MouseEventKind::Moved,
                 column: 7,
@@ -559,14 +560,22 @@ mod tests {
 
     #[test]
     fn wheel_events_map() {
-        let wheel = |kind: CrosstermMouseEventKind| {
-            normalize(mouse(kind, 9, 9, KeyModifiers::NONE))
-        };
+        let wheel =
+            |kind: CrosstermMouseEventKind| normalize(mouse(kind, 9, 9, KeyModifiers::NONE));
         for (crossterm_kind, tern_kind) in [
             (CrosstermMouseEventKind::ScrollUp, MouseEventKind::ScrollUp),
-            (CrosstermMouseEventKind::ScrollDown, MouseEventKind::ScrollDown),
-            (CrosstermMouseEventKind::ScrollLeft, MouseEventKind::ScrollLeft),
-            (CrosstermMouseEventKind::ScrollRight, MouseEventKind::ScrollRight),
+            (
+                CrosstermMouseEventKind::ScrollDown,
+                MouseEventKind::ScrollDown,
+            ),
+            (
+                CrosstermMouseEventKind::ScrollLeft,
+                MouseEventKind::ScrollLeft,
+            ),
+            (
+                CrosstermMouseEventKind::ScrollRight,
+                MouseEventKind::ScrollRight,
+            ),
         ] {
             assert_eq!(
                 wheel(crossterm_kind),
@@ -669,7 +678,10 @@ mod tests {
         for i in 0..n {
             let event = match i % 4 {
                 0 => TernEvent::Key(TernKey::new(KeyName::Char, Some('a'), false, false, false)),
-                1 => TernEvent::Resize { w: 80, h: (i + 1) as u16 },
+                1 => TernEvent::Resize {
+                    w: 80,
+                    h: (i + 1) as u16,
+                },
                 2 => TernEvent::FocusGained,
                 _ => TernEvent::Mouse(TernMouse {
                     kind: MouseEventKind::Moved,

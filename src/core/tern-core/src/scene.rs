@@ -372,10 +372,16 @@ impl Scene {
         let Some(n) = self.nodes.get_mut(&id) else {
             return false;
         };
-        n.props.insert("clip_x".to_string(), PropValue::Int(clip.x as i64));
-        n.props.insert("clip_y".to_string(), PropValue::Int(clip.y as i64));
-        n.props.insert("clip_width".to_string(), PropValue::Int(clip.width as i64));
-        n.props.insert("clip_height".to_string(), PropValue::Int(clip.height as i64));
+        n.props
+            .insert("clip_x".to_string(), PropValue::Int(clip.x as i64));
+        n.props
+            .insert("clip_y".to_string(), PropValue::Int(clip.y as i64));
+        n.props
+            .insert("clip_width".to_string(), PropValue::Int(clip.width as i64));
+        n.props.insert(
+            "clip_height".to_string(),
+            PropValue::Int(clip.height as i64),
+        );
         true
     }
 
@@ -396,8 +402,10 @@ impl Scene {
         let Some(n) = self.nodes.get_mut(&id) else {
             return false;
         };
-        n.props.insert("scroll_x".to_string(), PropValue::Int(x as i64));
-        n.props.insert("scroll_y".to_string(), PropValue::Int(y as i64));
+        n.props
+            .insert("scroll_x".to_string(), PropValue::Int(x as i64));
+        n.props
+            .insert("scroll_y".to_string(), PropValue::Int(y as i64));
         true
     }
 

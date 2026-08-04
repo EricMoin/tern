@@ -368,7 +368,10 @@ mod tests {
 
     #[test]
     fn text_builder_helpers_chain_styles() {
-        let t = Text::new("x", Style::new()).fg(Color::Rgb(1, 2, 3)).bold().underline();
+        let t = Text::new("x", Style::new())
+            .fg(Color::Rgb(1, 2, 3))
+            .bold()
+            .underline();
         assert_eq!(t.content, "x");
         assert_eq!(t.style.fg, Color::Rgb(1, 2, 3));
         assert!(t.style.modifiers.contains(Modifiers::BOLD));

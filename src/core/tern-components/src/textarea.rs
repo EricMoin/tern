@@ -33,9 +33,9 @@
 //! Scope lock (subtask 3): the edit model only — insert/delete/navigation/
 //! split. No clipboard, IME composition, or selection.
 
+use tern_core::char_width;
 use tern_core::scene::{NodeId, PropValue, Scene};
 use tern_core::style::Style;
-use tern_core::char_width;
 
 use crate::input::{Key, KeyAction};
 use crate::renderable::{Box, Renderable};
@@ -407,7 +407,10 @@ impl Textarea {
     /// The wrapped display lines of `lines[row]` (text only).
     #[cfg(test)]
     fn wrapped(&self, row: usize) -> Vec<String> {
-        self.wrapped_with_offsets(row).into_iter().map(|(s, _)| s).collect()
+        self.wrapped_with_offsets(row)
+            .into_iter()
+            .map(|(s, _)| s)
+            .collect()
     }
 
     /// The display-line offset (within `lines[row]`'s wrapped lines) that
@@ -435,11 +438,7 @@ impl Textarea {
         let wrapped = self.wrapped_with_offsets(row);
         let (dl, start) = wrapped.get(offset).cloned().unwrap_or_default();
         let local = self.col.saturating_sub(start).min(dl.chars().count());
-        let col: usize = dl
-            .chars()
-            .take(local)
-            .map(|c| char_width(c) as usize)
-            .sum();
+        let col: usize = dl.chars().take(local).map(|c| char_width(c) as usize).sum();
         (col, start)
     }
 
@@ -806,7 +805,7 @@ mod tests {
         assert_eq!(join.lines, vec!["abcd"]);
         assert_eq!(join.row, 0);
         assert_eq!(join.col, 2); // the join point
-        // At the very start it is a no-op.
+                                 // At the very start it is a no-op.
         let mut top = Textarea::with_value("x");
         top.row = 0;
         top.col = 0;
@@ -906,7 +905,7 @@ mod tests {
         assert_eq!((ta.row, ta.col), (0, 5)); // end of "hello" — col 5 preserved
         ta.move_down();
         assert_eq!((ta.row, ta.col), (0, 11)); // back to the end
-        // At the top the move sticks.
+                                               // At the top the move sticks.
         ta.move_up();
         ta.move_up();
         assert_eq!((ta.row, ta.col), (0, 5));
@@ -930,7 +929,7 @@ mod tests {
         assert_eq!((ta.row, ta.col), (0, 10)); // end of "beta"
         ta.move_up();
         assert_eq!((ta.row, ta.col), (0, 5)); // end of "alpha"
-        // Down again lands back on the preserved column.
+                                              // Down again lands back on the preserved column.
         ta.move_down();
         assert_eq!((ta.row, ta.col), (0, 10));
     }
@@ -992,9 +991,15 @@ mod tests {
         let children = scene.children(id).unwrap();
         assert_eq!(children.len(), 2);
         // Line 0 has no caret; line 1 (the caret's line) carries it.
-        assert_eq!(scene.prop(children[0], "text"), Some(&PropValue::Str("ab".to_string())));
+        assert_eq!(
+            scene.prop(children[0], "text"),
+            Some(&PropValue::Str("ab".to_string()))
+        );
         assert!(scene.prop(children[0], "caret").is_none());
-        assert_eq!(scene.prop(children[1], "text"), Some(&PropValue::Str("cd".to_string())));
+        assert_eq!(
+            scene.prop(children[1], "text"),
+            Some(&PropValue::Str("cd".to_string()))
+        );
         assert_eq!(scene.prop(children[1], "caret"), Some(&PropValue::Int(2)));
     }
 
@@ -1007,8 +1012,14 @@ mod tests {
         let id = Renderable::from(ta).materialize(&mut scene, root);
         let children = scene.children(id).unwrap();
         assert_eq!(children.len(), 2);
-        assert_eq!(scene.prop(children[0], "text"), Some(&PropValue::Str("hello".to_string())));
-        assert_eq!(scene.prop(children[1], "text"), Some(&PropValue::Str("world".to_string())));
+        assert_eq!(
+            scene.prop(children[0], "text"),
+            Some(&PropValue::Str("hello".to_string()))
+        );
+        assert_eq!(
+            scene.prop(children[1], "text"),
+            Some(&PropValue::Str("world".to_string()))
+        );
         // The caret (end of "hello world") sits at display col 5 of "world".
         assert_eq!(scene.prop(children[1], "caret"), Some(&PropValue::Int(5)));
         assert!(scene.prop(children[0], "caret").is_none());
@@ -1026,8 +1037,14 @@ mod tests {
         let id = Renderable::from(ta).materialize(&mut scene, root);
         let children = scene.children(id).unwrap();
         assert_eq!(children.len(), 2);
-        assert_eq!(scene.prop(children[0], "text"), Some(&PropValue::Str("3".to_string())));
-        assert_eq!(scene.prop(children[1], "text"), Some(&PropValue::Str("4".to_string())));
+        assert_eq!(
+            scene.prop(children[0], "text"),
+            Some(&PropValue::Str("3".to_string()))
+        );
+        assert_eq!(
+            scene.prop(children[1], "text"),
+            Some(&PropValue::Str("4".to_string()))
+        );
         assert_eq!(scene.prop(children[1], "caret"), Some(&PropValue::Int(1)));
     }
 
@@ -1060,7 +1077,12 @@ mod tests {
         let caret = buffer.cell(3, 2).unwrap();
         assert!(caret.style.modifiers.contains(Modifiers::REVERSED));
         // The first line's cells are not reversed.
-        assert!(!buffer.cell(2, 1).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        assert!(!buffer
+            .cell(2, 1)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::REVERSED));
     }
 
     #[test]

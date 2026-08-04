@@ -14,9 +14,9 @@
 //! [`Key`] set to edits and returns an optional [`KeyAction`] (submit/cancel),
 //! so the app never re-implements cursor movement.
 
+use tern_core::char_width;
 use tern_core::scene::{NodeId, PropValue, Scene};
 use tern_core::style::{Modifiers, Style};
-use tern_core::char_width;
 
 use crate::renderable::{Box, Renderable};
 
@@ -389,7 +389,10 @@ impl Input {
             .nth(self.cursor)
             .map(|(i, _)| i)
             .unwrap_or(self.value.len());
-        self.value[..byte].chars().map(|c| char_width(c) as usize).sum()
+        self.value[..byte]
+            .chars()
+            .map(|c| char_width(c) as usize)
+            .sum()
     }
 
     /// The display-column offset at which the visible content starts, keeping
@@ -630,8 +633,7 @@ mod tests {
 
     #[test]
     fn history_browsing_saves_draft_and_restores() {
-        let mut input = Input::with_value("draft")
-            .history_capacity(10);
+        let mut input = Input::with_value("draft").history_capacity(10);
         input.push_history("first".to_string());
         input.push_history("second".to_string());
 
@@ -742,7 +744,10 @@ mod tests {
         let id: NodeId = Renderable::from(input).materialize(&mut scene, root);
 
         assert_eq!(scene.node(id).unwrap().kind, NodeKind::Box);
-        assert_eq!(scene.node(id).unwrap().props.get("padding"), Some(&PropValue::Int(1)));
+        assert_eq!(
+            scene.node(id).unwrap().props.get("padding"),
+            Some(&PropValue::Int(1))
+        );
         let text_id = scene.children(id).unwrap()[0];
         assert_eq!(
             scene.prop(text_id, "text"),
@@ -767,7 +772,10 @@ mod tests {
         let id = Renderable::from(input).materialize(&mut scene, root);
         let text_id = scene.children(id).unwrap()[0];
         assert_eq!(scene.prop(text_id, "width"), Some(&PropValue::Int(3)));
-        assert_eq!(scene.prop(text_id, "text"), Some(&PropValue::Str("lo".to_string())));
+        assert_eq!(
+            scene.prop(text_id, "text"),
+            Some(&PropValue::Str("lo".to_string()))
+        );
     }
 
     // --- Paint-path tests (through the compositor) -----------------------
@@ -777,26 +785,32 @@ mod tests {
         // A root Input fills the viewport with its 1-cell padding frame; the
         // text leaf lands at (1,1), and the caret (display col 2) paints the
         // reversed block caret over the cell at (3,1).
-        let buffer = crate::compositor::Compositor::new().paint(
-            Input::with_value("ab"),
-            tern_core::Size::new(6, 3),
-        );
+        let buffer = crate::compositor::Compositor::new()
+            .paint(Input::with_value("ab"), tern_core::Size::new(6, 3));
         assert_eq!(buffer.cell(1, 1).unwrap().ch, 'a');
         assert_eq!(buffer.cell(2, 1).unwrap().ch, 'b');
         let caret = buffer.cell(3, 1).unwrap();
         assert_eq!(caret.ch, ' ');
         assert!(caret.style.modifiers.contains(Modifiers::REVERSED));
         // Neighbors are untouched.
-        assert!(!buffer.cell(2, 1).unwrap().style.modifiers.contains(Modifiers::REVERSED));
-        assert!(!buffer.cell(4, 1).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        assert!(!buffer
+            .cell(2, 1)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::REVERSED));
+        assert!(!buffer
+            .cell(4, 1)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::REVERSED));
     }
 
     #[test]
     fn paint_renders_dimmed_placeholder_with_caret_at_head() {
-        let buffer = crate::compositor::Compositor::new().paint(
-            Input::new().placeholder("ask"),
-            tern_core::Size::new(6, 3),
-        );
+        let buffer = crate::compositor::Compositor::new()
+            .paint(Input::new().placeholder("ask"), tern_core::Size::new(6, 3));
         let c = buffer.cell(1, 1).unwrap();
         assert_eq!(c.ch, 'a');
         assert!(c.style.modifiers.contains(Modifiers::DIM));

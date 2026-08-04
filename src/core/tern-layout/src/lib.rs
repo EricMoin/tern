@@ -134,7 +134,10 @@ impl LayoutEngine for TaffyLayoutEngine {
                     width: known.width.unwrap_or(display_width(content) as f32),
                     height: known.height.unwrap_or(1.0),
                 },
-                None => known.unwrap_or(TaffySize { width: 0.0, height: 0.0 }),
+                None => known.unwrap_or(TaffySize {
+                    width: 0.0,
+                    height: 0.0,
+                }),
             },
         );
 
@@ -211,7 +214,9 @@ fn build_node(
     } else {
         node.children
             .iter()
-            .filter_map(|&child| build_node(scene, child, viewport, false, taffy, node_map, text_map))
+            .filter_map(|&child| {
+                build_node(scene, child, viewport, false, taffy, node_map, text_map)
+            })
             .collect()
     };
 
@@ -314,10 +319,18 @@ fn props_to_style(props: &PropMap) -> TaffyStyle {
     // Inset edges for `position: absolute` (and relative, where they offset
     // the laid-out position). Unset edges stay `Auto`.
     let inset = TaffyRect {
-        top: prop_number(props, "top").map(length_auto).unwrap_or(LengthPercentageAuto::Auto),
-        right: prop_number(props, "right").map(length_auto).unwrap_or(LengthPercentageAuto::Auto),
-        bottom: prop_number(props, "bottom").map(length_auto).unwrap_or(LengthPercentageAuto::Auto),
-        left: prop_number(props, "left").map(length_auto).unwrap_or(LengthPercentageAuto::Auto),
+        top: prop_number(props, "top")
+            .map(length_auto)
+            .unwrap_or(LengthPercentageAuto::Auto),
+        right: prop_number(props, "right")
+            .map(length_auto)
+            .unwrap_or(LengthPercentageAuto::Auto),
+        bottom: prop_number(props, "bottom")
+            .map(length_auto)
+            .unwrap_or(LengthPercentageAuto::Auto),
+        left: prop_number(props, "left")
+            .map(length_auto)
+            .unwrap_or(LengthPercentageAuto::Auto),
     };
 
     let (padding, border, size) = (
@@ -333,8 +346,14 @@ fn props_to_style(props: &PropMap) -> TaffyStyle {
         align_items,
         align_content,
         gap: TaffySize {
-            width: column_gap.or(gap).map(length).unwrap_or(LengthPercentage::Length(0.0)),
-            height: row_gap.or(gap).map(length).unwrap_or(LengthPercentage::Length(0.0)),
+            width: column_gap
+                .or(gap)
+                .map(length)
+                .unwrap_or(LengthPercentage::Length(0.0)),
+            height: row_gap
+                .or(gap)
+                .map(length)
+                .unwrap_or(LengthPercentage::Length(0.0)),
         },
         padding: match padding {
             Some(p) => taffy::geometry::Rect {
@@ -359,17 +378,27 @@ fn props_to_style(props: &PropMap) -> TaffyStyle {
             height: size.1.map(dimension).unwrap_or(Dimension::Auto),
         },
         min_size: TaffySize {
-            width: prop_number(props, "min_width").map(dimension).unwrap_or(Dimension::Auto),
-            height: prop_number(props, "min_height").map(dimension).unwrap_or(Dimension::Auto),
+            width: prop_number(props, "min_width")
+                .map(dimension)
+                .unwrap_or(Dimension::Auto),
+            height: prop_number(props, "min_height")
+                .map(dimension)
+                .unwrap_or(Dimension::Auto),
         },
         max_size: TaffySize {
-            width: prop_number(props, "max_width").map(dimension).unwrap_or(Dimension::Auto),
-            height: prop_number(props, "max_height").map(dimension).unwrap_or(Dimension::Auto),
+            width: prop_number(props, "max_width")
+                .map(dimension)
+                .unwrap_or(Dimension::Auto),
+            height: prop_number(props, "max_height")
+                .map(dimension)
+                .unwrap_or(Dimension::Auto),
         },
         // The item's initial main-axis size: taffy's flex algorithm grows or
         // shrinks the item from this basis (the pane-side half of a split
         // resize — `dragPanels` in @tern/core sets it as absolute cells).
-        flex_basis: prop_number(props, "flex_basis").map(dimension).unwrap_or(Dimension::Auto),
+        flex_basis: prop_number(props, "flex_basis")
+            .map(dimension)
+            .unwrap_or(Dimension::Auto),
         position,
         inset,
         ..TaffyStyle::default()
@@ -432,7 +461,9 @@ mod tests {
     }
 
     fn add_box(scene: &mut Scene, parent: NodeId) -> NodeId {
-        scene.add_child(parent, NodeKind::Box, CellStyle::new()).expect("add box")
+        scene
+            .add_child(parent, NodeKind::Box, CellStyle::new())
+            .expect("add box")
     }
 
     /// The rect for `id` in the compute result.
@@ -465,7 +496,12 @@ mod tests {
     fn flex_column_stacks_children_vertically() {
         let mut scene = new_scene();
         let root = scene.root_id();
-        set_prop(&mut scene, root, "flex_direction", PropValue::Str("column".into()));
+        set_prop(
+            &mut scene,
+            root,
+            "flex_direction",
+            PropValue::Str("column".into()),
+        );
         let a = add_box(&mut scene, root);
         let b = add_box(&mut scene, root);
         for (id, w, h) in [(a, 40, 20), (b, 40, 20)] {
@@ -524,8 +560,15 @@ mod tests {
         let root = scene.root_id();
         // flex-start alignment keeps the leaf at its measured height of 1
         // instead of stretching to the container height.
-        set_prop(&mut scene, root, "align_items", PropValue::Str("flex-start".into()));
-        let t = scene.add_text(root, "Hello", CellStyle::new()).expect("add text");
+        set_prop(
+            &mut scene,
+            root,
+            "align_items",
+            PropValue::Str("flex-start".into()),
+        );
+        let t = scene
+            .add_text(root, "Hello", CellStyle::new())
+            .expect("add text");
 
         let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 10));
         assert_eq!(rect_of(&out, t), Rect::new(0, 0, 5, 1));
@@ -535,9 +578,16 @@ mod tests {
     fn text_measure_is_multi_width_aware() {
         let mut scene = new_scene();
         let root = scene.root_id();
-        set_prop(&mut scene, root, "align_items", PropValue::Str("flex-start".into()));
+        set_prop(
+            &mut scene,
+            root,
+            "align_items",
+            PropValue::Str("flex-start".into()),
+        );
         // 'コ' is a 2-cell wide char; 'a' is 1 cell -> width 3.
-        let t = scene.add_text(root, "コa", CellStyle::new()).expect("add text");
+        let t = scene
+            .add_text(root, "コa", CellStyle::new())
+            .expect("add text");
 
         let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 10));
         assert_eq!(rect_of(&out, t), Rect::new(0, 0, 3, 1));
@@ -549,12 +599,29 @@ mod tests {
         let root = scene.root_id();
         // flex-start alignment keeps the leaf at its measured height of 1
         // instead of stretching to the container height.
-        set_prop(&mut scene, root, "align_items", PropValue::Str("flex-start".into()));
+        set_prop(
+            &mut scene,
+            root,
+            "align_items",
+            PropValue::Str("flex-start".into()),
+        );
         let s = scene
             .add_child(root, NodeKind::StreamingText, CellStyle::new())
             .expect("add streaming text");
-        assert!(scene.append_span(s, Span { text: "Hello".into(), style: CellStyle::new() }));
-        assert!(scene.append_span(s, Span { text: " world".into(), style: CellStyle::new() }));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "Hello".into(),
+                style: CellStyle::new()
+            }
+        ));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: " world".into(),
+                style: CellStyle::new()
+            }
+        ));
 
         let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 10));
         // "Hello" (5) + " world" (6) -> 11 cells.
@@ -565,13 +632,30 @@ mod tests {
     fn streaming_text_measure_is_multi_width_aware() {
         let mut scene = new_scene();
         let root = scene.root_id();
-        set_prop(&mut scene, root, "align_items", PropValue::Str("flex-start".into()));
+        set_prop(
+            &mut scene,
+            root,
+            "align_items",
+            PropValue::Str("flex-start".into()),
+        );
         let s = scene
             .add_child(root, NodeKind::StreamingText, CellStyle::new())
             .expect("add streaming text");
         // 'コ' is a 2-cell wide char; 'a' is 1 cell -> width 3.
-        assert!(scene.append_span(s, Span { text: "コ".into(), style: CellStyle::new() }));
-        assert!(scene.append_span(s, Span { text: "a".into(), style: CellStyle::new() }));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "コ".into(),
+                style: CellStyle::new()
+            }
+        ));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "a".into(),
+                style: CellStyle::new()
+            }
+        ));
 
         let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 10));
         assert_eq!(rect_of(&out, s), Rect::new(0, 0, 3, 1));
@@ -588,12 +672,23 @@ mod tests {
         let root = scene.root_id();
         set_prop(&mut scene, root, "width", PropValue::Int(5));
         set_prop(&mut scene, root, "height", PropValue::Int(2));
-        set_prop(&mut scene, root, "align_items", PropValue::Str("flex-start".into()));
+        set_prop(
+            &mut scene,
+            root,
+            "align_items",
+            PropValue::Str("flex-start".into()),
+        );
         let s = scene
             .add_child(root, NodeKind::StreamingText, CellStyle::new())
             .expect("add streaming text");
         set_prop(&mut scene, s, "wrap", PropValue::Bool(false));
-        assert!(scene.append_span(s, Span { text: "abc def".into(), style: CellStyle::new() }));
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "abc def".into(),
+                style: CellStyle::new()
+            }
+        ));
 
         let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 50));
         // 7-cell content width ('abc def') in a 5-wide container: the leaf
@@ -659,8 +754,18 @@ mod tests {
             let root = scene.root_id();
             set_prop(&mut scene, root, "width", PropValue::Int(100));
             set_prop(&mut scene, root, "height", PropValue::Int(30));
-            set_prop(&mut scene, root, "align_items", PropValue::Str("flex-start".into()));
-            set_prop(&mut scene, root, "align_content", PropValue::Str(value.into()));
+            set_prop(
+                &mut scene,
+                root,
+                "align_items",
+                PropValue::Str("flex-start".into()),
+            );
+            set_prop(
+                &mut scene,
+                root,
+                "align_content",
+                PropValue::Str(value.into()),
+            );
             let child = add_box(&mut scene, root);
             set_prop(&mut scene, child, "width", PropValue::Int(10));
             set_prop(&mut scene, child, "height", PropValue::Int(10));
@@ -758,18 +863,26 @@ mod tests {
         );
 
         // Unset axes stay Auto.
-        let style =
-            props_to_style(&PropMap::from([("min_width".to_string(), PropValue::Int(5))]));
+        let style = props_to_style(&PropMap::from([(
+            "min_width".to_string(),
+            PropValue::Int(5),
+        )]));
         assert_eq!(style.min_size.width, Dimension::Length(5.0));
         assert_eq!(style.min_size.height, Dimension::Auto);
         let style = props_to_style(&PropMap::new());
         assert_eq!(
             style.min_size,
-            TaffySize { width: Dimension::Auto, height: Dimension::Auto }
+            TaffySize {
+                width: Dimension::Auto,
+                height: Dimension::Auto
+            }
         );
         assert_eq!(
             style.max_size,
-            TaffySize { width: Dimension::Auto, height: Dimension::Auto }
+            TaffySize {
+                width: Dimension::Auto,
+                height: Dimension::Auto
+            }
         );
     }
 
@@ -778,7 +891,12 @@ mod tests {
         let mut scene = new_scene();
         let root = scene.root_id();
         // flex-start keeps children at their explicit heights (no stretch).
-        set_prop(&mut scene, root, "align_items", PropValue::Str("flex-start".into()));
+        set_prop(
+            &mut scene,
+            root,
+            "align_items",
+            PropValue::Str("flex-start".into()),
+        );
 
         // Width 100 clamped down to max_width 20.
         let a = add_box(&mut scene, root);
@@ -861,8 +979,10 @@ mod tests {
         assert_eq!(style.inset.bottom, LengthPercentageAuto::Auto);
         assert_eq!(style.position, Position::Relative);
 
-        let style =
-            props_to_style(&PropMap::from([("position".to_string(), PropValue::Str("relative".into()))]));
+        let style = props_to_style(&PropMap::from([(
+            "position".to_string(),
+            PropValue::Str("relative".into()),
+        )]));
         assert_eq!(style.position, Position::Relative);
         assert_eq!(props_to_style(&PropMap::new()).position, Position::Relative);
     }
@@ -877,9 +997,19 @@ mod tests {
         let parent = add_box(&mut scene, root);
         set_prop(&mut scene, parent, "width", PropValue::Int(50));
         set_prop(&mut scene, parent, "height", PropValue::Int(30));
-        set_prop(&mut scene, parent, "position", PropValue::Str("relative".into()));
+        set_prop(
+            &mut scene,
+            parent,
+            "position",
+            PropValue::Str("relative".into()),
+        );
         let abs = add_box(&mut scene, parent);
-        set_prop(&mut scene, abs, "position", PropValue::Str("absolute".into()));
+        set_prop(
+            &mut scene,
+            abs,
+            "position",
+            PropValue::Str("absolute".into()),
+        );
         set_prop(&mut scene, abs, "top", PropValue::Int(5));
         set_prop(&mut scene, abs, "left", PropValue::Int(3));
         set_prop(&mut scene, abs, "width", PropValue::Int(10));
@@ -904,7 +1034,12 @@ mod tests {
         set_prop(&mut scene, parent, "border", PropValue::Int(1));
         set_prop(&mut scene, parent, "padding", PropValue::Int(2));
         let abs = add_box(&mut scene, parent);
-        set_prop(&mut scene, abs, "position", PropValue::Str("absolute".into()));
+        set_prop(
+            &mut scene,
+            abs,
+            "position",
+            PropValue::Str("absolute".into()),
+        );
         set_prop(&mut scene, abs, "top", PropValue::Int(5));
         set_prop(&mut scene, abs, "left", PropValue::Int(3));
         set_prop(&mut scene, abs, "width", PropValue::Int(10));
@@ -924,7 +1059,12 @@ mod tests {
         set_prop(&mut scene, a, "width", PropValue::Int(10));
         set_prop(&mut scene, a, "height", PropValue::Int(10));
         let abs = add_box(&mut scene, root);
-        set_prop(&mut scene, abs, "position", PropValue::Str("absolute".into()));
+        set_prop(
+            &mut scene,
+            abs,
+            "position",
+            PropValue::Str("absolute".into()),
+        );
         set_prop(&mut scene, abs, "top", PropValue::Int(0));
         set_prop(&mut scene, abs, "left", PropValue::Int(15));
         set_prop(&mut scene, abs, "width", PropValue::Int(10));

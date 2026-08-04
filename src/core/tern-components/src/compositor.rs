@@ -150,9 +150,7 @@ impl Compositor {
                 // Container root: promote its frame to the scene root (which
                 // the layout engine sizes to the viewport), then materialize
                 // its content under the root.
-                let frame = other
-                    .root_box()
-                    .expect("non-text roots carry a root frame");
+                let frame = other.root_box().expect("non-text roots carry a root frame");
                 assert!(
                     scene.update(
                         scene_root,
@@ -328,8 +326,7 @@ impl Compositor {
         // One row shorter for the panels; never below one row so a
         // degenerate 1-row viewport still lays out (it is the strip's own
         // row — a root `StatusBar` keeps working there).
-        let layout_viewport =
-            Size::new(viewport.width, viewport.height.saturating_sub(1).max(1));
+        let layout_viewport = Size::new(viewport.width, viewport.height.saturating_sub(1).max(1));
         let mut rects = scene_absolute_rects(scene, self.layout.compute(scene, layout_viewport));
         // Pin the strip frame to the reserved row and shift its whole subtree
         // by the same delta, so the segments keep their internal geometry.
@@ -420,8 +417,12 @@ fn scene_absolute_rects(scene: &Scene, relative: Vec<(NodeId, Rect)>) -> HashMap
         };
         let origin = match rel.get(&id) {
             Some(r) => {
-                let scene_rect =
-                    Rect::new(r.x + parent_origin.0, r.y + parent_origin.1, r.width, r.height);
+                let scene_rect = Rect::new(
+                    r.x + parent_origin.0,
+                    r.y + parent_origin.1,
+                    r.width,
+                    r.height,
+                );
                 abs.insert(id, scene_rect);
                 (scene_rect.x, scene_rect.y)
             }
@@ -590,9 +591,7 @@ fn paint_text(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer)
             && region.map_y(y) < region.clip.bottom()
             && region.clip.bottom() > region.clip.y
         {
-            let right = rect
-                .right()
-                .min(region.clip.right() + region.scroll_x);
+            let right = rect.right().min(region.clip.right() + region.scroll_x);
             let mut cx = rect.x;
             for ch in content.chars() {
                 if cx >= right || ch == '\n' {
@@ -669,9 +668,7 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &m
     if !wrap_enabled(node) {
         return paint_streaming_text_single_row(stream, rect, region, buffer);
     }
-    let right = rect
-        .right()
-        .min(region.clip.right() + region.scroll_x);
+    let right = rect.right().min(region.clip.right() + region.scroll_x);
     // Content rows pan inside the node's own frame: the last content row that
     // can map into the frame is `rect.bottom() + scroll_y - 1`, so the layout
     // runs rows up to (exclusive) that bound. Rows whose mapped position
@@ -772,9 +769,7 @@ fn paint_streaming_text_single_row(
     region: Region,
     buffer: &mut Buffer,
 ) {
-    let right = rect
-        .right()
-        .min(region.clip.right() + region.scroll_x);
+    let right = rect.right().min(region.clip.right() + region.scroll_x);
     if right <= rect.x {
         return;
     }
@@ -869,13 +864,7 @@ fn measure_wrapped(content: &str, width: u32) -> (u32, u32) {
 /// wrap rule as [`paint_word`]: whole-token wrap when it does not fit the
 /// current row but fits a fresh one, hard char-by-char break when the token is
 /// wider than the whole row.
-fn flush_word(
-    word: &str,
-    width: u32,
-    col: &mut u32,
-    lines: &mut u32,
-    max_col: &mut u32,
-) {
+fn flush_word(word: &str, width: u32, col: &mut u32, lines: &mut u32, max_col: &mut u32) {
     if word.is_empty() {
         return;
     }
@@ -1078,13 +1067,10 @@ mod tests {
         // cannot shrink a text leaf below its min-content width, so 'Hello'
         // overflows the box's right edge (no child clipping in the MVP) and
         // is painted up to the buffer edge.
-        let tree = Box::new(
-            Style::new(),
-            vec![Text::new("Hello", Style::new()).into()],
-        )
-        .width(5)
-        .height(3)
-        .padding(1);
+        let tree = Box::new(Style::new(), vec![Text::new("Hello", Style::new()).into()])
+            .width(5)
+            .height(3)
+            .padding(1);
 
         let rows = render_rows(tree, Size::new(10, 4));
         assert_eq!(rows[0], "          "); // padding row, blank
@@ -1129,7 +1115,11 @@ mod tests {
         let mut scene = Scene::new();
         let root = scene.root_id();
         let b = scene
-            .add_child(root, NodeKind::Box, Style::new().border_style(BorderStyle::Plain))
+            .add_child(
+                root,
+                NodeKind::Box,
+                Style::new().border_style(BorderStyle::Plain),
+            )
             .unwrap();
         scene.set_prop(b, "padding", PropValue::Int(1));
         scene.add_text(b, "ok", Style::new()).unwrap();
@@ -1172,8 +1162,18 @@ mod tests {
         assert_eq!(caret.ch, ' ');
         assert!(caret.style.modifiers.contains(Modifiers::REVERSED));
         // Neighbors are untouched.
-        assert!(!buffer.cell(2, 1).unwrap().style.modifiers.contains(Modifiers::REVERSED));
-        assert!(!buffer.cell(4, 1).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        assert!(!buffer
+            .cell(2, 1)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::REVERSED));
+        assert!(!buffer
+            .cell(4, 1)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::REVERSED));
     }
 
     #[test]
@@ -1212,9 +1212,7 @@ mod tests {
         let mut spinner = Spinner::determinate(4).bar_width(4);
         spinner.set_progress(1);
         let buffer = Compositor::new().paint(spinner, Size::new(8, 1));
-        let row: String = (0..8)
-            .map(|x| buffer.cell(x, 0).unwrap().ch)
-            .collect();
+        let row: String = (0..8).map(|x| buffer.cell(x, 0).unwrap().ch).collect();
         assert_eq!(row, "▓░░░ 25%");
     }
 
@@ -1234,14 +1232,8 @@ mod tests {
         // the right edge (f at col 5, h at col 8 — the free cell plus the
         // strip gap sit between the groups).
         let bar = StatusBar::new(Style::new())
-            .segment(
-                Segment::new("ab", Style::new())
-                    .priority(0),
-            )
-            .segment(
-                Segment::new("cde", Style::new())
-                    .priority(1),
-            )
+            .segment(Segment::new("ab", Style::new()).priority(0))
+            .segment(Segment::new("cde", Style::new()).priority(1))
             .segment(
                 Segment::new("fg", Style::new())
                     .align(SegmentAlign::Right)
@@ -1263,7 +1255,9 @@ mod tests {
 
     #[test]
     fn status_bar_pins_left_and_right_segments_to_the_edges() {
-        let bar = StatusBar::new(Style::new()).left("L", Style::new()).right("R", Style::new());
+        let bar = StatusBar::new(Style::new())
+            .left("L", Style::new())
+            .right("R", Style::new());
         let buffer = Compositor::new().paint(bar, Size::new(20, 1));
         assert_eq!(buffer.cell(0, 0).unwrap().ch, 'L');
         assert_eq!(buffer.cell(19, 0).unwrap().ch, 'R');
@@ -1274,13 +1268,19 @@ mod tests {
         // A root StatusBar is a single-row strip, not a viewport-filling box:
         // it pins to the bottom row of a 20x3 viewport, leaving rows 0-1
         // empty (docs/components.md "StatusBar — Reserved row").
-        let bar = StatusBar::new(Style::new()).left("L", Style::new()).right("R", Style::new());
+        let bar = StatusBar::new(Style::new())
+            .left("L", Style::new())
+            .right("R", Style::new());
         let buffer = Compositor::new().paint(bar, Size::new(20, 3));
         assert_eq!(buffer.cell(0, 2).unwrap().ch, 'L');
         assert_eq!(buffer.cell(19, 2).unwrap().ch, 'R');
         for y in 0..2 {
             for x in 0..20 {
-                assert_eq!(buffer.cell(x, y).unwrap(), &Cell::default(), "({x},{y}) not empty");
+                assert_eq!(
+                    buffer.cell(x, y).unwrap(),
+                    &Cell::default(),
+                    "({x},{y}) not empty"
+                );
             }
         }
     }
@@ -1335,7 +1335,11 @@ mod tests {
             !rows[..7].iter().any(|r| r.contains('L') || r.contains('R')),
             "segments leaked above the reserved row"
         );
-        assert!(!rows[7].contains('▾') && !rows[7].contains("body"), "row7 = {:?}", rows[7]);
+        assert!(
+            !rows[7].contains('▾') && !rows[7].contains("body"),
+            "row7 = {:?}",
+            rows[7]
+        );
     }
 
     #[test]
@@ -1659,7 +1663,11 @@ mod tests {
         let root = scene.root_id();
         // The in-flow box keeps z_index 0 (default); the overlay has 1.
         let flow = scene.children(root).unwrap()[0];
-        assert_eq!(scene.prop(flow, "z_index"), None, "flow box z defaults to 0");
+        assert_eq!(
+            scene.prop(flow, "z_index"),
+            None,
+            "flow box z defaults to 0"
+        );
 
         let buffer = Compositor::new().paint_scene(&scene, Size::new(20, 12));
         // Overlap cell: the overlay wins.
@@ -1844,7 +1852,9 @@ mod tests {
                 style: Style::new(),
             }
         ));
-        let cell = scene.add_text(s, "▼", Style::new()).expect("affordance cell");
+        let cell = scene
+            .add_text(s, "▼", Style::new())
+            .expect("affordance cell");
         scene.set_prop(cell, "position", PropValue::Str("absolute".into()));
         scene.set_prop(cell, "right", PropValue::Int(0));
         scene.set_prop(cell, "top", PropValue::Int(2)); // (clip 2 - 1) + scroll 1
@@ -1868,7 +1878,13 @@ mod tests {
             .expect("stream");
         scene.set_prop(t, "width", PropValue::Int(4));
         scene.set_prop(t, "height", PropValue::Int(1));
-        scene.append_span(t, Span { text: "aaaa".to_string(), style: Style::new() });
+        scene.append_span(
+            t,
+            Span {
+                text: "aaaa".to_string(),
+                style: Style::new(),
+            },
+        );
         let flow = scene.add_text(t, "x", Style::new()).expect("in-flow child");
         scene.set_prop(flow, "position", PropValue::Str("relative".into()));
         let rows = render_scene_rows(&scene, Size::new(4, 1));
@@ -1987,10 +2003,7 @@ mod tests {
             }
         ));
         let mut comp = Compositor::new();
-        assert_eq!(
-            comp.content_size(&scene, s, Size::new(4, 2)),
-            Some((4, 2))
-        );
+        assert_eq!(comp.content_size(&scene, s, Size::new(4, 2)), Some((4, 2)));
 
         // Multi-width: 'コ' (2 cells) + 'abc' wraps to 'コa' / 'bc' at a
         // 3-cell width: width stays 3, height 2.
@@ -2074,7 +2087,10 @@ mod tests {
             Some((2, 1))
         );
         // Missing and display:none nodes have no geometry.
-        assert_eq!(comp.content_size(&scene, NodeId(999), Size::new(20, 12)), None);
+        assert_eq!(
+            comp.content_size(&scene, NodeId(999), Size::new(20, 12)),
+            None
+        );
         scene.set_prop(b, "display", PropValue::Str("none".into()));
         assert_eq!(comp.content_size(&scene, b, Size::new(20, 12)), None);
     }

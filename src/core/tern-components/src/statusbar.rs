@@ -14,9 +14,9 @@
 
 use std::cmp::Reverse;
 
+use tern_core::char_width;
 use tern_core::scene::{NodeId, NodeKind, PropValue, Scene};
 use tern_core::style::Style;
-use tern_core::char_width;
 
 use crate::renderable::{Box, Renderable};
 
@@ -107,13 +107,15 @@ impl StatusBar {
 
     /// Builder: append a centered segment.
     pub fn center(mut self, text: impl Into<String>, style: Style) -> Self {
-        self.segments.push(Segment::new(text, style).align(SegmentAlign::Center));
+        self.segments
+            .push(Segment::new(text, style).align(SegmentAlign::Center));
         self
     }
 
     /// Builder: append a right-aligned segment.
     pub fn right(mut self, text: impl Into<String>, style: Style) -> Self {
-        self.segments.push(Segment::new(text, style).align(SegmentAlign::Right));
+        self.segments
+            .push(Segment::new(text, style).align(SegmentAlign::Right));
         self
     }
 
@@ -205,7 +207,11 @@ impl StatusBar {
         // it. The marker is compositor-consumed (like `z_index` / `wrap`).
         scene.set_prop(parent, "status_bar", PropValue::Bool(true));
         let trimmed = self.trimmed();
-        for align in [SegmentAlign::Left, SegmentAlign::Center, SegmentAlign::Right] {
+        for align in [
+            SegmentAlign::Left,
+            SegmentAlign::Center,
+            SegmentAlign::Right,
+        ] {
             let segs: Vec<&Segment> = trimmed.iter().filter(|s| s.align == align).collect();
             let owned: Vec<Segment> = segs.into_iter().cloned().collect();
             self.materialize_group(scene, parent, &owned);
@@ -348,7 +354,10 @@ mod tests {
                 scene.node(*g).unwrap().props.get("flex_direction"),
                 Some(&PropValue::Str("row".to_string()))
             );
-            assert_eq!(scene.node(*g).unwrap().props.get("gap"), Some(&PropValue::Int(1)));
+            assert_eq!(
+                scene.node(*g).unwrap().props.get("gap"),
+                Some(&PropValue::Int(1))
+            );
         }
         let texts: Vec<&str> = groups
             .iter()
@@ -388,7 +397,9 @@ mod tests {
 
     #[test]
     fn paint_pins_left_and_right_segments_to_the_edges() {
-        let bar = StatusBar::new(Style::new()).left("L", Style::new()).right("R", Style::new());
+        let bar = StatusBar::new(Style::new())
+            .left("L", Style::new())
+            .right("R", Style::new());
         let buffer = crate::compositor::Compositor::new().paint(bar, tern_core::Size::new(20, 1));
         assert_eq!(buffer.cell(0, 0).unwrap().ch, 'L');
         assert_eq!(buffer.cell(19, 0).unwrap().ch, 'R');
