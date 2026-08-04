@@ -94,6 +94,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tern-node-<platform>` optionalDependencies for linux-x64-gnu,
   linux-arm64-gnu, darwin-x64, darwin-arm64, win32-x64-msvc), then
   publishes `@tern/core` / `@tern/react` / `@tern/solid`.
+- **Paste events end to end (crossterm bracketed paste):** the Rust
+  `tern-terminal` backend enables bracketed paste (`EnableBracketedPaste`)
+  and normalizes `CrosstermEvent::Paste` into `TernEvent::Paste(String)`,
+  surfaced to JS as a `"paste"` variant of the `TernEventJs` union carrying
+  `paste: string`. The `@tern/core` `Renderer` gains `onPaste(handler)`
+  (receiving the pasted text string; returns an unsubscribe), and the
+  `renderer.events` async iterable yields `{ type: "paste", paste }`.
+  `FocusManager.routePaste` (the paste counterpart of `routeKey`) dispatches
+  to an explicit node or the active focus, and `useFocus(id, node, onKey,
+  manager?, onPaste?)` registers a paste handler — an element without one
+  never consumes, so the paste falls through to the tree-level handler.
+  `pasteInto(input, text)` inserts at the caret (multi-width aware, returning
+  `{ value, caret }`) and `pasteIntoTextarea(textarea, text)` splits pasted
+  newlines into logical lines (returning `{ lines, row, col }`).
+  `usePaste(handler, { isActive, focusManager })` (`@tern/react`) and
+  `subscribePaste(renderer, handler, { isActive, focusManager })`
+  (`@tern/solid`) route each paste through the `FocusManager` first; a
+  focused `<Input focusId>` / `<Textarea focusId>` auto-pastes via `pasteInto`
+  / `pasteIntoTextarea`, firing `onChange` (an empty paste is a no-op).
+- **`DiffView` side-by-side mode + intra-line highlight:** `mode="side"`
+  renders two aligned columns (old | new) split by a 1-cell gap (mirroring
+  `Panels`), each hunk line one row per column aligned by line pair, with
+  per-column gutters; `inline_highlight` computes a char-level diff on each
+  adjacent add/del pair and renders the changed segments bold + underlined on
+  the line's kind color. Both props are consumed at the factory — they never
+  reach the scene props.
+- **`Table` windowing:** only the visible window `rows[scroll_y, scroll_y +
+  clip_height)` is materialized — a large dataset no longer creates one scene
+  node per row (**windowed rows**; the 10k-row table test asserts a bounded
+  row window). The full dataset stays JS bookkeeping in `tableRegionStates`,
+  and the scroll clamp measures the full content height; `wheelScroll` /
+  `tableKey` refresh the window on scroll.
+- **Streaming scroll-to-bottom affordance:** a manual scroll above the
+  stream tail detaches the follow and stamps `STREAM_AFFORDANCE_CHAR` (`▼`),
+  absolutely positioned at the clip region's bottom-right (paint z-order 2,
+  above the scrollbar leaf); `scrollToBottom(node)` is a one-shot jump to the
+  tail (clamped) that dismisses the affordance without re-attaching the
+  follow — `followTail` is the explicit re-attach.
 
 ## [0.1.0] - 2026-08-02
 
