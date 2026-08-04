@@ -46,6 +46,42 @@ uses a React component tree with `render` + `useApp`/`useInput`;
 `@tern/solid` builds the scene with element factories and mounts it with the
 universal `render`, using `subscribeInput` for input.
 
+### Terminal capabilities, window title, and alt screen
+
+`createRenderer` takes three platform options and exposes the detected
+terminal capabilities:
+
+- `useAltScreen: boolean` (default `true`) — when `false`, the renderer
+  skips the alternate screen: it renders inline in the terminal's main screen
+  and never emits the alternate-screen enter/leave escapes (including
+  teardown). Choose this for output you want to leave on screen after the app
+  exits.
+- `title?: string` — the terminal window title (OSC 0), applied when the
+  renderer is constructed. Change it later with `renderer.setTitle(title)`.
+- `exitOnCtrlC?: boolean` (default `false`) — when `true`, a Ctrl+C press
+  tears the terminal down (raw mode + alternate screen exited) and marks the
+  renderer destroyed instead of being surfaced as an event.
+
+```ts
+const renderer = createRenderer({
+  useAltScreen: false,   // render inline in the main screen
+  title: "tern agent",   // set the window title at construction
+});
+renderer.setTitle("tern agent — running");   // or later, via OSC 0
+```
+
+`renderer.capabilities` reports the color support the native backend detected
+once at startup: `{ truecolor, colors }` — whether 24-bit RGB is supported and
+the palette size (`16_777_216` for truecolor, `256`, `16`, or `0`). RGB cells
+are quantized to the nearest ANSI 256-color index (`rgb_to_ansi256`, the 6×6×6
+cube + grayscale ramp) when truecolor is unsupported, so scenes stay legible on
+256-color terminals:
+
+```ts
+const { truecolor, colors } = renderer.capabilities;
+if (!truecolor) console.log(`painting for a ${colors}-color terminal`);
+```
+
 ## Component overview
 
 Every widget exists in three forms, all producing the same scene node
@@ -64,6 +100,8 @@ structure:
 | Select | `<Select options multi value ... focusId />` | `Select(props)` + `selectKey` | Filterable option list, multi-select, floating overlay |
 | ScrollView | `<ScrollView clip_* scroll_* showScrollbar>` | `ScrollView(props)` + `scrollTo`/`scrollBy`/`scrollTop` | Clip/scroll region with optional scrollbar |
 | Table | `<Table columns rows scroll_x scroll_y highlight sticky_header clip_height />` | `Table(props)` + `tableKey`/`visibleTableRows` | Sticky-header data table with per-column alignment, highlight/scroll, and windowed rows |
+| Tabs | `<Tabs tabs active closable focusId onChange onClose />` | `Tabs(props)` + `tabsKey`/`activateTab`/`closeTab` | Tab bar + content region with focus-driven key routing |
+| Progress | `<Progress value max ratio label show_percentage width />` | `Progress(props)` + `setProgress` | Framed progress gauge with label and percentage readout |
 | Textarea | `<Textarea lines row col width height focusId onChange onSubmit />` | `Textarea(props)` + `editTextareaKey` | Multi-line text editor with soft wrap, scroll-to-caret, line splitting, focused auto-paste |
 | Modal | `<Modal open backdrop z_index content />` | `Modal(props)` + `openModal`/`closeModal` | Full-bleed dimmed overlay with centered content and focus isolation |
 
@@ -119,6 +157,50 @@ and `Table` in `@tern/solid` materialize the same factory.
 `scroll_x` on the root pans the header and rows together (columns stay
 aligned); `scroll_y` pans only the content region, so the sticky header does
 not scroll. `clip_height` sets the content viewport.
+
+### Tabs
+
+`Tabs(props)` (core) builds a flex column: a tab bar row — one `Text` leaf
+per tab; the active tab is painted with the theme `primary` palette colors
+and reversed, its label prefixed with a top-border marker (`▔`); closable
+tabs carry the close glyph (`×`) — plus a content region box holding the
+active tab's content nodes. The tab list is JS bookkeeping on the node props
+(never scene props).
+
+- `TabsProps` — `tabs: TabSpec[]`, `active?` (default `0`), `closable?`
+  (default `false`).
+- `TabSpec` — `label: string`, `content: Node[]`, `closable?`.
+- `TabsState` — `{ active, count }` (reported by `tabsKey` and the host
+  components' `onChange` / `onClose`).
+- `activateTab(tabs, index)` — switch the active tab (clamped to the list).
+- `closeTab(tabs, index)` — close a tab (the active index re-clamps).
+- `tabsKey(tabs, event)` — `left` / `right` move the active tab (clamped);
+  `ctrl+tab` / `ctrl+shift+tab` wrap to next / previous; `ctrl+w` closes the
+  active tab. Returns `{ active, count }`.
+
+`<Tabs>` in `@tern/react` adds `focusId` / `focusManager` / `onChange` /
+`onClose`; `Tabs` in `@tern/solid` is the same factory, registered with a
+`FocusManager` and disposed via `disposeTabsFocus(node)`. No new napi node
+kind — the element materializes as a `box`.
+
+### Progress
+
+`Progress(props)` (core) builds a framed box (ratatui Gauge parity; the frame
+defaults to `border_style: "plain"`, height 1): an in-flow fill leaf
+(`▓` × ceil(value/max × inner width), `░` for the rest), an optional dimmed
+label leaf left-aligned inside the bar area (composed only when it fits
+alongside the readout), and an optional percentage readout
+(`ceil(value/max×100)%`) right-aligned — the label and readout are absolutely
+positioned overlays.
+
+- `ProgressProps` — `value?` (default `0`), `max?` (default `100`), `ratio?`
+  (0..1, wins over `value`/`max`), `label?`, `show_percentage?` (default
+  `true`), `width?` (the outer width in cells including the frame, default
+  `20`).
+- `setProgress(node, value, max?)` — repaint a live bar in place (no rebuild).
+
+`<Progress>` in `@tern/react` resolves the `progress` component theme preset;
+`Progress` in `@tern/solid` re-exports `setProgress`.
 
 ### DiffView
 
@@ -354,6 +436,45 @@ const view = ScrollView({ width: 60, height: 10, clip_height: 10 });
 view.addChild(Text({ text: log }));
 subscribeWheelScroll(renderer, view);   // returns a disposer
 subscribeClickFocus(renderer);          // click-to-focus, per app
+```
+
+### Focus traversal
+
+Tab / Shift+Tab move focus across the registered elements — the standard TUI
+traversal. The traversal hooks handle the keys *ahead of* focused-element
+routing (a bare Tab / Shift+Tab always moves focus), skip the ids in
+`exclude`, move the manager (`next()` / `prev()`), and re-render after each
+move.
+
+```tsx
+// @tern/react
+useFocusTraversal({ exclude: ["modal-input"] });
+```
+
+```ts
+// @tern/solid — the renderer is an explicit argument; manager defaults to
+// the core module-level focusManager. Returns a disposer.
+const dispose = subscribeFocusTraversal(renderer, undefined, ["modal-input"]);
+```
+
+### Frame snapshot testing
+
+`renderer.snapshotFrame(width?, height?)` paints the shared scene into a
+fresh buffer (no terminal I/O) and returns one string per row —
+masked/continuation cells are spaces, so every row is exactly `width` display
+columns (multi-width aware). `framesEqual(a, b)` compares two frames (same
+row count + string equality) for golden assertions — the canonical
+rounded-border scene:
+
+```ts
+import { Box, Text, createRenderer, framesEqual } from "@tern/core";
+
+const renderer = createRenderer();
+renderer.root.addChild(Box({ border_style: "rounded", padding: 1 },
+  Text({ text: "Hi" })));
+renderer.render();
+const frame = renderer.snapshotFrame(6, 3);
+framesEqual(frame, ["┌──┐  ", "│Hi│  ", "└──┘  "]); // true
 ```
 
 ## Event model

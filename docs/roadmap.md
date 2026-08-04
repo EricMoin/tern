@@ -204,6 +204,83 @@ grid or `xterm.js`).
 rendering the same scene the terminal shows; `cargo build --target
 wasm32-unknown-unknown` is clean.
 
+## Phase 7 — production completeness ✅ done
+
+**Status:** shipped.
+
+**Goal:** close the production-completeness gaps the roadmap elements exposed:
+terminal capability detection, deterministic buffer-level testing, tabbed
+layouts, keyboard focus traversal, determinate progress, and minimal
+escape-sequence output.
+
+**Context:** the roadmap elements landed as JS compositions over the primitive
+scene kinds; this phase hardens the machinery around them. The backend detects
+the terminal's color support once and quantizes RGB cells to ANSI 256 when
+truecolor is unavailable; the renderer flushes the diff as minimal
+escape-sequence runs; buffer-level frame snapshots make golden testing
+possible without a real terminal; and the widget work fills the two remaining
+roadmap items — Tabs and Progress — plus the Tab / Shift+Tab focus traversal
+that makes keyboard-driven UIs usable.
+
+**Shipped:**
+
+- **Terminal capabilities, window title, alt-screen:** the tern-terminal
+  backend detects color support once (`supports-color`) and exposes it as
+  `Renderer.capabilities` (`{ truecolor, colors }` — 16_777_216 / 256 / 16 /
+  0, defaulting to truecolor when detection is inconclusive); RGB cells
+  quantize to the nearest ANSI 256-color index (`rgb_to_ansi256`: the 6×6×6
+  color cube + grayscale ramp, minimizing squared RGB distance) when truecolor
+  is unsupported instead of emitting a sequence the terminal cannot render;
+  `Renderer.setTitle` sets the terminal window title (OSC 0);
+  `createRenderer({ useAltScreen?, title? })` opts into inline rendering
+  (`useAltScreen: false` skips the alt-screen enter/leave escapes, including
+  teardown) and an initial title.
+- **Frame snapshot testing:** `Renderer.snapshotFrame(width?, height?)` paints
+  the shared scene into a fresh buffer via the native `render_to_buffer` (no
+  terminal I/O) and returns one string per row — masked/continuation cells are
+  spaces, so every row is exactly `width` display columns (multi-width aware);
+  `framesEqual(a, b)` compares two frames (same row count + string equality)
+  for golden assertions.
+- **[Tabs](components.md#tabs) widget:** a `tabs` element (in `@tern/core`)
+  composing a tab bar row — one `Text` leaf per tab, the active tab painted
+  with the theme `primary` palette colors and reversed, its label prefixed
+  with a top-border marker (`▔`), closable tabs carrying the close glyph
+  (`×`) — plus a content region box holding the active tab's content nodes;
+  driven by `activateTab` / `closeTab` / `tabsKey` (`left` / `right` move the
+  active tab, `ctrl+tab` / `ctrl+shift+tab` wrap, `ctrl+w` closes). No new
+  napi node kind (materializes as a `box`).
+- **Focus traversal:** Tab / Shift+Tab wire to the `FocusManager`'s `next()` /
+  `prev()` — `useFocusTraversal({ manager?, exclude? })` in `@tern/react`,
+  `subscribeFocusTraversal(renderer, manager?, exclude?)` in `@tern/solid` —
+  skipping excluded ids, re-rendering after each move, and handling the
+  traversal keys ahead of focused-element routing (bare Tab / Shift+Tab always
+  move focus, standard TUI behavior).
+- **[Progress](components.md#progress) widget:** a `progress` element (ratatui
+  Gauge parity) — a framed single-row gauge (default `border_style: "plain"`)
+  with an in-flow fill leaf (`▓` × ceil(value/max × inner width), `░` for the
+  rest), an optional dimmed label leaf left-aligned inside the bar area
+  (composed only when it fits alongside the readout) and an optional
+  percentage readout (`ceil(value/max×100)%`) right-aligned, both absolute
+  overlays; `ratio` (0..1) drives the bar directly as an alternative to
+  `value`/`max`; `setProgress(node, value, max?)` repaints a live bar in place
+  (no rebuild).
+- **Escape-sequence run batching:** the backend's cell queueing merges
+  consecutive updates that share a style, a row, and adjacent columns into
+  single runs — one `MoveTo` to the run's first cell, one unconditional SGR
+  reset plus the run's exact style applied once, and the run's characters in
+  one `Print` — so a typical frame flushes a handful of runs instead of one
+  sequence per cell. This is an internal property of the frontend, not a
+  user-facing JS API.
+
+**Exit criteria (met):** `Renderer.capabilities` reports the detected palette
+size and RGB cells render correctly on 256-color terminals; `snapshotFrame` /
+`framesEqual` back golden tests in the `@tern/core` suites; `Tabs` and
+`Progress` render and respond to their drivers (`activateTab` / `closeTab` /
+`tabsKey`, `setProgress`) as asserted in the package test suites; Tab /
+Shift+Tab traversal moves focus across registered elements and skips excluded
+ids; the PTY smoke harness still exits 0 (minimal diff runs keep terminal
+output correct).
+
 ## Non-goals for the MVP
 
 - Full widget library (see [components.md](components.md) — most components
@@ -221,3 +298,4 @@ wasm32-unknown-unknown` is clean.
 | 4 — tree-sitter (shipped) | [MarkdownView](components.md#markdownview) code-fence syntax highlighting (shipped — `tern-highlight` + napi `highlight` + `highlightCode`) |
 | 5 — ssh serving | Remote code-agent sessions (agent runs in a server, user attaches) |
 | 6 — wasm preview | Web-embedded agent UIs; shared reconciler across frontends |
+| 7 — production completeness (shipped) | [Tabs](components.md#tabs) / [Progress](components.md#progress) widgets and Tab / Shift+Tab focus traversal — shipped |
