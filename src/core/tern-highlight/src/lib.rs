@@ -293,11 +293,18 @@ mod tests {
             ),
             (Language::JavaScript, "const f = () => 1; // hi\n"),
             (Language::Json, "{\n  \"key\": true,\n  \"n\": 1.5\n}\n"),
-            (Language::Shell, "#!/bin/sh\n# comment\necho \"hello $name\"\n"),
+            (
+                Language::Shell,
+                "#!/bin/sh\n# comment\necho \"hello $name\"\n",
+            ),
         ];
         for (language, source) in cases {
             let spans = highlight(*language, source);
-            assert_eq!(concat(&spans), *source, "span stream must reconstruct source");
+            assert_eq!(
+                concat(&spans),
+                *source,
+                "span stream must reconstruct source"
+            );
         }
     }
 
@@ -305,11 +312,17 @@ mod tests {
     fn fence_names_map_to_languages() {
         assert_eq!(Language::from_fence_name("rust"), Some(Language::Rust));
         assert_eq!(Language::from_fence_name("rs"), Some(Language::Rust));
-        assert_eq!(Language::from_fence_name("typescript"), Some(Language::TypeScript));
+        assert_eq!(
+            Language::from_fence_name("typescript"),
+            Some(Language::TypeScript)
+        );
         assert_eq!(Language::from_fence_name("ts"), Some(Language::TypeScript));
         assert_eq!(Language::from_fence_name("tsx"), Some(Language::Tsx));
         assert_eq!(Language::from_fence_name("json"), Some(Language::Json));
-        assert_eq!(Language::from_fence_name("javascript"), Some(Language::JavaScript));
+        assert_eq!(
+            Language::from_fence_name("javascript"),
+            Some(Language::JavaScript)
+        );
         assert_eq!(Language::from_fence_name("js"), Some(Language::JavaScript));
         assert_eq!(Language::from_fence_name("jsx"), Some(Language::JavaScript));
         assert_eq!(Language::from_fence_name("bash"), Some(Language::Shell));
@@ -352,7 +365,9 @@ mod tests {
 
         // Punctuation carries the default style and merges into its neighbors.
         assert_eq!(concat(&spans), source);
-        assert!(spans.iter().all(|s| s.style == Style::new() || s.style.fg != Color::Default));
+        assert!(spans
+            .iter()
+            .all(|s| s.style == Style::new() || s.style.fg != Color::Default));
         let _ = string;
     }
 
@@ -458,19 +473,31 @@ mod tests {
 
         // Row 0: `fn main() {` — fn keyword purple, main function blue.
         assert_eq!(buffer.cell(0, 0).unwrap().ch, 'f');
-        assert_eq!(buffer.cell(0, 0).unwrap().style.fg, Color::Rgb(198, 120, 221));
+        assert_eq!(
+            buffer.cell(0, 0).unwrap().style.fg,
+            Color::Rgb(198, 120, 221)
+        );
         assert_eq!(buffer.cell(1, 0).unwrap().ch, 'n');
         assert_eq!(buffer.cell(3, 0).unwrap().ch, 'm');
-        assert_eq!(buffer.cell(3, 0).unwrap().style.fg, Color::Rgb(97, 175, 239));
+        assert_eq!(
+            buffer.cell(3, 0).unwrap().style.fg,
+            Color::Rgb(97, 175, 239)
+        );
         // Punctuation `(` / `)` / `{` carry the default style.
         assert_eq!(buffer.cell(7, 0).unwrap().style.fg, Color::Default);
         assert_eq!(buffer.cell(9, 0).unwrap().style.fg, Color::Default);
 
         // Row 1: `    let x = 42;` — `let` keyword purple, `42` number orange.
         assert_eq!(buffer.cell(4, 1).unwrap().ch, 'l');
-        assert_eq!(buffer.cell(4, 1).unwrap().style.fg, Color::Rgb(198, 120, 221));
+        assert_eq!(
+            buffer.cell(4, 1).unwrap().style.fg,
+            Color::Rgb(198, 120, 221)
+        );
         assert_eq!(buffer.cell(12, 1).unwrap().ch, '4');
-        assert_eq!(buffer.cell(12, 1).unwrap().style.fg, Color::Rgb(209, 154, 102));
+        assert_eq!(
+            buffer.cell(12, 1).unwrap().style.fg,
+            Color::Rgb(209, 154, 102)
+        );
 
         // The trailing comment `// the answer` is italic grey.
         let comment_start = buffer.cell(16, 1).unwrap();
@@ -480,7 +507,10 @@ mod tests {
 
         // Row 2: the string literal is green.
         assert_eq!(buffer.cell(13, 2).unwrap().ch, '"');
-        assert_eq!(buffer.cell(13, 2).unwrap().style.fg, Color::Rgb(152, 195, 121));
+        assert_eq!(
+            buffer.cell(13, 2).unwrap().style.fg,
+            Color::Rgb(152, 195, 121)
+        );
 
         // Golden: the full painted buffer equals the expected cell grid with
         // pinned styles (glyphs for rows 0-2, blank beyond).
@@ -491,12 +521,7 @@ mod tests {
                 buf.set_char(x as u16, y, ch, style);
             }
         };
-        pin(
-            &mut expected,
-            0,
-            "fn main() {",
-            default,
-        );
+        pin(&mut expected, 0, "fn main() {", default);
         // fn (keyword), main (function) — write the pinned styles cell by cell.
         for x in 0..2 {
             expected.set_char(x, 0, "fn".chars().nth(x as usize).unwrap(), fg(KEYWORD_FG));
@@ -516,7 +541,12 @@ mod tests {
         expected.set_char(12, 1, '4', fg(NUMBER_FG));
         expected.set_char(13, 1, '2', fg(NUMBER_FG));
         for (i, ch) in "// the answer".chars().enumerate() {
-            expected.set_char(16 + i as u16, 1, ch, fg(COMMENT_FG).add_modifier(Modifiers::ITALIC));
+            expected.set_char(
+                16 + i as u16,
+                1,
+                ch,
+                fg(COMMENT_FG).add_modifier(Modifiers::ITALIC),
+            );
         }
         pin(&mut expected, 2, "    println!(\"ok\");", default);
         for (i, ch) in "println!".chars().enumerate() {

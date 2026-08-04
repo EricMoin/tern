@@ -35,6 +35,6 @@ pub use compositor::Compositor;
 pub use input::{Input, Key, KeyAction};
 pub use panels::{Panel, Panels};
 pub use renderable::{Box, Renderable, Text};
-pub use spinner::{BRAILLE_FRAMES, LINE_FRAMES, Spinner, SpinnerKind};
+pub use spinner::{Spinner, SpinnerKind, BRAILLE_FRAMES, LINE_FRAMES};
 pub use statusbar::{Segment, SegmentAlign, StatusBar};
 pub use textarea::{wrap_line, Textarea};

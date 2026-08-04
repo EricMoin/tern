@@ -196,11 +196,7 @@ impl Backend {
     /// See [`flush_diff_to`] for the queueing semantics. This legacy variant
     /// parks the caret without touching its visibility; the caret-aware frame
     /// flush is [`flush_diff_with_cursor`](Backend::flush_diff_with_cursor).
-    pub fn flush_diff(
-        &self,
-        updates: &[CellUpdate],
-        cursor_pos: (u16, u16),
-    ) -> io::Result<()> {
+    pub fn flush_diff(&self, updates: &[CellUpdate], cursor_pos: (u16, u16)) -> io::Result<()> {
         let mut out = io::stdout();
         flush_diff_to(&mut out, updates, cursor_pos)
     }
@@ -210,11 +206,7 @@ impl Backend {
     /// [`Cursor::visible`].
     ///
     /// See [`flush_diff_with_cursor_to`] for the queueing semantics.
-    pub fn flush_diff_with_cursor(
-        &self,
-        updates: &[CellUpdate],
-        cursor: Cursor,
-    ) -> io::Result<()> {
+    pub fn flush_diff_with_cursor(&self, updates: &[CellUpdate], cursor: Cursor) -> io::Result<()> {
         let mut out = io::stdout();
         flush_diff_with_cursor_to(&mut out, updates, cursor)
     }
@@ -608,8 +600,7 @@ mod tests {
         // (?1003h), rxvt (?1015h), sgr (?1006h); then focus change (?1004h)
         // and bracketed paste (?2004h).
         assert_eq!(
-            s,
-            "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h\x1b[?1004h\x1b[?2004h",
+            s, "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h\x1b[?1004h\x1b[?2004h",
             "got: {s:?}"
         );
     }
@@ -622,8 +613,7 @@ mod tests {
         // The inverse of enable, in reverse order; focus change (?1004l)
         // next, then bracketed paste (?2004l), then the mouse modes back off.
         assert_eq!(
-            s,
-            "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1004l\x1b[?2004l",
+            s, "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1004l\x1b[?2004l",
             "got: {s:?}"
         );
     }
@@ -660,7 +650,10 @@ mod tests {
         // + one SGR reset + one color command + the character, in column
         // order. Rgb(1, 2, 3) hits the truecolor path under the test default.
         assert!(s.contains("\x1b[1;1H\x1b[0m\x1b[38;5;1ma"), "got: {s:?}"); // fg palette 1
-        assert!(s.contains("\x1b[1;2H\x1b[0m\x1b[38;2;1;2;3mb"), "got: {s:?}"); // fg truecolor
+        assert!(
+            s.contains("\x1b[1;2H\x1b[0m\x1b[38;2;1;2;3mb"),
+            "got: {s:?}"
+        ); // fg truecolor
         assert!(s.contains("\x1b[1;3H\x1b[0m\x1b[48;5;4mc"), "got: {s:?}"); // bg palette 4
     }
 
@@ -668,7 +661,13 @@ mod tests {
     fn flush_diff_applies_modifiers() {
         let bold = Style::new().add_modifier(Modifiers::BOLD);
         let dim = Style::new().add_modifier(Modifiers::DIM);
-        let out = flush(&[update(0, 0, 'a', bold, 1, false), update(1, 0, 'b', dim, 1, false)], (0, 0));
+        let out = flush(
+            &[
+                update(0, 0, 'a', bold, 1, false),
+                update(1, 0, 'b', dim, 1, false),
+            ],
+            (0, 0),
+        );
         let s = String::from_utf8(out).unwrap();
         // Bold and dim differ, so the adjacent cells split into two runs,
         // each applying its own modifier once.
@@ -712,11 +711,7 @@ mod tests {
         assert!(!s.contains("a\x1b[0m"), "got: {s:?}");
         // The full frame: run (MoveTo + one SGR + "ab"), then the cursor
         // park with its two trailing resets.
-        assert_eq!(
-            s,
-            "\x1b[1;1H\x1b[0mab\x1b[1;1H\x1b[0m\x1b[0m",
-            "got: {s:?}"
-        );
+        assert_eq!(s, "\x1b[1;1H\x1b[0mab\x1b[1;1H\x1b[0m\x1b[0m", "got: {s:?}");
     }
 
     #[test]
@@ -739,14 +734,14 @@ mod tests {
         let wide = flush(
             &[
                 update(0, 0, 'コ', Style::new(), 2, false), // wide lead
-                update(1, 0, '\0', Style::new(), 0, true), // its mask
+                update(1, 0, '\0', Style::new(), 0, true),  // its mask
                 update(2, 0, 'x', Style::new(), 1, false),
             ],
             (0, 0),
         );
         let s = String::from_utf8(wide).unwrap();
         assert!(s.contains("\x1b[1;1H\x1b[0mコ"), "got: {s:?}"); // lead run
-        // Mask and 'x' share one run at the mask's column: " x".
+                                                                 // Mask and 'x' share one run at the mask's column: " x".
         assert!(s.contains("\x1b[1;2H\x1b[0m x"), "got: {s:?}");
     }
 
@@ -789,8 +784,7 @@ mod tests {
         // ...then the caret: MoveTo(5, 4) -> row 5, column 6, then Show,
         // then the trailing style resets.
         assert_eq!(
-            s,
-            "\x1b[1;1H\x1b[0mx\x1b[5;6H\x1b[?25h\x1b[0m\x1b[0m",
+            s, "\x1b[1;1H\x1b[0mx\x1b[5;6H\x1b[?25h\x1b[0m\x1b[0m",
             "got: {s:?}"
         );
     }
@@ -806,8 +800,7 @@ mod tests {
         // still moves (MoveTo(2, 2) -> row 3, column 3) but hides instead of
         // showing, then the trailing style resets.
         assert_eq!(
-            s,
-            "\x1b[1;2H\x1b[0my\x1b[3;3H\x1b[?25l\x1b[0m\x1b[0m",
+            s, "\x1b[1;2H\x1b[0my\x1b[3;3H\x1b[?25l\x1b[0m\x1b[0m",
             "got: {s:?}"
         );
     }
@@ -829,8 +822,12 @@ mod tests {
     #[test]
     fn queue_color_keeps_rgb_when_truecolor_supported() {
         let mut out = Vec::new();
-        let caps = BackendCapabilities { truecolor: true, colors: 16_777_216 };
-        queue_color_with(&mut out, TernColor::Rgb(1, 2, 3), true, caps).expect("queue should succeed");
+        let caps = BackendCapabilities {
+            truecolor: true,
+            colors: 16_777_216,
+        };
+        queue_color_with(&mut out, TernColor::Rgb(1, 2, 3), true, caps)
+            .expect("queue should succeed");
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s, "\x1b[38;2;1;2;3m", "got: {s:?}");
     }
@@ -840,12 +837,17 @@ mod tests {
         let mut out = Vec::new();
         // 256-color terminal: the RGB is quantized to the nearest palette
         // index instead of an unsupported truecolor sequence.
-        let caps = BackendCapabilities { truecolor: false, colors: 256 };
-        queue_color_with(&mut out, TernColor::Rgb(255, 0, 0), true, caps).expect("queue should succeed");
+        let caps = BackendCapabilities {
+            truecolor: false,
+            colors: 256,
+        };
+        queue_color_with(&mut out, TernColor::Rgb(255, 0, 0), true, caps)
+            .expect("queue should succeed");
         assert_eq!(String::from_utf8(out).unwrap(), "\x1b[38;5;196m");
         // Background variant goes through the background SGR.
         let mut out = Vec::new();
-        queue_color_with(&mut out, TernColor::Rgb(128, 128, 128), false, caps).expect("queue should succeed");
+        queue_color_with(&mut out, TernColor::Rgb(128, 128, 128), false, caps)
+            .expect("queue should succeed");
         assert_eq!(String::from_utf8(out).unwrap(), "\x1b[48;5;244m");
     }
 
@@ -854,8 +856,12 @@ mod tests {
         // A basic-16-color terminal: no SGR color command at all — the
         // per-cell reset's default stays.
         let mut out = Vec::new();
-        let caps = BackendCapabilities { truecolor: false, colors: 16 };
-        queue_color_with(&mut out, TernColor::Rgb(255, 0, 0), true, caps).expect("queue should succeed");
+        let caps = BackendCapabilities {
+            truecolor: false,
+            colors: 16,
+        };
+        queue_color_with(&mut out, TernColor::Rgb(255, 0, 0), true, caps)
+            .expect("queue should succeed");
         assert!(out.is_empty(), "got: {:?}", out);
     }
 

@@ -48,9 +48,9 @@
 //! pull path, for hosts that cannot host a napi JS thread).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(feature = "push-events")]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(feature = "poll-fallback")]
 use std::time::Duration;
 
@@ -66,13 +66,13 @@ use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene, Span};
 use tern_core::style::{BorderStyle, Modifiers, Style};
 use tern_core::{Color, Size};
 use tern_terminal::backend::Backend;
-#[cfg(feature = "push-events")]
-use tern_terminal::event::{spawn_event_loop, EventLoopHandle};
 #[cfg(feature = "poll-fallback")]
 use tern_terminal::event as event_module;
+use tern_terminal::event::KeyName;
+#[cfg(feature = "push-events")]
+use tern_terminal::event::{spawn_event_loop, EventLoopHandle};
 #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
 use tern_terminal::event::{MouseButton, MouseEventKind, TernEvent, TernKey, TernMouse};
-use tern_terminal::event::KeyName;
 
 /// The one module-global scene tree. Both node construction and rendering
 /// operate on it (see module docs for the ownership rationale).
@@ -408,9 +408,7 @@ impl TuiRenderer {
             if use_alt_screen {
                 let _ = backend.exit_alt_screen();
             }
-            return Err(Error::from_reason(format!(
-                "enter alternate screen: {e}"
-            )));
+            return Err(Error::from_reason(format!("enter alternate screen: {e}")));
         }
         Ok(Self {
             inner: Arc::new(Mutex::new(RendererInner {
@@ -479,9 +477,7 @@ impl TuiRenderer {
             .map_err(|e| Error::from_reason(format!("terminal size: {e}")))?;
         // Remember the viewport for `NodeHandle.content_size`, so its layout
         // matches the geometry that was just painted.
-        *shared_viewport_ref()
-            .lock()
-            .expect("viewport poisoned") = (w as u32, h as u32);
+        *shared_viewport_ref().lock().expect("viewport poisoned") = (w as u32, h as u32);
         let viewport = Size::new(w, h);
         let scene = inner.scene.clone();
         let buffer = {
@@ -514,9 +510,7 @@ impl TuiRenderer {
         if inner.destroyed {
             return Err(Error::from_reason("renderer is destroyed"));
         }
-        let (vw, vh) = *shared_viewport_ref()
-            .lock()
-            .expect("viewport poisoned");
+        let (vw, vh) = *shared_viewport_ref().lock().expect("viewport poisoned");
         let viewport = Size::new(
             width.map(|w| w as u16).unwrap_or(vw as u16),
             height.map(|h| h as u16).unwrap_or(vh as u16),
@@ -556,7 +550,10 @@ impl TuiRenderer {
     /// `exit_on_ctrl_c`).
     #[napi(getter, js_name = "destroyed")]
     pub fn destroyed(&self) -> bool {
-        self.inner.lock().expect("renderer inner poisoned").destroyed
+        self.inner
+            .lock()
+            .expect("renderer inner poisoned")
+            .destroyed
     }
 
     /// The terminal's color capabilities (`{ truecolor, colors }`), detected
@@ -627,11 +624,8 @@ impl TuiRenderer {
                     loop_stop.store(true, Ordering::Relaxed);
                 }
             };
-            let teardown = push_event_batch(
-                std::slice::from_ref(&event),
-                exit_on_ctrl_c,
-                &mut push,
-            );
+            let teardown =
+                push_event_batch(std::slice::from_ref(&event), exit_on_ctrl_c, &mut push);
             if teardown {
                 // Ctrl+C with exit_on_ctrl_c: restore the terminal and mark
                 // the renderer destroyed, exactly like the pull path did.
@@ -790,7 +784,11 @@ impl NodeHandle {
             if child_inner.id.is_some() {
                 return Err(Error::from_reason("child node already has a parent"));
             }
-            (child_inner.kind, child_inner.style, child_inner.props.clone())
+            (
+                child_inner.kind,
+                child_inner.style,
+                child_inner.props.clone(),
+            )
         };
         let anchor_id = {
             let anchor_inner = anchor.inner.lock().expect("node inner poisoned");
@@ -798,7 +796,9 @@ impl NodeHandle {
                 .id
                 .ok_or_else(|| Error::from_reason("anchor node is not attached to a scene"))?;
             if !Arc::ptr_eq(&anchor_inner.scene, &parent_scene) {
-                return Err(Error::from_reason("anchor node is not a child of this node"));
+                return Err(Error::from_reason(
+                    "anchor node is not a child of this node",
+                ));
             }
             id
         };
@@ -908,9 +908,7 @@ impl NodeHandle {
         let Some(id) = inner.id else {
             return Err(Error::from_reason("node is not attached to a scene"));
         };
-        let (w, h) = *shared_viewport_ref()
-            .lock()
-            .expect("viewport poisoned");
+        let (w, h) = *shared_viewport_ref().lock().expect("viewport poisoned");
         let mut compositor = Compositor::new();
         let size = {
             let scene = inner.scene.lock().expect("scene poisoned");
@@ -918,7 +916,10 @@ impl NodeHandle {
         };
         Ok(match size {
             Some((width, height)) => ContentSize { width, height },
-            None => ContentSize { width: 0, height: 0 },
+            None => ContentSize {
+                width: 0,
+                height: 0,
+            },
         })
     }
 }
@@ -1280,14 +1281,8 @@ mod tests {
         );
         assert_eq!(encode(MouseEventKind::Up(MouseButton::Left)), "up_left");
         assert_eq!(encode(MouseEventKind::Up(MouseButton::Right)), "up_right");
-        assert_eq!(
-            encode(MouseEventKind::Up(MouseButton::Middle)),
-            "up_middle"
-        );
-        assert_eq!(
-            encode(MouseEventKind::Drag(MouseButton::Left)),
-            "drag_left"
-        );
+        assert_eq!(encode(MouseEventKind::Up(MouseButton::Middle)), "up_middle");
+        assert_eq!(encode(MouseEventKind::Drag(MouseButton::Left)), "drag_left");
         assert_eq!(
             encode(MouseEventKind::Drag(MouseButton::Right)),
             "drag_right"
@@ -1333,8 +1328,11 @@ mod tests {
     fn highlight_returns_styled_spans_for_rust() {
         // The full source is reconstructed by the span stream, with the token
         // styles surfaced as hex fg + modifiers (the JS span style keys).
-        let spans = highlight("rust".to_string(), "fn main() {\n    let x = 42; // hi\n}\n".to_string())
-            .expect("rust highlight succeeds");
+        let spans = highlight(
+            "rust".to_string(),
+            "fn main() {\n    let x = 42; // hi\n}\n".to_string(),
+        )
+        .expect("rust highlight succeeds");
         let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(joined, "fn main() {\n    let x = 42; // hi\n}\n");
 
@@ -1343,14 +1341,18 @@ mod tests {
         assert!(!keyword.italic);
         let number = spans.iter().find(|s| s.text == "42").expect("42 span");
         assert_eq!(number.fg.as_deref(), Some("#d19a66"));
-        let comment = spans.iter().find(|s| s.text == "// hi").expect("comment span");
+        let comment = spans
+            .iter()
+            .find(|s| s.text == "// hi")
+            .expect("comment span");
         assert_eq!(comment.fg.as_deref(), Some("#7f848e"));
         assert!(comment.italic);
     }
 
     #[test]
     fn highlight_errors_on_unknown_language() {
-        let err = highlight("ruby".to_string(), "x".to_string()).expect_err("unknown language errors");
+        let err =
+            highlight("ruby".to_string(), "x".to_string()).expect_err("unknown language errors");
         assert!(err.to_string().contains("unknown highlight language"));
     }
 
@@ -1398,12 +1400,18 @@ mod tests {
             json_to_prop_value(serde_json::json!("x")),
             Some(PropValue::Str("x".to_string()))
         );
-        assert_eq!(json_to_prop_value(serde_json::json!(7)), Some(PropValue::Int(7)));
+        assert_eq!(
+            json_to_prop_value(serde_json::json!(7)),
+            Some(PropValue::Int(7))
+        );
         assert_eq!(
             json_to_prop_value(serde_json::json!(1.5)),
             Some(PropValue::Float(1.5))
         );
-        assert_eq!(json_to_prop_value(serde_json::json!(true)), Some(PropValue::Bool(true)));
+        assert_eq!(
+            json_to_prop_value(serde_json::json!(true)),
+            Some(PropValue::Bool(true))
+        );
         assert_eq!(json_to_prop_value(serde_json::json!(null)), None);
         assert_eq!(json_to_prop_value(serde_json::json!([1, 2])), None);
     }
@@ -1411,7 +1419,10 @@ mod tests {
     #[test]
     fn create_node_accepts_streaming_text_type() {
         let node = create_node("streaming_text".to_string(), None).expect("create streaming node");
-        assert_eq!(node.inner.lock().expect("node inner poisoned").kind, NodeKind::StreamingText);
+        assert_eq!(
+            node.inner.lock().expect("node inner poisoned").kind,
+            NodeKind::StreamingText
+        );
     }
 
     #[test]
@@ -1444,7 +1455,9 @@ mod tests {
             )
             .expect("add box");
         scene.set_prop(box_id, "padding", PropValue::Int(1));
-        scene.add_text(box_id, "Hi", Style::new()).expect("add text");
+        scene
+            .add_text(box_id, "Hi", Style::new())
+            .expect("add text");
 
         let rows = paint_scene_rows(&scene, Size::new(6, 3));
         assert_eq!(rows, vec!["┌──┐  ", "│Hi│  ", "└──┘  "]);
@@ -1536,7 +1549,8 @@ mod tests {
             PropMap::new(),
         );
         node.append_span("a".to_string(), None).expect("first span");
-        node.append_span("b".to_string(), None).expect("second span");
+        node.append_span("b".to_string(), None)
+            .expect("second span");
         let s = scene.lock().expect("scene poisoned");
         let texts: Vec<&str> = s
             .stream(id)
@@ -1604,8 +1618,13 @@ mod tests {
     fn insert_before_lands_at_anchor_index() {
         let scene = Arc::new(Mutex::new(Scene::new()));
         let root_id = scene.lock().expect("scene poisoned").root_id();
-        let root =
-            NodeHandle::materialized(scene.clone(), root_id, NodeKind::Root, Style::new(), PropMap::new());
+        let root = NodeHandle::materialized(
+            scene.clone(),
+            root_id,
+            NodeKind::Root,
+            Style::new(),
+            PropMap::new(),
+        );
 
         let a = root.add_child(&text_template()).expect("add a");
         let b = root.add_child(&text_template()).expect("add b");
@@ -1621,7 +1640,12 @@ mod tests {
             .expect("insert before first");
         assert_eq!(
             child_ids(&scene, &root),
-            vec![attached_id(&x), attached_id(&a), attached_id(&b), attached_id(&c)]
+            vec![
+                attached_id(&x),
+                attached_id(&a),
+                attached_id(&b),
+                attached_id(&c)
+            ]
         );
 
         // Before the middle child.
@@ -1630,7 +1654,13 @@ mod tests {
             .expect("insert before middle");
         assert_eq!(
             child_ids(&scene, &root),
-            vec![attached_id(&x), attached_id(&a), attached_id(&y), attached_id(&b), attached_id(&c)]
+            vec![
+                attached_id(&x),
+                attached_id(&a),
+                attached_id(&y),
+                attached_id(&b),
+                attached_id(&c)
+            ]
         );
 
         // Before the last child (c sits at index 4 of [x, a, y, b, c]).
@@ -1661,13 +1691,21 @@ mod tests {
     fn insert_before_binds_child_like_add_child() {
         let scene = Arc::new(Mutex::new(Scene::new()));
         let root_id = scene.lock().expect("scene poisoned").root_id();
-        let root =
-            NodeHandle::materialized(scene.clone(), root_id, NodeKind::Root, Style::new(), PropMap::new());
+        let root = NodeHandle::materialized(
+            scene.clone(),
+            root_id,
+            NodeKind::Root,
+            Style::new(),
+            PropMap::new(),
+        );
 
         let anchor = root.add_child(&text_template()).expect("add anchor");
         let child = create_node(
             "box".to_string(),
-            Some(HashMap::from([("text".to_string(), serde_json::json!("hi"))])),
+            Some(HashMap::from([(
+                "text".to_string(),
+                serde_json::json!("hi"),
+            )])),
         )
         .expect("create child with props");
         let bound = root.insert_before(&child, &anchor).expect("insert before");
@@ -1704,8 +1742,13 @@ mod tests {
     fn insert_before_rejects_child_with_parent() {
         let scene = Arc::new(Mutex::new(Scene::new()));
         let root_id = scene.lock().expect("scene poisoned").root_id();
-        let root =
-            NodeHandle::materialized(scene.clone(), root_id, NodeKind::Root, Style::new(), PropMap::new());
+        let root = NodeHandle::materialized(
+            scene.clone(),
+            root_id,
+            NodeKind::Root,
+            Style::new(),
+            PropMap::new(),
+        );
 
         let a = root.add_child(&text_template()).expect("add a");
         let b = root.add_child(&text_template()).expect("add b");
@@ -1726,8 +1769,13 @@ mod tests {
     fn insert_before_rejects_detached_anchor() {
         let scene = Arc::new(Mutex::new(Scene::new()));
         let root_id = scene.lock().expect("scene poisoned").root_id();
-        let root =
-            NodeHandle::materialized(scene.clone(), root_id, NodeKind::Root, Style::new(), PropMap::new());
+        let root = NodeHandle::materialized(
+            scene.clone(),
+            root_id,
+            NodeKind::Root,
+            Style::new(),
+            PropMap::new(),
+        );
 
         let a = root.add_child(&text_template()).expect("add a");
         let detached = text_template();
@@ -1744,12 +1792,18 @@ mod tests {
     fn insert_before_rejects_foreign_anchor() {
         let scene = Arc::new(Mutex::new(Scene::new()));
         let root_id = scene.lock().expect("scene poisoned").root_id();
-        let root =
-            NodeHandle::materialized(scene.clone(), root_id, NodeKind::Root, Style::new(), PropMap::new());
+        let root = NodeHandle::materialized(
+            scene.clone(),
+            root_id,
+            NodeKind::Root,
+            Style::new(),
+            PropMap::new(),
+        );
 
         // `parent` is a box under root; the anchor is attached under root as
         // a sibling of `parent`, so it is not one of `parent`'s children.
-        let parent = root.add_child(&create_node("box".to_string(), None).expect("create box"))
+        let parent = root
+            .add_child(&create_node("box".to_string(), None).expect("create box"))
             .expect("add box");
         let _a = parent.add_child(&text_template()).expect("add a");
         let foreign = root.add_child(&text_template()).expect("add foreign");
@@ -1758,7 +1812,10 @@ mod tests {
             Ok(_) => panic!("foreign anchor must error"),
             Err(e) => e,
         };
-        assert!(err.to_string().contains("not a child of this node"), "{err}");
+        assert!(
+            err.to_string().contains("not a child of this node"),
+            "{err}"
+        );
         // The foreign sibling's sibling order is untouched.
         assert_eq!(
             child_ids(&scene, &root),
@@ -1770,8 +1827,13 @@ mod tests {
     fn insert_before_rejects_detached_parent() {
         let scene = Arc::new(Mutex::new(Scene::new()));
         let root_id = scene.lock().expect("scene poisoned").root_id();
-        let root =
-            NodeHandle::materialized(scene.clone(), root_id, NodeKind::Root, Style::new(), PropMap::new());
+        let root = NodeHandle::materialized(
+            scene.clone(),
+            root_id,
+            NodeKind::Root,
+            Style::new(),
+            PropMap::new(),
+        );
 
         let a = root.add_child(&text_template()).expect("add a");
         let detached = create_node("box".to_string(), None).expect("create detached parent");
@@ -1789,7 +1851,10 @@ mod tests {
     fn synthetic_event(i: usize) -> TernEvent {
         match i % 5 {
             0 => TernEvent::Key(TernKey::new(KeyName::Char, Some('a'), false, false, false)),
-            1 => TernEvent::Resize { w: 80, h: (i + 1) as u16 },
+            1 => TernEvent::Resize {
+                w: 80,
+                h: (i + 1) as u16,
+            },
             2 => TernEvent::FocusGained,
             3 => TernEvent::Mouse(TernMouse {
                 kind: MouseEventKind::Moved,
@@ -1834,11 +1899,18 @@ mod tests {
                 TernEvent::FocusLost => unreachable!("synthetic events never focus-lost"),
                 TernEvent::Mouse(_) => {
                     assert_eq!(js.r#type, "mouse", "event {i} tagged mouse");
-                    assert_eq!(js.mouse.as_ref().expect("mouse payload present").kind, "moved");
+                    assert_eq!(
+                        js.mouse.as_ref().expect("mouse payload present").kind,
+                        "moved"
+                    );
                 }
                 TernEvent::Paste(text) => {
                     assert_eq!(js.r#type, "paste", "event {i} tagged paste");
-                    assert_eq!(js.paste.as_deref(), Some(text.as_str()), "event {i} payload");
+                    assert_eq!(
+                        js.paste.as_deref(),
+                        Some(text.as_str()),
+                        "event {i} payload"
+                    );
                 }
             }
         }
@@ -1859,7 +1931,10 @@ mod tests {
         assert!(teardown, "ctrl+c with exit_on_ctrl_c must request teardown");
         assert_eq!(delivered.len(), 2, "both events still delivered");
         assert_eq!(delivered[0].r#type, "key");
-        assert_eq!(delivered[0].key.as_ref().expect("key").char.as_deref(), Some("c"));
+        assert_eq!(
+            delivered[0].key.as_ref().expect("key").char.as_deref(),
+            Some("c")
+        );
     }
 
     #[test]
