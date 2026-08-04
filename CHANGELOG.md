@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Terminal capabilities, window title, and alt-screen option:** the
+  tern-terminal backend detects the terminal's color support once via the
+  `supports-color` crate and exposes it as `Backend::capabilities()`
+  (`{ truecolor, colors }` — truecolor plus a 16M/256/16/0 palette size,
+  defaulting to truecolor when detection is inconclusive). RGB cells are
+  quantized to the nearest ANSI 256-color index (6x6x6 cube + grayscale
+  ramp, `rgb_to_ansi256`) when truecolor is unsupported, instead of
+  emitting a sequence the terminal cannot render. `Backend::set_title`
+  (and the `@tern/core` `Renderer.setTitle`) sets the terminal window
+  title (OSC 0). The `TuiRenderer` constructor takes `use_alt_screen`
+  (default `true`; `false` renders inline in the main screen, skipping the
+  alternate-screen enter/leave escapes — including teardown) and `title`
+  options, surfaced as `useAltScreen` / `title` on `@tern/core`
+  `createRenderer`; the `Renderer.capabilities` getter reports the
+  detected color support.
 - **Push-based event delivery (roadmap Phase 3):** `TuiRenderer::start_event_stream`
   (`tern-node`) builds a `napi::ThreadsafeFunction<TernEventJs>` and spawns
   tern-terminal's background event loop (`spawn_event_loop` /
@@ -132,6 +147,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   above the scrollbar leaf); `scrollToBottom(node)` is a one-shot jump to the
   tail (clamped) that dismisses the affordance without re-attaching the
   follow — `followTail` is the explicit re-attach.
+- **Frame snapshot testing (`snapshotFrame`):** `TuiRenderer::render_to_buffer`
+  paints the shared scene into a fresh buffer at a given viewport (no terminal
+  I/O) and returns one string per row (masked/continuation cells are spaces,
+  so every row is exactly `width` display columns — multi-width aware);
+  `Renderer.snapshotFrame(width?, height?)` surfaces it and `framesEqual(a, b)`
+  compares two frames for golden testing.
+- **`Tabs` widget:** a `tabs` element (in `@tern/core`) composing a tab bar
+  row — one `Text` leaf per tab, the active tab painted with the theme
+  `primary` palette colors and reversed with a top-border marker (`▔`),
+  closable tabs carrying a close glyph (`×`) — plus a content region box
+  holding the active tab's content nodes; driven by `activateTab` / `closeTab`
+  / `tabsKey` (`left` / `right` move, `ctrl+tab` / `ctrl+shift+tab` wrap,
+  `ctrl+w` closes); `<Tabs>` in `@tern/react` and `Tabs` in `@tern/solid` with
+  `focusId` / `onChange` / `onClose` (+ `disposeTabsFocus` in solid). No new
+  napi node kind (materializes as a `box`).
+- **`Progress` widget:** a `progress` element (ratatui Gauge parity) — a
+  framed single-row gauge (default `border_style: "plain"`) with an in-flow
+  fill leaf (`▓` × ceil(value/max × inner), `░` for the rest), an optional
+  dimmed label leaf left-aligned inside the bar area (composed only when it
+  fits) and an optional percentage readout (`ceil(value/max×100)%`)
+  right-aligned, both absolute overlays; `ratio` (0..1) drives the bar
+  directly as an alternative to `value`/`max`; `setProgress(node, value,
+  max?)` repaints a live bar in place (no rebuild); `<Progress>` in
+  `@tern/react`, `Progress` in `@tern/solid`.
+- **Focus traversal:** `useFocusTraversal({ manager?, exclude? })`
+  (`@tern/react`) and `subscribeFocusTraversal(renderer, manager?, exclude?)`
+  (`@tern/solid`) wire Tab / Shift+Tab to `FocusManager.next()` / `prev()` —
+  skipping excluded ids, re-rendering after each move, and handling traversal
+  keys ahead of focused-element routing (bare Tab/Shift+Tab always move focus,
+  standard TUI behavior).
+- **Escape-sequence run batching:** the tern-terminal backend's cell queueing
+  merges consecutive updates that share a style, a row, and adjacent columns
+  into single runs — one `MoveTo` to the run's first cell, one unconditional
+  SGR reset plus the run's exact style applied once, and the run's characters
+  in one `Print` — so a typical frame flushes a handful of runs instead of one
+  sequence per cell (an internal frontend property; the diff flush stays a
+  no-op for an unchanged frame).
 
 ## [0.1.0] - 2026-08-02
 

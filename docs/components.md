@@ -684,6 +684,145 @@ the plain factory.
 
 ---
 
+## Tabs
+
+**Purpose:** switch between panels of related content — log files, open-file
+tabs, tool outputs — where one tab is active and its content occupies the
+region below the tab bar.
+
+**Core problem:** a tab bar must read as a bar (active tab visually distinct),
+the active tab's content must swap in/out without leaking the other tabs'
+content into the scene, and keyboard navigation (arrow keys, ctrl+tab,
+ctrl+w close) must drive the active index — all over a cell-buffer renderer
+with no native tabs node.
+
+**Design:**
+
+- **Bar + region.** A flex column of two boxes: a tab bar row (one `Text`
+  leaf per tab) above a content region box (a flex column) holding the
+  *active* tab's content nodes. Only the active tab's content is
+  materialized — the other tabs' content stays out of the scene tree.
+- **Active-tab styling.** The active tab's label is prefixed with a top-border
+  marker (`TAB_ACTIVE_MARKER` ▔) and painted with the theme's `primary`
+  palette colors and reversed (`TAB_PRIMARY_FG` / `TAB_PRIMARY_BG`); inactive
+  tabs are plain.
+- **Close affordance.** A per-tab `closable` flag (falling back to the
+  element's `closable` default) appends a close glyph (`TAB_CLOSE_CHAR` ×) to
+  the tab's label.
+- **JS bookkeeping.** The tab list is JS bookkeeping (never scene props,
+  mirroring `Panels`' `panels` / `Table`'s `rows`); the interactive state
+  (`active`) lives on the root box's props. `activateTab` / `closeTab` /
+  `tabsKey` mutate it and rebuild the composition in place.
+- **Keyboard driving.** `tabsKey` routes keys: `left` / `right` move the
+  active tab (clamped at the ends); `ctrl+tab` / `ctrl+shift+tab` wrap to the
+  next / previous tab; `ctrl+w` closes the active tab (the active index
+  re-clamps into the shorter list). `<Tabs focusId>` in `@tern/react` /
+  `Tabs({ focusId })` in `@tern/solid` register with a `FocusManager` so
+  routed keys reach the node.
+
+**API sketch (JS):**
+
+```tsx
+const tabs = Tabs({
+  tabs: [
+    { label: "logs", content: [Text({ text: "log line" })] },
+    { label: "files", content: [Text({ text: "file list" })] },
+    { label: "git", content: [Text({ text: "git status" })], closable: true },
+  ],
+  active: 0,
+  closable: true,
+});
+activateTab(tabs, 1);                 // swap the content region to "files"
+tabsKey(tabs, { name: "right" });     // move the active tab right (clamped)
+tabsKey(tabs, { name: "w", ctrl: true }); // close the active tab
+```
+
+**Acceptance:** the active tab renders distinct (primary + reversed + top
+marker), the content region holds exactly the active tab's content, and a key
+sequence (arrows / ctrl+tab / ctrl+w) moves the active index and re-clamps it
+after a close (buffer matches).
+
+**Shipped:** `Tabs` in `@tern/core` builds the flex column — a tab bar row
+(one `Text` leaf per tab; the active tab's label prefixed with the top-border
+marker `TAB_ACTIVE_MARKER` and painted with the primary palette colors
+`TAB_PRIMARY_FG` / `TAB_PRIMARY_BG` and reversed, closable tabs carrying the
+`TAB_CLOSE_CHAR` close glyph) plus a content region box holding the active
+tab's content nodes. The tab list is JS bookkeeping (`tabSpecs`, never scene
+props); `active` lives on the root box's props, and `activateTab` /
+`closeTab` / `tabsKey` mutate it and rebuild the composition in place
+(`left` / `right` move the active tab clamped, `ctrl+tab` / `ctrl+shift+tab`
+wrap around the ends, `ctrl+w` closes the active tab re-clamping the active
+index). `<Tabs>` in `@tern/react` takes the tabs as a `tabs` prop (no React
+children); `Tabs` in `@tern/solid` is the same factory with a `focusId`
+option — both register with a `FocusManager` so routed keys drive the tabs.
+
+---
+
+## Progress
+
+**Purpose:** show a determinate fill ratio at a glance — download / upload
+progress, token budgets, batch completion — as a framed gauge (ratatui
+`Gauge` parity).
+
+**Core problem:** a gauge must paint a fill whose cell count is an exact
+function of the ratio and the bar's inner width, while carrying an optional
+label and a percentage readout — over a cell-buffer renderer with no native
+gauge node, and without rebuilding the composition on every value change.
+
+**Design:**
+
+- **Framed fill.** The `progress` element is a framed box (the frame defaults
+  to `border_style: "plain"`; `border_style: "none"` opts out) holding one
+  in-flow fill leaf: exactly `ceil(value/max * inner_width)` `'▓'` cells
+  followed by `'░'` for the rest of the inner width (the outer `width` prop —
+  default `PROGRESS_DEFAULT_WIDTH` 20 — minus the frame's 2 border columns).
+- **Label + readout overlays.** The optional label is a dimmed text leaf
+  absolutely positioned at the inner area's left edge; the percentage readout
+  (`ceil(value/max*100)%`) is an absolutely positioned leaf at the right
+  edge, both at a `z_index` above the fill — mirroring ratatui, where the
+  label/percentage replace the fill glyphs in their cells, so the fill-cell
+  math stays exact regardless of them. The label is composed only when it
+  fits alongside the readout (which reserves its widest form `"100%"`, so
+  label presence never flips as the value changes).
+- **Ratio shortcut.** A `ratio` prop (0..1) drives the bar directly as an
+  alternative to `value`/`max` (defaults 0/100, clamped into [0, 1]).
+- **Live updates without rebuilding.** The bar model (`value`/`max`/`ratio`)
+  lives on the root box's props; `setProgress(node, value, max?)` mutates it
+  and repaints the fill and readout leaves in place — no rebuild, so a
+  streaming progress bar stays cheap.
+- **JS bookkeeping.** The label text and the `show_percentage` flag are
+  consumed by the factory (never scene props, mirroring `Tabs`' `tabSpecs`);
+  the `progress` component preset is part of `THEME_COMPONENTS` /
+  `defaultTheme`.
+
+**API sketch (JS):**
+
+```tsx
+const progress = Progress({ value: 5, max: 10, label: "copying" });
+setProgress(progress, 8);              // repaint the live bar in place
+const half = Progress({ ratio: 0.5, show_percentage: false });
+```
+
+**Acceptance:** the fill leaf holds exactly `ceil(value/max * inner_width)`
+filled cells, the percentage readout reads `ceil(value/max*100)%` (right
+aligned), the label is composed only when it fits, and `setProgress` repaints
+the bar without rebuilding the composition (buffer matches).
+
+**Shipped:** `Progress` in `@tern/core` builds the framed box — an in-flow
+fill leaf (`'▓'` × `ceil(value/max * inner_width)`, `'░'` for the rest of the
+inner width) plus an optional dimmed label leaf left-aligned inside the bar
+area (composed only when it fits alongside the readout) and an optional
+percentage readout (`ceil(value/max*100)%`) right-aligned inside it, both
+absolutely positioned overlays on the fill (the fill-cell math stays exact).
+The label text and `show_percentage` flag are JS bookkeeping (never scene
+props); `value`/`max` (or `ratio`) live on the root box's props, and
+`setProgress` mutates them and repaints the bar and readout in place — no
+rebuild. `<Progress>` in `@tern/react` and `Progress` in `@tern/solid`
+materialize the factory with the `progress` component preset resolved onto
+the frame's props.
+
+---
+
 ## Theme system & soft wrap
 
 **Theme system (shipped):** the core theme surface — `defaultTheme`,
