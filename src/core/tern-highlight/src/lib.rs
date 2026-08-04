@@ -242,7 +242,7 @@ fn segments_from_captures(source: &str, captures: &[Capture]) -> Vec<Span> {
         for &(cstart, cend, style) in captures {
             if cstart <= start && cend >= end {
                 let len = cend - cstart;
-                if best.map_or(true, |(blen, _)| len <= blen) {
+                if best.is_none_or(|(blen, _)| len <= blen) {
                     best = Some((len, style));
                 }
             }
