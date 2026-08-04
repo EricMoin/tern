@@ -455,9 +455,12 @@ assert(
   contentRegion2?.type === "box" && contentRegion2?.props.flex_direction === "column",
   "the content region is the scrollable column of row leaves",
 );
+// Windowing (constitution: large datasets must not materialize one node per
+// row): at scroll_y 0 the content region materializes only the visible
+// window `rows[0, clip_height)` — 5 of the 10 data rows.
 assert(
-  contentRegion2?.children.length === TABLE_ROWS.length,
-  `the content region holds one row leaf per data row (${contentRegion2?.children.length})`,
+  contentRegion2?.children.length === Math.min(TABLE_ROWS.length, 5),
+  `the content region materializes one row leaf per visible row (${contentRegion2?.children.length})`,
 );
 assert(
   (contentRegion2?.children[2]?.children.every((cell) => cell.props.reversed === true) ?? false),
@@ -580,8 +583,10 @@ assert(themedInput?.props.border_style === "double", "component=input resolves t
 // A wheel event on the Table scrolls its content region (the sticky header
 // stays pinned): scroll_y was 4 (auto-scrolled by tableKey); content 10 rows
 // vs the 5-row clip => max 5.
-const tableRegion2b = table2?.children[1];
-const regionScrollY = (): number => tableRegion2b?.props.scroll_y as number;
+// Windowing rebuilds the region node on every scroll, so the captured
+// reference would go stale — read the live region from the table each time
+// (the same pattern the tableKey section uses).
+const regionScrollY = (): number => table2?.children[1]?.props.scroll_y as number;
 assert(
   wheelScroll(table2!, mouse("scroll_down", 0, 0)) === true && regionScrollY() === 5,
   `wheel scroll_down pans the table content region (scroll_y 4 -> ${regionScrollY()})`,
