@@ -7,7 +7,8 @@
  * (clip/scroll region + track/thumb scrollbar, driven by `scrollTo`),
  * `StreamingText` auto-scroll (`syncStreamTail` pinning `scroll_y` to the
  * stream tail), `DiffView`, `Select` (driven by `selectKey`), a determinate
- * `Spinner`, a `StatusBar`, and a custom theme via `ThemeProvider`
+ * `Spinner`, a framed `Progress` gauge (driven by `setProgress`), a
+ * `StatusBar`, and a custom theme via `ThemeProvider`
  * (`role` / `component` hints resolved onto plain node props).
  *
  * Every widget is asserted against its scene node after driving it (the
@@ -26,6 +27,7 @@
 import { Fragment, createElement, useRef, type ReactElement } from "react";
 import {
   Box as CoreBox,
+  Text as CoreText,
   Input as CoreInput,
   MARKDOWN_FENCE_BG,
   MODAL_Z_INDEX,
@@ -41,12 +43,14 @@ import {
   DiffView,
   Modal,
   Panels,
+  Progress,
   ScrollView,
   Select,
   Spinner,
   StatusBar,
   StreamingText,
   Table,
+  Tabs,
   Text,
   Textarea,
   ThemeProvider,
@@ -64,7 +68,9 @@ import {
   selectKey,
   startPanelDrag,
   tableKey,
+  tabsKey,
   tick,
+  setProgress,
   useApp,
   useClickToFocus,
   useInput,
@@ -166,6 +172,17 @@ const TABLE_ROWS = [
   ["Barbara", "ui", 86],
   ["Edsger", "algorithms", 89],
   ["Donald", "typesetting", 93],
+];
+
+/**
+ * The tabs of the `<Tabs>` demo: three tab specs whose content nodes are core
+ * `Text` leaves (the `tabs` prop of the host component takes core `Node`s —
+ * the same pattern the modal's `content` uses).
+ */
+const TABS_SPECS = [
+  { label: "logs", content: [CoreText({ text: "log line" })] },
+  { label: "files", content: [CoreText({ text: "file list" })] },
+  { label: "git", content: [CoreText({ text: "git status" })] },
 ];
 
 // ---------------------------------------------------------------------------
@@ -281,6 +298,15 @@ function App(): ReactElement {
         createElement(Spinner, { value: 5, max: 10, width: 4 }),
         // StatusBar: left/center/right segments on a 1-row strip.
         createElement(StatusBar, { left: "L", center: "C", right: "R" }),
+        // Tabs: a tab bar row (the active tab reversed with the primary
+        // palette + top-border marker, closable tabs carrying a close glyph)
+        // above a content region holding the active tab's content. Driven
+        // below with tabsKey (left/right move, ctrl+tab wraps, ctrl+w closes).
+        createElement(Tabs, { tabs: TABS_SPECS, active: 1, closable: true, focusId: "tabs" }),
+        // Progress: a framed gauge (ratatui parity) — the fill leaf counts
+        // ceil(5/10 * 10) = 5 of 10 inner cells, the "work" label overlays
+        // left, "50%" reads out right. Driven below with setProgress.
+        createElement(Progress, { value: 5, max: 10, width: 12, label: "work" }),
         // Theme: role=primary resolves the custom palette fg; component=input
         // resolves the preset border_style.
         createElement(Box, { role: "primary" }),
@@ -364,11 +390,11 @@ function mouse(kind: string, column: number, row: number): MouseEventJs {
 
 const rootBox: Node | undefined = renderer.root.children[0];
 const kids: readonly Node[] = rootBox?.children ?? [];
-const [panels, scrollView, streamNode, diff, select, table, textarea, spinner, statusBar, themedPrimary, themedInput] = kids;
+const [panels, scrollView, streamNode, diff, select, table, textarea, spinner, statusBar, tabs, progress, themedPrimary, themedInput] = kids;
 
 // --- scene structure --------------------------------------------------------
 assert(rootBox?.type === "box", "app root is a box");
-assert(kids.length === 11, `scene holds 11 widget nodes (got ${kids.length})`);
+assert(kids.length === 13, `scene holds 13 widget nodes (got ${kids.length})`);
 assert(
   kids[0]?.type === "panels" &&
     kids[1]?.type === "scroll_view" &&
@@ -378,7 +404,9 @@ assert(
     kids[5]?.type === "table" &&
     kids[6]?.type === "textarea" &&
     kids[7]?.type === "spinner" &&
-    kids[8]?.type === "status_bar",
+    kids[8]?.type === "status_bar" &&
+    kids[9]?.type === "tabs" &&
+    kids[10]?.type === "progress",
   "widget host types materialize in scene order",
 );
 
@@ -577,6 +605,106 @@ assert(!("left" in (statusBar?.props ?? {})), "segment keys are lifted out of th
 // to reserve the bottom viewport row for the strip (docs/components.md
 // "StatusBar — Reserved row"), so no panel/scroll region overlaps it.
 assert(statusBar?.props.status_bar === true, "the strip carries the reserved-row marker (status_bar: true)");
+
+// --- Tabs ------------------------------------------------------------------------
+assert(tabs?.type === "tabs", "tabs element materializes");
+assert(tabs?.props.active === 1, "tabs starts on the active tab 1");
+assert(
+  !("tabs" in (tabs?.props ?? {})) && !("closable" in (tabs?.props ?? {})),
+  "the tab spec list and closable flag are JS bookkeeping, never scene props",
+);
+// Composition: the tab bar row (child 0) + the content region (child 1).
+const tabBar = tabs?.children[0];
+const tabRegion = tabs?.children[1];
+assert(
+  tabBar?.type === "box" && tabBar?.props.flex_direction === "row" && tabBar?.children.length === 3,
+  "the tab bar is a row box with one leaf per tab",
+);
+assert(
+  tabBar?.children.map((leaf) => leaf.props.text).join(",") ===
+    `logs ${"×"},▔files ${"×"},git ${"×"}`,
+  "the active tab is reversed + prefixed with the top-border marker; closable tabs carry the close glyph",
+);
+assert(
+  tabBar?.children[1]?.props.reversed === true &&
+    tabBar?.children[1]?.props.fg === "#61afef" &&
+    tabBar?.children[0]?.props.reversed !== true,
+  "the active tab paints the primary palette reversed; inactive tabs are plain",
+);
+assert(
+  tabRegion?.type === "box" &&
+    tabRegion?.props.flex_direction === "column" &&
+    tabRegion?.children.length === 1 &&
+    tabRegion?.children[0]?.props.text === "file list",
+  "the content region holds the active tab's content",
+);
+// tabsKey drives the composition in place: right moves the active tab, ctrl+w
+// closes it (the tab count shrinks), and the active index re-clamps.
+const tabsBase = { ctrl: false, alt: false, shift: false } as const;
+const tabsAfterRight = tabsKey(tabs!, { name: "right", ...tabsBase });
+assert(tabsAfterRight.active === 2, "right moves the active tab to the last tab");
+assert(
+  tabs?.children[0]?.children.map((leaf) => leaf.props.text).join(",") === `logs ${"×"},files ${"×"},▔git ${"×"}`,
+  "the rebuilt bar reflects the moved active tab",
+);
+const tabsAfterClose = tabsKey(tabs!, { ...tabsBase, name: "w", ctrl: true });
+assert(
+  tabsAfterClose.count === 2 && tabsAfterClose.active === 1,
+  `ctrl+w closes the active tab (count ${tabsAfterClose.count}, active ${tabsAfterClose.active})`,
+);
+assert(
+  tabs?.children[0]?.children.map((leaf) => leaf.props.text).join(",") === `logs ${"×"},▔files ${"×"}`,
+  "the rebuilt bar after close drops the closed tab",
+);
+assert(
+  tabs?.children[1]?.children[0]?.props.text === "file list",
+  "the region re-reads the live composition after the close",
+);
+
+// --- Progress (framed gauge) --------------------------------------------------
+assert(progress?.type === "progress", "progress element materializes");
+// The bar model state lives on the root box's props; the label is JS
+// bookkeeping, never a scene prop.
+assert(progress?.props.value === 5 && progress?.props.max === 10, "the bar model lives on the root props");
+assert(!("label" in (progress?.props ?? {})), "the label is JS bookkeeping, never a scene prop");
+// Composition: the in-flow fill leaf (child 0) + the label overlay + the
+// percentage readout (inner width 10, ratio 0.5 => 5 filled cells).
+assert(
+  progress?.children[0]?.props.text === "▓▓▓▓▓░░░░░",
+  "the fill leaf counts ceil(5/10 * 10) = 5 of 10 inner cells",
+);
+assert(
+  progress?.children[1]?.props.text === "work" && progress?.children[1]?.props.dim === true,
+  "the label overlays left-aligned, dimmed",
+);
+assert(
+  progress?.children[1]?.props.position === "absolute" && progress?.children[1]?.props.left === 0,
+  "the label is an absolute left-aligned overlay",
+);
+assert(
+  progress?.children[2]?.props.text === "50%" &&
+    progress?.children[2]?.props.position === "absolute" &&
+    progress?.children[2]?.props.right === 0,
+  "the percentage readout overlays the right side",
+);
+// setProgress repaints the live bar in place (no rebuild).
+const progressBarBefore = progress?.children[0];
+setProgress(progress!, 8);
+assert(progress?.props.value === 8 && progress?.props.max === 10, "setProgress updates the bar model");
+assert(
+  progress?.children[0] === progressBarBefore,
+  "setProgress repaints the same fill leaf (no rebuild)",
+);
+assert(
+  progress?.children[0]?.props.text === "▓▓▓▓▓▓▓▓░░" && progress?.children[2]?.props.text === "80%",
+  "setProgress repaints the fill and the readout",
+);
+setProgress(progress!, 0, 10);
+assert(
+  progress?.children[0]?.props.text === "░░░░░░░░░░" && progress?.children[2]?.props.text === "0%",
+  "setProgress clamps a 0% bar empty",
+);
+setProgress(progress!, 5, 10);
 
 // --- MarkdownView (mounted as a scene-root sibling) ---------------------------------
 // The core factory renders the source column: a heading, a styled paragraph
