@@ -45,7 +45,13 @@
  * `disposeTextareaFocus`.
  * `subscribeInput` wires a renderer's key events through the core
  * `FocusManager` (the Solid-flavored `useInput` equivalent — Solid has no
- * context, so the renderer is an explicit argument); `subscribeResize` wires
+ * context, so the renderer is an explicit argument); `subscribePaste` wires a
+ * renderer's paste events the same way (the Solid-flavored `usePaste`
+ * equivalent): each paste routes to the focused element's paste handler
+ * first — a focused `Input` / `Textarea` (registered with an `onPaste`
+ * handler via the core `useFocus`, or the `Textarea` factory's `focusId`
+ * wiring) auto-pastes into its node — and falls back to the tree handler.
+ * `subscribeResize` wires
  * a renderer's terminal resize events to a handler, re-invoking
  * `renderer.render()` after each so the compositor re-lays out at the new
  * terminal size (the Solid-flavored `useResize` equivalent). `subscribeFocus`
@@ -84,6 +90,8 @@ import {
   startPanelDrag,
   FocusManager,
   mergeTheme,
+  pasteInto,
+  pasteIntoTextarea,
   resolveTheme,
   scrollBy,
   scrollTo,
@@ -106,6 +114,7 @@ import {
   type PanelDragHandle,
   type PanelDragResult,
   type PanelsProps,
+  type PasteHandler,
   type Renderer,
   type ResizeHandler,
   type ScrollViewProps,
@@ -143,6 +152,7 @@ export type {
   PanelDragResult,
   PanelSpec,
   PanelsProps,
+  PasteHandler,
   Renderer,
   ResizeHandler,
   ScrollViewProps,
@@ -160,9 +170,12 @@ export type {
 } from "@tern/core";
 
 // The @tern/core values behind the roadmap elements and the focus wiring:
-// element edit/drive helpers, the scroll helpers (including the streaming
-// auto-scroll `followTail` / `syncStreamTail` / `isStreamFollowing`), the
-// panel drag-resize helpers, the modal helpers, the focus machinery, and the
+// element edit/drive helpers (including the paste counterparts `pasteInto` /
+// `pasteIntoTextarea`, which a focused `Input` / `Textarea` auto-pastes
+// through), the scroll helpers (including the streaming auto-scroll
+// `followTail` / `syncStreamTail` / `isStreamFollowing` / `scrollToBottom` and
+// the `STREAM_AFFORDANCE_CHAR` scroll-to-bottom indicator), the panel
+// drag-resize helpers, the modal helpers, the focus machinery, and the
 // theme surface.
 export {
   closeModal,
@@ -182,12 +195,16 @@ export {
   mergeTheme,
   MODAL_Z_INDEX,
   openModal,
+  pasteInto,
+  pasteIntoTextarea,
   resolveTheme,
   scrollBy,
   scrollTo,
+  scrollToBottom,
   scrollTop,
   selectKey,
   startPanelDrag,
+  STREAM_AFFORDANCE_CHAR,
   syncStreamTail,
   tableKey,
   tick,
@@ -499,8 +516,10 @@ export function Text(props: NodeProps = {}): Node {
  * span (via `subscribeStream`, which feeds `syncStreamTail`) pins `scroll_y`
  * to the tail offset — `Node.contentSize()` height vs the `clip_height`
  * viewport. A manual scroll above the tail (via `scrollTo` / `scrollBy` /
- * `scrollTop`) detaches the follow and pins the view; `followTail`
- * re-attaches. The key is consumed and never reaches the scene props.
+ * `scrollTop`) detaches the follow, pins the view, and stamps the `▼`
+ * scroll-to-bottom affordance; `followTail` re-attaches and `scrollToBottom`
+ * jumps to the tail, both dismissing it. The key is consumed and never
+ * reaches the scene props.
  */
 export function StreamingText(props: NodeProps = {}): Node {
   const node = createElement("streaming_text");
@@ -599,8 +618,12 @@ export function disposeTextareaFocus(node: Node): void {
  * Solid-flavored equivalent of the `@tern/react` `<Textarea focusId>`
  * registration. Routed keys (via `subscribeInput`) edit it through the core
  * `editTextareaKey`: `onChange` fires after the lines/row/col change and
- * `onSubmit` on Enter (which splits the line). Dispose the registration with
- * {@link disposeTextareaFocus} when the node leaves the scene.
+ * `onSubmit` on Enter (which splits the line). Routed paste events (via
+ * `subscribePaste`) auto-paste into the node through the core
+ * `pasteIntoTextarea` while the textarea is focused: `onChange` fires after
+ * the paste changes the lines/row/col (a pasted `\n` splits into new logical
+ * lines). Dispose the registration with {@link disposeTextareaFocus} when the
+ * node leaves the scene.
  */
 export function Textarea(props: TextareaProps = {}): Node {
   // The focus/callback keys are component-consumed (mirroring `@tern/react`'s
@@ -619,7 +642,17 @@ export function Textarea(props: TextareaProps = {}): Node {
       } else if (changed) {
         onChange?.(next);
       }
-    }, manager);
+    }, manager, (text) => {
+      // A routed paste auto-pastes into the focused textarea
+      // (pasteIntoTextarea splits pasted newlines into logical lines) and
+      // reports the new state, mirroring a char-key edit. An empty paste is
+      // a no-op (the lines are unchanged).
+      const before = node.props as TextareaProps;
+      const next = pasteIntoTextarea(node, text);
+      const changed =
+        next.lines !== before.lines || next.row !== before.row || next.col !== before.col;
+      if (changed) onChange?.(next);
+    });
     textareaFocus.set(node, handle);
   }
   return node;
@@ -734,7 +767,10 @@ export function Modal(props: ModalProps = {}): Node {
  * the core auto-scroll is fed (`syncStreamTail`): a node created with
  * `autoScroll` (the default) keeps its `scroll_y` pinned to the stream tail
  * (`Node.contentSize()` height vs the `clip_height` viewport) until a manual
- * scroll above the tail detaches it (`followTail` re-attaches).
+ * scroll above the tail detaches it — stamping the `▼` scroll-to-bottom
+ * affordance at the clip region's bottom-right — and `followTail` (re-attach)
+ * or `scrollToBottom` (one-shot jump to the tail, exported by this package)
+ * dismiss it.
  *
  * Returns a disposer that cancels the subscription. It marks the pump
  * stopped and calls `return()` on the active iterator, so generators
@@ -827,6 +863,52 @@ export function subscribeInput(
     // tree-level handler.
     if (manager.routeKey(event)) return;
     handler(event);
+  });
+}
+
+/** Options for {@link subscribePaste}. */
+export interface SubscribePasteOptions {
+  /** When `false`, the subscription is not established (default `true`). */
+  isActive?: boolean;
+  /**
+   * The `FocusManager` consulted before the handler: when it routes the paste
+   * to a focused element (`FocusManager.routePaste` returns `true`), the
+   * handler is skipped. Defaults to the core `focusManager`.
+   */
+  focusManager?: FocusManager;
+}
+
+/**
+ * Subscribe `handler` to a renderer's paste events, routing each paste
+ * through the core `FocusManager` first — the Solid-flavored `usePaste`
+ * equivalent (the paste counterpart of `subscribeInput`). Solid has no
+ * React-style context, so the renderer is an explicit argument.
+ *
+ * Each paste is first routed via `manager.routePaste(text)`: when the manager
+ * dispatches it to a focused element's paste handler (an element registered
+ * with `useFocus(id, node, onKey, manager, onPaste)`, e.g. an `Input` node
+ * auto-pasting through `pasteInto` or a `Textarea` created with a `focusId`
+ * auto-pasting through `pasteIntoTextarea`), the tree-level `handler` is
+ * skipped. Only pastes no focused element handles reach `handler`. The
+ * handler is captured at subscribe time; Solid closures over signal getters
+ * stay live because the getters are read at dispatch time.
+ *
+ * Returns a disposer that unsubscribes (and is a no-op when `isActive` is
+ * `false`). To reactivate a deactivated subscription, call `subscribePaste`
+ * again.
+ */
+export function subscribePaste(
+  renderer: Renderer,
+  handler: (text: string) => void,
+  options: SubscribePasteOptions = {},
+): () => void {
+  if (options.isActive === false) return () => {};
+  const manager = options.focusManager ?? focusManager;
+  return renderer.onPaste((text) => {
+    // A focused element's paste handler wins; otherwise fall back to the
+    // tree-level handler.
+    if (manager.routePaste(text)) return;
+    handler(text);
   });
 }
 
