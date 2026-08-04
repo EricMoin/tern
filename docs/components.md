@@ -34,21 +34,24 @@ Terminal events reach the scene through `@tern/core`'s `Renderer`:
 `startEventStream()` starts push-based delivery (roadmap Phase 3 — shipped):
 the native binding's background event loop pushes every terminal event to the
 JS thread through a `ThreadsafeFunction`, yielding the tagged `TernEventJs`
-union (`"key"` / `"resize"` / `"focus"` / `"mouse"`) on the `renderer.events`
-async iterable and feeding the `onKey` / `onResize` / `onFocus` / `onMouse`
-handlers the renderer exposes:
+union (`"key"` / `"resize"` / `"focus"` / `"mouse"` / `"paste"`) on the
+`renderer.events` async iterable and feeding the `onKey` / `onResize` /
+`onFocus` / `onMouse` / `onPaste` handlers the renderer exposes:
 
 - `onKey(event)` — a `KeyEvent` (key name plus optional `char` / modifiers).
 - `onResize({ width, height })` — the new terminal size.
 - `onFocus({ focus_gained })` — `true` on focus gained, `false` on lost.
 - `onMouse(event)` — a `MouseEventJs` payload.
+- `onPaste(text)` — the pasted text string (crossterm bracketed paste).
 
-Key routing goes through the core `FocusManager`: elements register with
-`useFocus(id, node, onKey)` and the manager dispatches each key to the focused
-element's handler (`routeKey`). The tree-level input hooks consult the manager
-first — `useInput` in `@tern/react` and `subscribeInput` in `@tern/solid`
-route each key through the core `FocusManager` before falling back to the tree
-handler.
+Key and paste routing go through the core `FocusManager`: elements register
+with `useFocus(id, node, onKey, manager?, onPaste?)` and the manager
+dispatches each key to the focused element's handler (`routeKey`) and each
+paste to its paste handler (`routePaste` — an element that registered no
+`onPaste` never consumes, so the paste falls through to the tree handler).
+The tree-level input hooks consult the manager first — `useInput` in
+`@tern/react` and `subscribeInput` in `@tern/solid` route each key through
+the core `FocusManager` before falling back to the tree handler.
 
 ## Status legend
 
@@ -124,7 +127,11 @@ span, paints after every append, and feeds the auto-scroll; `StreamingText` +
 `subscribeStream` in `@tern/solid` do the same. Auto-scroll ships as the core
 `syncStreamTail` / `followTail` / `isStreamFollowing` / `setStreamAutoScroll`
 helpers, defaulting to tail-follow (`autoScroll: true`) — a manual scroll
-above the tail detaches the follow and `followTail` re-attaches.
+above the tail detaches the follow and stamps the scroll-to-bottom
+affordance (a `▼` cell, `STREAM_AFFORDANCE_CHAR`, absolutely positioned at
+the clip region's bottom-right above in-flow content), and `followTail`
+(re-attach) or the `scrollToBottom` helper (a one-shot jump to the tail)
+dismiss it.
 
 ---
 
@@ -218,9 +225,14 @@ context dimming; side-by-side mode fills two panels without overflow.
 dimmed gutter with right-aligned old/new line numbers, `+`/`-`/` ` markers,
 and per-kind colors (adds `#98c379`, dels `#e06c75`, context dimmed) — with
 `scroll_x` / `scroll_y` panning the whole region and the `wrap` prop passing
-through to each content leaf. `<DiffView>` in `@tern/react` and `DiffView` in
-`@tern/solid` materialize the same factory. Intra-line char-level highlight
-and side-by-side mode remain future work.
+through to each content leaf. Side-by-side mode ships: `mode="side"` renders
+two aligned columns (old | new) split by a 1-cell gap (mirroring `Panels`),
+each hunk line one row per column aligned by line pair, with per-column
+gutters. Intra-line highlighting ships too: `inline_highlight` computes a
+char-level diff on each adjacent add/del pair and renders the changed
+segments bold + underlined on the line's kind color, leaving unchanged
+characters plain. `<DiffView>` in `@tern/react` and `DiffView` in
+`@tern/solid` materialize the same factory.
 
 ---
 
@@ -268,7 +280,10 @@ with a `caret`-prop text leaf the compositor paints as a block caret. The JS
 element (`Input` in `@tern/core`; `<Input>` in `@tern/react`, `Input` in
 `@tern/solid`) adds focus/key routing: a `focusId` registers with the core
 `FocusManager` (`useFocus`), routed keys edit the value via `editKey`, and
-`onChange` / `onSubmit` fire on edits and Enter.
+`onChange` / `onSubmit` fire on edits and Enter. Routed paste (via `usePaste`
+in `@tern/react` / `subscribePaste` in `@tern/solid`) auto-pastes into a
+focused `<Input focusId>` through the core `pasteInto` — inserting at the
+caret, multi-width aware, and firing `onChange` (an empty paste is a no-op).
 
 ---
 
@@ -545,13 +560,16 @@ sequence moves the highlight and auto-scrolls the region (buffer matches).
 
 **Shipped:** `Table` in `@tern/core` builds the flex column — a sticky header
 row (paint z-order 1) above a scrollable content region, and one row leaf per
-data row with per-column width/alignment (padded cells, overflow truncated
-never mid-glyph; the highlighted row reversed). `tableKey` (up/down move the
-highlight and auto-scroll, clamped to the content bounds) and
-`visibleTableRows` (the visible window) drive it; `scroll_x` pans header +
-rows together, `scroll_y` pans only the content region, and `clip_height`
-sets the viewport. `<Table>` in `@tern/react` and `Table` in `@tern/solid`
-materialize the same factory.
+visible data row: only the visible window `rows[scroll_y, scroll_y +
+clip_height)` is materialized (**windowed rows** — a large dataset does not
+create one scene node per row; the full dataset stays JS bookkeeping in
+`tableRegionStates`, and the scroll clamp measures the full content height).
+Per-column width/alignment (padded cells, overflow truncated never mid-glyph;
+the highlighted row reversed). `tableKey` (up/down move the highlight and
+auto-scroll, clamped to the content bounds) and `visibleTableRows` (the
+visible window) drive it; `scroll_x` pans header + rows together, `scroll_y`
+pans only the content region, and `clip_height` sets the viewport. `<Table>`
+in `@tern/react` and `Table` in `@tern/solid` materialize the same factory.
 
 ---
 
@@ -609,7 +627,10 @@ column) and returns the new `{ lines, row, col }`. `<Textarea>` in
 same focus wiring — a `focusId` prop registers the node with a `FocusManager`
 (routed keys edit it via `editTextareaKey`), firing `onChange` / `onSubmit`,
 with the registration disposed via `disposeTextareaFocus` (feature parity
-with the React host component).
+with the React host component). Routed paste (via `usePaste` /
+`subscribePaste`) auto-pastes into a focused textarea through the core
+`pasteIntoTextarea` — a pasted `\n` splits into new logical lines, firing
+`onChange`.
 
 ---
 
