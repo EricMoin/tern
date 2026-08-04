@@ -53,12 +53,14 @@ import {
   Input as CoreInput,
   Modal as CoreModal,
   Panels as CorePanels,
+  Progress as CoreProgress,
   ScrollView as CoreScrollView,
   Select as CoreSelect,
   Spinner as CoreSpinner,
   StatusBar as CoreStatusBar,
   StreamingText,
   Table as CoreTable,
+  Tabs as CoreTabs,
   Text,
   Textarea as CoreTextarea,
   focusManager,
@@ -73,6 +75,7 @@ import {
   type ScrollViewProps,
   type SelectProps,
   type TableProps,
+  type TabsProps,
   type TextareaProps,
 } from "@tern/core";
 
@@ -220,6 +223,15 @@ const SELECT_PROPS = new Set(["onChange", "onConfirm", "onDismiss", "focusId", "
 const MODAL_PROPS = new Set(["content"]);
 
 /**
+ * Component-consumed props of `<Tabs>` that must never reach a scene node:
+ * the callbacks and the focus wiring. The `tabs` spec list and the
+ * active/closable state props flow through to the core factory, which
+ * consumes the bookkeeping keys itself (the spec list is JS bookkeeping,
+ * `closable` maps to the per-tab close affordance).
+ */
+const TABS_PROPS = new Set(["onChange", "onClose", "focusId", "focusManager"]);
+
+/**
  * Strip the React-only props (and the component-level `<StreamingText>`,
  * `<Input>` / `<Spinner>` / `<Select>` / `<Modal>` props), leaving the tern
  * node props (style + layout keys) that the core factories and
@@ -235,6 +247,7 @@ export function toNodeProps(props: TernProps, type?: string): NodeProps {
     if (type === "spinner" && SPINNER_PROPS.has(key)) continue;
     if (type === "select" && SELECT_PROPS.has(key)) continue;
     if (type === "modal" && MODAL_PROPS.has(key)) continue;
+    if (type === "tabs" && TABS_PROPS.has(key)) continue;
     out[key] = value;
   }
   return out;
@@ -359,6 +372,15 @@ export const hostConfig: HostConfig = {
         // The column/row model is JS bookkeeping the core factory consumes;
         // `TableProps` requires it while `NodeProps` is an open record.
         return CoreTable(nodeProps as TableProps);
+      case "tabs":
+        // The tab spec list is JS bookkeeping the core factory consumes;
+        // `TabsProps` requires it while `NodeProps` is an open record.
+        return CoreTabs(nodeProps as TabsProps);
+      case "progress":
+        // The label / show_percentage keys are consumed by the core factory
+        // (never scene props); `ProgressProps` is an open record over
+        // `NodeProps`, so no re-attach is needed here.
+        return CoreProgress(nodeProps);
       case "modal":
         // The content node list is JS bookkeeping the core factory consumes
         // (mirroring `Panels`' `panels`); `toNodeProps` strips it above, so
