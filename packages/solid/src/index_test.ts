@@ -14,6 +14,9 @@ import {
   ScrollView,
   Select,
   Table,
+  Tabs,
+  Progress,
+  setProgress,
   Modal,
   MODAL_Z_INDEX,
   openModal,
@@ -22,6 +25,7 @@ import {
   subscribeInput,
   subscribeResize,
   subscribeFocus,
+  subscribeFocusTraversal,
   subscribePaste,
   subscribePanelDrag,
   subscribeWheelScroll,
@@ -33,6 +37,10 @@ import {
   disposeTextareaFocus,
   tableKey,
   tick,
+  tabsKey,
+  activateTab,
+  closeTab,
+  disposeTabsFocus,
   useFocus,
   FocusManager,
   focusManager,
@@ -81,6 +89,10 @@ import {
   Panels as CorePanels,
   DiffView as CoreDiffView,
   ScrollView as CoreScrollView,
+  Table as CoreTable,
+  Tabs as CoreTabs,
+  Progress as CoreProgress,
+  Modal as CoreModal,
   createRenderer,
   focusAt,
   wheelScroll,
@@ -1331,6 +1343,22 @@ Deno.test("parity: solid renders the same scene structure as react's materializa
         { clip_x: 1, clip_y: 2, clip_width: 20, clip_height: 10, scroll_x: 1, scroll_y: 3, showScrollbar: true },
         CoreText({ text: "line" }),
       ),
+      CoreTable({
+        columns: [{ key: "name", header: "Name", width: 10 }],
+        rows: [["Ada"]],
+        highlight: 0,
+        clip_height: 2,
+      }),
+      CoreTabs({
+        tabs: [
+          { label: "logs", content: [CoreText({ text: "log line" })] },
+          { label: "files", content: [] },
+        ],
+        active: 1,
+        closable: true,
+      }),
+      CoreProgress({ value: 5, max: 10, width: 12, label: "work" }),
+      CoreModal({ open: true, content: [CoreBox()] }),
     ),
   );
 
@@ -1358,6 +1386,22 @@ Deno.test("parity: solid renders the same scene structure as react's materializa
             showScrollbar: true,
             children: [Text({ text: "line" })],
           }),
+          Table({
+            columns: [{ key: "name", header: "Name", width: 10 }],
+            rows: [["Ada"]],
+            highlight: 0,
+            clip_height: 2,
+          }),
+          Tabs({
+            tabs: [
+              { label: "logs", content: [Text({ text: "log line" })] },
+              { label: "files", content: [] },
+            ],
+            active: 1,
+            closable: true,
+          }),
+          Progress({ value: 5, max: 10, width: 12, label: "work" }),
+          Modal({ open: true, content: [Box()] }),
         ],
       }),
     solidHost,
@@ -1923,6 +1967,190 @@ Deno.test("tableKey moves the highlight and clamps the scroll window on a solid 
   }
 });
 
+// Tabs: factory parity + tabsKey routing through the FocusManager
+// ---------------------------------------------------------------------------
+
+Deno.test("Tabs factory materializes the core element with a tab bar and content region", () => {
+  const tabs = Tabs({
+    tabs: [
+      { label: "logs", content: [Text({ text: "log line" })] },
+      { label: "files", content: [Text({ text: "file list" })] },
+    ],
+  });
+  if (tabs.type !== "tabs") throw new Error(`type = ${tabs.type}`);
+  if (tabs.props.flex_direction !== "column") throw new Error(`flex_direction = ${tabs.props.flex_direction}`);
+  if (tabs.props.active !== 0) throw new Error(`active = ${tabs.props.active}`);
+  // The tab list is JS bookkeeping, never a scene prop.
+  if ("tabs" in tabs.props) throw new Error("tabs must not reach the scene props");
+  // Composition: the tab bar row (child 0) + the content region (child 1).
+  const bar = tabs.children[0];
+  const region = tabs.children[1];
+  if (bar?.props.flex_direction !== "row") throw new Error("the tab bar must be a row box");
+  if (bar?.children.length !== 2 || bar.children[0]?.props.text !== "▔logs") {
+    throw new Error(`tab leaves = ${JSON.stringify(bar?.children.map((c) => c.props.text))}`);
+  }
+  // The active tab is painted with the primary palette and reversed.
+  if (bar?.children[0]?.props.reversed !== true || bar?.children[0]?.props.fg === undefined) {
+    throw new Error("the active tab must be reversed with the primary fg");
+  }
+  // Only the active tab's content is materialized in the region.
+  if (region?.children.length !== 1 || region?.children[0]?.props.text !== "log line") {
+    throw new Error("the content region must hold the active tab's content");
+  }
+  // The renderer surface maps the roadmap tag.
+  if (createElement("tabs").type !== "tabs") throw new Error("createElement(tabs) mapping");
+});
+
+Deno.test("tabsKey routes through the FocusManager to a focused tabs node", () => {
+  const { renderer, keyHandlers } = mockRenderer();
+  const manager = new FocusManager();
+  const tabs = Tabs({
+    tabs: [
+      { label: "a", content: [Text({ text: "A" })] },
+      { label: "b", content: [Text({ text: "B" })] },
+      { label: "c", content: [Text({ text: "C" })] },
+    ],
+  });
+  const changes: Array<{ active: number; count: number }> = [];
+  const closes: Array<{ active: number; count: number }> = [];
+  // Length read through a function: TS narrows a const-typed empty array's
+  // `length` to 0 (the pushes happen inside closures it cannot see).
+  const changeCount = () => changes.length;
+  const closeCount = () => closes.length;
+  // Accessors: tabsKey mutates the node in place, which TS's control flow
+  // cannot see — reading through functions defeats the stale narrowing.
+  const activeOf = () => tabs.props.active as number;
+  const barLabels = () => tabs.children[0]?.children.map((leaf) => leaf.props.text).join(",");
+
+  // Register the tabs node with the manager: routed keys drive it via the
+  // core `tabsKey`, firing onChange/onClose-style callbacks like React's
+  // `<Tabs focusId>`.
+  const focusHandle = useFocus("s-tabs", tabs, (event) => {
+    const beforeActive = activeOf();
+    const barBefore = tabs.children[0]?.children.length ?? 0;
+    const next = tabsKey(tabs, event);
+    const closed = (tabs.children[0]?.children.length ?? 0) < barBefore;
+    if (closed) closes.push(next);
+    else if (next.active !== beforeActive) changes.push(next);
+  }, manager);
+  const dispose = subscribeInput(renderer, () => {}, { focusManager: manager });
+
+  if (keyHandlers.size !== 1) throw new Error(`expected 1 key handler, got ${keyHandlers.size}`);
+  if (!manager.has("s-tabs")) throw new Error("useFocus must register the id");
+
+  // Not focused: keys fall through to the tree handler (a no-op here).
+  for (const handler of keyHandlers) handler(keyEvent({ name: "right" }));
+  if (changeCount() !== 0 || activeOf() !== 0) {
+    throw new Error("unfocused tabs must not receive keys");
+  }
+
+  // Focused: right moves the active tab (clamped at the ends).
+  if (!manager.focus("s-tabs")) throw new Error("focus(s-tabs) must succeed");
+  for (const handler of keyHandlers) handler(keyEvent({ name: "right" }));
+  if (changeCount() !== 1 || changes[0]!.active !== 1) {
+    throw new Error(`right = ${JSON.stringify(changes)}`);
+  }
+  if (activeOf() !== 1) throw new Error(`node active = ${activeOf()}`);
+  if (barLabels() !== "a,▔b,c") throw new Error(`labels = ${barLabels()}`);
+
+  // ctrl+tab wraps to the next tab; ctrl+shift+tab to the previous.
+  for (const handler of keyHandlers) handler(keyEvent({ name: "tab", ctrl: true, shift: false }));
+  if (changes[1]?.active !== 2) throw new Error(`ctrl+tab = ${JSON.stringify(changes[1])}`);
+  for (const handler of keyHandlers) handler(keyEvent({ name: "tab", ctrl: true, shift: true }));
+  if (changes[2]?.active !== 1) throw new Error(`ctrl+shift+tab = ${JSON.stringify(changes[2])}`);
+
+  // ctrl+w closes the active tab (count shrinks) and fires onClose.
+  for (const handler of keyHandlers) handler(keyEvent({ name: "w", ctrl: true, shift: false }));
+  if (closeCount() !== 1 || closes[0]!.count !== 2 || closes[0]!.active !== 1) {
+    throw new Error(`close = ${JSON.stringify(closes)}`);
+  }
+  if (barLabels() !== "a,▔c") throw new Error(`labels after close = ${barLabels()}`);
+
+  dispose();
+  if (keyHandlers.size >= 1) throw new Error("key handler must be detached on dispose");
+  focusHandle.dispose();
+  if (manager.has("s-tabs")) throw new Error("tabs must unregister on dispose");
+});
+
+Deno.test("activateTab/closeTab drive a solid tabs node; disposeTabsFocus releases it", () => {
+  const tabs = Tabs({
+    tabs: [
+      { label: "a", content: [] },
+      { label: "b", content: [] },
+    ],
+    focusId: "s-drive",
+  });
+  const activeOf = () => tabs.props.active as number;
+  // The factory's focusId registration is owned by the node; disposing it
+  // unregisters the id.
+  const manager = focusManager;
+  if (!manager.has("s-drive")) throw new Error("Tabs(focusId) must register with the core manager");
+  activateTab(tabs, 1);
+  if (activeOf() !== 1) throw new Error(`activate = ${activeOf()}`);
+  closeTab(tabs, 0);
+  if (activeOf() !== 0) throw new Error(`close shifts the active down = ${activeOf()}`);
+  if (tabs.children[0]?.children.length !== 1) throw new Error(`bar = ${tabs.children[0]?.children.length}`);
+  disposeTabsFocus(tabs);
+  if (manager.has("s-drive")) throw new Error("disposeTabsFocus must unregister the id");
+});
+
+// Progress: factory parity + live setProgress updates
+// ---------------------------------------------------------------------------
+
+Deno.test("Progress factory materializes the core element with a framed gauge", () => {
+  const progress = Progress({ value: 5, max: 10, width: 12, label: "work" });
+  if (progress.type !== "progress") throw new Error(`type = ${progress.type}`);
+  // The bar model state lives on the root box's props; the frame defaults to
+  // a plain border.
+  if (progress.props.value !== 5 || progress.props.max !== 10) {
+    throw new Error(`bar model = ${JSON.stringify(progress.props)}`);
+  }
+  if (progress.props.border_style !== "plain" || progress.props.height !== 1) {
+    throw new Error(`frame = ${JSON.stringify(progress.props)}`);
+  }
+  // The label is JS bookkeeping, never a scene prop.
+  if ("label" in progress.props) throw new Error("label must not reach the scene props");
+  // Composition: the fill leaf + the label overlay + the percentage readout
+  // (inner width 10, ratio 0.5 => 5 filled cells).
+  const bar = progress.children[0];
+  if (bar === undefined || bar.type !== "text" || bar.props.text !== "▓▓▓▓▓░░░░░") {
+    throw new Error(`fill = ${JSON.stringify(bar?.props.text)}`);
+  }
+  if (progress.children[1]?.props.text !== "work" || progress.children[1]?.props.dim !== true) {
+    throw new Error("the label overlay must be composed");
+  }
+  if (progress.children[2]?.props.text !== "50%") {
+    throw new Error(`readout = ${JSON.stringify(progress.children[2]?.props.text)}`);
+  }
+  // The renderer surface maps the roadmap tag.
+  if (createElement("progress").type !== "progress") throw new Error("createElement(progress) mapping");
+});
+
+Deno.test("setProgress drives a solid progress node in place (no rebuild)", () => {
+  const progress = Progress({ value: 1, max: 4, width: 12 });
+  const barBefore = progress.children[0];
+  const readoutBefore = progress.children[1];
+  // Accessors: setProgress mutates the node in place, which TS's control flow
+  // cannot see — reading through functions defeats the stale narrowing.
+  const barText = (): string => progress.children[0]?.props.text as string;
+  const readoutText = (): string => progress.children[1]?.props.text as string;
+  const maxOf = (): unknown => progress.props.max;
+
+  setProgress(progress, 3);
+  if (progress.props.value !== 3 || maxOf() !== 4) {
+    throw new Error(`props = ${JSON.stringify(progress.props)}`);
+  }
+  if (progress.children[0] !== barBefore || progress.children[1] !== readoutBefore) {
+    throw new Error("setProgress must not rebuild the composition");
+  }
+  if (barText() !== "▓▓▓▓▓▓▓▓░░") throw new Error(`bar = ${JSON.stringify(barText())}`);
+  if (readoutText() !== "75%") throw new Error(`readout = ${JSON.stringify(readoutText())}`);
+
+  setProgress(progress, 1, 2);
+  if (maxOf() !== 2) throw new Error(`max = ${maxOf()}`);
+  if (barText() !== "▓▓▓▓▓░░░░░") throw new Error(`bar after max override = ${JSON.stringify(barText())}`);
+});
+
 Deno.test("subscribeResize re-renders on resize events and detaches on dispose", () => {
   const { renderer, resizeHandlers, renderCalls } = mockRenderer();
   const sizes: Array<{ width: number; height: number }> = [];
@@ -1964,6 +2192,122 @@ Deno.test("subscribeFocus delivers focus events and detaches on dispose", () => 
 
   dispose();
   if (focusHandlers.size >= 1) throw new Error("focus handler must be detached on dispose");
+});
+
+Deno.test("subscribeFocusTraversal moves focus forward on tab and backward on backtab with wrap", () => {
+  const { renderer, keyHandlers, renderCalls } = mockRenderer();
+  const manager = new FocusManager();
+  const a = CoreBox();
+  const b = CoreBox();
+  const c = CoreBox();
+  manager.register({ id: "a", node: a, onKey: () => {} });
+  manager.register({ id: "b", node: b, onKey: () => {} });
+  manager.register({ id: "c", node: c, onKey: () => {} });
+
+  const dispose = subscribeFocusTraversal(renderer, manager);
+  if (keyHandlers.size !== 1) {
+    throw new Error(`expected 1 key handler, got ${keyHandlers.size}`);
+  }
+  if (manager.activeId !== null) throw new Error("nothing must be focused initially");
+  const baseline = renderCalls.length;
+  const tab = () => {
+    for (const handler of keyHandlers) handler(keyEvent({ name: "tab" }));
+  };
+  const backtab = () => {
+    for (const handler of keyHandlers) handler(keyEvent({ name: "backtab" }));
+  };
+
+  tab();
+  if (manager.activeId !== "a") {
+    throw new Error(`tab with nothing focused must focus the first, got ${manager.activeId}`);
+  }
+  tab();
+  if (manager.activeId !== "b") throw new Error(`tab must move forward, got ${manager.activeId}`);
+  tab();
+  if (manager.activeId !== "c") throw new Error(`tab must reach the last, got ${manager.activeId}`);
+  tab();
+  if (manager.activeId !== "a") throw new Error(`tab must wrap to the first, got ${manager.activeId}`);
+  backtab();
+  if (manager.activeId !== "c") {
+    throw new Error(`backtab must wrap to the last, got ${manager.activeId}`);
+  }
+  backtab();
+  if (manager.activeId !== "b") {
+    throw new Error(`backtab must move backward, got ${manager.activeId}`);
+  }
+  backtab();
+  if (manager.activeId !== "a") throw new Error(`backtab must reach the first, got ${manager.activeId}`);
+  if (renderCalls.length !== baseline + 7) {
+    throw new Error(
+      `each traversal must re-render once, renders = ${renderCalls.length} (baseline ${baseline})`,
+    );
+  }
+
+  dispose();
+  if (keyHandlers.size >= 1) throw new Error("traversal must detach on dispose");
+});
+
+Deno.test("subscribeFocusTraversal skips the excluded ids when moving", () => {
+  const { renderer, keyHandlers, renderCalls } = mockRenderer();
+  const manager = new FocusManager();
+  const a = CoreBox();
+  const b = CoreBox();
+  const c = CoreBox();
+  const d = CoreBox();
+  manager.register({ id: "a", node: a, onKey: () => {} });
+  manager.register({ id: "b", node: b, onKey: () => {} });
+  manager.register({ id: "c", node: c, onKey: () => {} });
+  manager.register({ id: "d", node: d, onKey: () => {} });
+
+  const dispose = subscribeFocusTraversal(renderer, manager, ["b", "c"]);
+  if (!manager.focus("a")) throw new Error("focus(a) must succeed");
+  const baseline = renderCalls.length;
+
+  for (const handler of keyHandlers) handler(keyEvent({ name: "tab" }));
+  const afterTab = manager.activeId;
+  if (afterTab !== "d") throw new Error(`tab must skip b and c, got ${afterTab}`);
+
+  for (const handler of keyHandlers) handler(keyEvent({ name: "backtab" }));
+  const afterBacktab = manager.activeId;
+  if (afterBacktab !== "a") throw new Error(`backtab must skip c and b, got ${afterBacktab}`);
+  if (renderCalls.length !== baseline + 2) {
+    throw new Error(
+      `each traversal must re-render once, renders = ${renderCalls.length} (baseline ${baseline})`,
+    );
+  }
+
+  dispose();
+});
+
+Deno.test("subscribeFocusTraversal defaults to the core focusManager", () => {
+  const { renderer, keyHandlers } = mockRenderer();
+  focusManager.blur();
+  try {
+    focusManager.register({ id: "traversal-default-a", node: CoreBox(), onKey: () => {} });
+    focusManager.register({ id: "traversal-default-b", node: CoreBox(), onKey: () => {} });
+    const dispose = subscribeFocusTraversal(renderer);
+    if (keyHandlers.size !== 1) {
+      throw new Error(`expected 1 key handler, got ${keyHandlers.size}`);
+    }
+
+    for (const handler of keyHandlers) handler(keyEvent({ name: "tab" }));
+    const afterTab = focusManager.activeId;
+    if (afterTab !== "traversal-default-a") {
+      throw new Error(`default manager must be the core focusManager, got ${afterTab}`);
+    }
+    for (const handler of keyHandlers) handler(keyEvent({ name: "backtab" }));
+    const afterBacktab = focusManager.activeId;
+    if (afterBacktab !== "traversal-default-b") {
+      throw new Error(`default backtab must move backward, got ${afterBacktab}`);
+    }
+
+    dispose();
+    if (keyHandlers.size >= 1) throw new Error("traversal must detach on dispose");
+  } finally {
+    focusManager.blur();
+    focusManager.unregister("traversal-default-a");
+    focusManager.unregister("traversal-default-b");
+  }
 });
 
 Deno.test("startSpinner pauses ticks while unfocused and resumes on focus regain", async () => {

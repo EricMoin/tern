@@ -15,7 +15,8 @@
  * options key:
  *
  * - `createElement(type)`        -> tern node factory (`Box`/`Text`/`StreamingText`
- *   and the roadmap elements `Input`/`Spinner`/`StatusBar`/`Panels`/`DiffView`/`Select`)
+ *   and the roadmap elements `Input`/`Spinner`/`StatusBar`/`Panels`/`DiffView`/`Select`
+ *   /`ScrollView`/`Table`/`Tabs`/`Progress`/`Modal`)
  * - `createTextNode(value)`      -> `Text` node
  * - `replaceText`/`isTextNode`   -> text content re-point / type check
  * - `insertNode`/`removeNode`    -> tree ops (`Node.insertBefore`/`Node.addChild` / `Node.remove`)
@@ -35,7 +36,8 @@
  * updates actually reach the scene ops.
  *
  * The roadmap element factories (`Input`/`Textarea`/`Spinner`/`StatusBar`/
- * `Panels`/`DiffView`/`Select`/`ScrollView`/`Table`/`Modal`) materialize
+ * `Panels`/`DiffView`/`Select`/`ScrollView`/`Table`/`Tabs`/`Progress`/`Modal`)
+ * materialize
  * the @tern/core factories of the same name, matching what the `@tern/react`
  * host components map to (feature parity): same props -> same scene node
  * structure. The `Textarea` factory additionally mirrors the `<Textarea>`
@@ -43,6 +45,8 @@
  * `FocusManager` (routed keys edit it via `editTextareaKey`), firing
  * `onChange` / `onSubmit` — the registration is disposed with
  * `disposeTextareaFocus`.
+ * The `Tabs` factory mirrors the `<Tabs>` host's focus wiring the same way
+ * (registered with `disposeTabsFocus`).
  * `subscribeInput` wires a renderer's key events through the core
  * `FocusManager` (the Solid-flavored `useInput` equivalent — Solid has no
  * context, so the renderer is an explicit argument); `subscribePaste` wires a
@@ -56,7 +60,10 @@
  * `renderer.render()` after each so the compositor re-lays out at the new
  * terminal size (the Solid-flavored `useResize` equivalent). `subscribeFocus`
  * wires a renderer's terminal focus events (`{ focus_gained }`) to a handler,
- * and `startSpinner` drives a spinner node's frame ticks with a focus-aware
+ * and `subscribeFocusTraversal` wires a renderer's Tab / Shift+Tab keys to
+ * the focus manager's `next()` / `prev()` traversal, skipping an exclude list
+ * (the Solid-flavored `useFocusTraversal` equivalent).
+ * `startSpinner` drives a spinner node's frame ticks with a focus-aware
  * timer — pausing while the terminal is unfocused, resuming on regain (the
  * `@tern/react` `<Spinner>` effect equivalent, roadmap Phase 2).
  */
@@ -71,12 +78,14 @@ import {
   Input as TernInput,
   Modal as TernModal,
   Panels as TernPanels,
+  Progress as TernProgress,
   ScrollView as TernScrollView,
   Select as TernSelect,
   Spinner as TernSpinner,
   StatusBar as TernStatusBar,
   StreamingText as TernStreamingText,
   Table as TernTable,
+  Tabs as TernTabs,
   Text as TernText,
   Textarea as TernTextarea,
   defaultTheme,
@@ -99,6 +108,7 @@ import {
   setStreamAutoScroll,
   syncStreamTail,
   tableKey,
+  tabsKey,
   tick,
   useFocus,
   visibleTableRows,
@@ -115,6 +125,7 @@ import {
   type PanelDragResult,
   type PanelsProps,
   type PasteHandler,
+  type ProgressProps,
   type Renderer,
   type ResizeHandler,
   type ScrollViewProps,
@@ -125,6 +136,9 @@ import {
   type TableColumn,
   type TableProps,
   type TableState,
+  type TabSpec,
+  type TabsProps as CoreTabsProps,
+  type TabsState,
   type TextareaProps as CoreTextareaProps,
   type TextareaState,
   type Theme,
@@ -153,6 +167,7 @@ export type {
   PanelSpec,
   PanelsProps,
   PasteHandler,
+  ProgressProps,
   Renderer,
   ResizeHandler,
   ScrollViewProps,
@@ -166,6 +181,8 @@ export type {
   TableColumn,
   TableProps,
   TableState,
+  TabSpec,
+  TabsState,
   TextareaState,
 } from "@tern/core";
 
@@ -178,7 +195,9 @@ export type {
 // drag-resize helpers, the modal helpers, the focus machinery, and the
 // theme surface.
 export {
+  activateTab,
   closeModal,
+  closeTab,
   collapsePanel,
   defaultTheme,
   dragPanels,
@@ -203,10 +222,12 @@ export {
   scrollToBottom,
   scrollTop,
   selectKey,
+  setProgress,
   startPanelDrag,
   STREAM_AFFORDANCE_CHAR,
   syncStreamTail,
   tableKey,
+  tabsKey,
   tick,
   togglePanel,
   useFocus,
@@ -326,12 +347,19 @@ const options: RendererOptions<Node> = {
         // `columns` / `rows` are required props of the core factory; empty
         // model lists yield a valid, empty table.
         return TernTable({ columns: [], rows: [] });
+      case "tabs":
+        // `tabs` is the one required prop of the core factory; an empty
+        // spec list yields a valid, empty tabs (bar + empty region).
+        return TernTabs({ tabs: [] });
+      case "progress":
+        // No required props; the defaults yield an empty framed gauge.
+        return TernProgress({});
       case "modal":
         // No required props; the default yields a closed, empty overlay.
         return TernModal({});
       default:
         throw new Error(
-          `@tern/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "textarea", "spinner", "status_bar", "panels", "diff", "select", "scroll_view", "table", or "modal")`,
+          `@tern/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "textarea", "spinner", "status_bar", "panels", "diff", "select", "scroll_view", "table", "tabs", "progress", or "modal")`,
         );
     }
   },
@@ -759,6 +787,110 @@ export function Modal(props: ModalProps = {}): Node {
 }
 
 /**
+ * Props for the solid `Tabs` factory: the core tabs props plus the
+ * focus/callback wiring, mirroring the `@tern/react` `<Tabs>` host component.
+ * `focusId` / `focusManager` / `onChange` / `onClose` are consumed by the
+ * factory — they never reach the scene node; the remaining keys flow to the
+ * core `Tabs` factory (the `tabs` spec list and the `active` / `closable`
+ * state props).
+ */
+export interface TabsProps extends CoreTabsProps {
+  /**
+   * Register the tabs with a `FocusManager` under this id so routed keys
+   * (via `subscribeInput`) drive it through the core `tabsKey`. Omit to
+   * leave the tabs inert to keys.
+   */
+  focusId?: string;
+  /** The `FocusManager` to register with (defaults to the core
+   *  `focusManager`). */
+  focusManager?: FocusManager;
+  /** Fired after a routed key moves the active tab. */
+  onChange?: (state: TabsState) => void;
+  /** Fired after `ctrl+w` routes to the tabs and closes the active tab. */
+  onClose?: (state: TabsState) => void;
+}
+
+/** The focus handles of tabs nodes registered by the {@link Tabs} factory
+ * (keyed by node, like the `textareaFocus` map). The factory owns the
+ * registration; the caller owns the node's lifecycle, so it disposes the
+ * registration with {@link disposeTabsFocus} when the node leaves the
+ * scene. */
+const tabsFocus = new WeakMap<Node, FocusHandle>();
+
+/**
+ * Dispose a tabs node's focus registration. The {@link Tabs} factory
+ * registers the node with its `FocusManager` under `focusId` at creation; the
+ * registration is released here — unregistering the id and clearing the
+ * active focus — when the node is discarded. A node registered without a
+ * `focusId` (or already disposed) is a no-op.
+ */
+export function disposeTabsFocus(node: Node): void {
+  tabsFocus.get(node)?.dispose();
+  tabsFocus.delete(node);
+}
+
+/**
+ * Create a `tabs` scene node: the core `Tabs` factory materialized with
+ * `props` — a flex column of box/text leaves (a tab bar row, one `Text` leaf
+ * per tab with the active tab painted with the theme's `primary` palette
+ * colors and reversed and prefixed with a top-border marker, closable tabs
+ * carrying a close glyph; plus a content region box holding the active tab's
+ * content nodes).
+ *
+ * When `focusId` is given, the tabs register with the `FocusManager` (the
+ * `focusManager` prop, defaulting to the core `focusManager`) — the
+ * Solid-flavored equivalent of the `@tern/react` `<Tabs focusId>`
+ * registration. Routed keys (via `subscribeInput`) drive it through the core
+ * `tabsKey`: `left` / `right` move the active tab (clamped), `ctrl+tab` /
+ * `ctrl+shift+tab` wrap to the next / previous tab, and `ctrl+w` closes the
+ * active tab — `onChange` fires after the active tab moves, `onClose` after
+ * a close. Dispose the registration with {@link disposeTabsFocus} when the
+ * node leaves the scene.
+ */
+export function Tabs(props: TabsProps): Node {
+  // The focus/callback keys are component-consumed (mirroring `@tern/react`'s
+  // `TABS_PROPS` stripping): they must never reach the core factory, or they
+  // would leak onto the scene node's props.
+  const { focusId, focusManager: manager, onChange, onClose, ...nodeProps } = props;
+  const node = TernTabs(resolveTheme(getTheme(), nodeProps) as CoreTabsProps);
+  if (focusId !== undefined) {
+    const handle = useFocus(focusId, node, (event) => {
+      const before = node.props as TabsProps;
+      const beforeActive = typeof before.active === "number" ? before.active : 0;
+      const barBefore = node.children[0]?.children.length ?? 0;
+      const next = tabsKey(node, event);
+      // A ctrl+w close shrinks the tab bar (tabsKey rebuilds the
+      // composition); any other routed key leaves the bar count alone.
+      const closed = (node.children[0]?.children.length ?? 0) < barBefore;
+      if (closed) {
+        onClose?.(next);
+      } else if (next.active !== beforeActive) {
+        onChange?.(next);
+      }
+    }, manager);
+    tabsFocus.set(node, handle);
+  }
+  return node;
+}
+
+/**
+ * Create a `progress` scene node: the core `Progress` factory materialized
+ * with `props` — a framed box (ratatui Gauge parity, the frame defaulting to
+ * `border_style: "plain"`) holding an in-flow fill leaf (`'▓'` ×
+ * `ceil(value/max * inner_width)`, `'░'` for the rest), an optional dimmed
+ * label leaf left-aligned inside the bar area (composed only when it fits
+ * alongside the readout), and an optional percentage readout
+ * (`ceil(value/max*100)%`) right-aligned inside it. A `ratio` prop (0..1)
+ * drives the bar directly as an alternative to `value`/`max`. The `progress`
+ * component preset is resolved onto the frame's props at element-creation
+ * time. Drive a live bar without rebuilding with `setProgress` (re-exported
+ * by this package).
+ */
+export function Progress(props: ProgressProps = {}): Node {
+  return TernProgress(resolveTheme(getTheme(), { ...props, component: "progress" }) as ProgressProps);
+}
+
+/**
  * Subscribe an `AsyncIterable<Span>` to a `streaming_text` node.
  *
  * Consumes `stream` in the background, appending each span to `node` via
@@ -864,6 +996,70 @@ export function subscribeInput(
     if (manager.routeKey(event)) return;
     handler(event);
   });
+}
+
+/**
+ * Wire Tab / Shift+Tab focus traversal for a renderer — the Solid-flavored
+ * `useFocusTraversal` equivalent. Solid has no React-style context, so the
+ * renderer (and the manager) are explicit arguments.
+ *
+ * Each `tab` key calls `manager.next()`, each `backtab` (Shift+Tab) key calls
+ * `manager.prev()`, skipping the ids in `exclude`, re-invoking
+ * `renderer.render()` after each move so the compositor repaints the newly
+ * focused element. The subscription listens on the renderer's key channel
+ * (the same channel `subscribeInput` subscribes to) but handles Tab /
+ * Shift+Tab ahead of focused-element routing: traversal keys always move
+ * focus, even while an element is focused (standard TUI behavior — element
+ * handlers leave bare Tab / Shift+Tab untouched). All other keys fall through
+ * to the remaining subscribers untouched.
+ *
+ * `manager` defaults to the core `focusManager`; `exclude` is captured at
+ * subscribe time (Solid closures over signal getters stay live because the
+ * getters are read at dispatch time).
+ *
+ * Returns a disposer that unsubscribes.
+ */
+export function subscribeFocusTraversal(
+  renderer: Renderer,
+  manager: FocusManager = focusManager,
+  exclude?: string[],
+): () => void {
+  const excluded = exclude === undefined ? undefined : new Set(exclude);
+  return renderer.onKey((event) => {
+    if (event.name === "tab") {
+      if (traverseFocus(manager, excluded, true)) renderer.render();
+    } else if (event.name === "backtab") {
+      if (traverseFocus(manager, excluded, false)) renderer.render();
+    }
+  });
+}
+
+/**
+ * Move the active focus one step forward (`forward`) or backward, skipping
+ * the ids in `exclude` (wrapping around the registration order). Returns
+ * whether the focus landed on a non-excluded id; when nothing is registered
+ * or every registered id is excluded, the focus is left unchanged and `false`
+ * is returned (the caller then skips the repaint).
+ */
+function traverseFocus(
+  manager: FocusManager,
+  exclude: ReadonlySet<string> | undefined,
+  forward: boolean,
+): boolean {
+  const start = manager.activeId;
+  const step = forward ? () => manager.next() : () => manager.prev();
+  // One step beyond the excluded set: the worst case walks past every
+  // excluded id (or wraps back to the start) before landing on a keeper.
+  const maxSteps = (exclude?.size ?? 0) + 1;
+  for (let i = 0; i < maxSteps; i++) {
+    if (!step()) return false; // nothing registered — no move
+    const id = manager.activeId;
+    if (id !== null && (exclude === undefined || !exclude.has(id))) return true;
+  }
+  // Every registered id is excluded: undo the probe so the focus is unchanged.
+  if (start === null) manager.blur();
+  else if (manager.has(start)) manager.focus(start);
+  return false;
 }
 
 /** Options for {@link subscribePaste}. */
