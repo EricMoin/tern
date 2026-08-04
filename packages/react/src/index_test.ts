@@ -15,6 +15,7 @@ import {
   Box as CoreBox,
   FocusManager,
   MODAL_Z_INDEX,
+  STREAM_AFFORDANCE_CHAR,
   closeModal,
   createRenderer,
   focusManager,
@@ -22,6 +23,7 @@ import {
   isStreamFollowing,
   openModal,
   scrollTo,
+  scrollToBottom,
   syncStreamTail,
   useFocus as coreUseFocus,
   type KeyEvent,
@@ -66,6 +68,7 @@ import {
   useFocus,
   useInput,
   usePanelMouseDrag,
+  usePaste,
   useResize,
   useTheme,
   useWheelScroll,
@@ -91,11 +94,13 @@ function mockRenderer(): {
   keyHandlers: Set<(event: KeyEvent) => void>;
   resizeHandlers: Set<ResizeHandler>;
   focusHandlers: Set<(event: { focus_gained: boolean }) => void>;
+  pasteHandlers: Set<(text: string) => void>;
 } {
   const renderCalls: number[] = [];
   const keyHandlers = new Set<(event: KeyEvent) => void>();
   const resizeHandlers = new Set<ResizeHandler>();
   const focusHandlers = new Set<(event: { focus_gained: boolean }) => void>();
+  const pasteHandlers = new Set<(text: string) => void>();
   const root = CoreBox();
   const renderer = {
     root,
@@ -114,9 +119,13 @@ function mockRenderer(): {
       focusHandlers.add(handler);
       return () => focusHandlers.delete(handler);
     },
+    onPaste: (handler: (text: string) => void) => {
+      pasteHandlers.add(handler);
+      return () => pasteHandlers.delete(handler);
+    },
     destroy: () => {},
   } as unknown as Renderer;
-  return { renderer, root, renderCalls, keyHandlers, resizeHandlers, focusHandlers };
+  return { renderer, root, renderCalls, keyHandlers, resizeHandlers, focusHandlers, pasteHandlers };
 }
 
 function keyEvent(over: Partial<KeyEvent> = {}): KeyEvent {
@@ -154,6 +163,7 @@ Deno.test("public API surface is exported", () => {
     render,
     useApp,
     useInput,
+    usePaste,
   ]) {
     if (typeof fn !== "function") {
       throw new Error(`expected ${String(fn)} to be a function`);
@@ -861,6 +871,189 @@ Deno.test("useInput with isActive: false stays detached", async () => {
   if (keyHandlers.size !== 0) throw new Error("inactive handler must not subscribe");
 });
 
+Deno.test("usePaste subscribes to renderer paste events and detaches on unmount", async () => {
+  const { renderer, pasteHandlers } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  const last: { text: string | null } = { text: null };
+  function PasteProbe() {
+    usePaste((text) => {
+      last.text = text;
+    });
+    return createElement(Text, { text: "sub" });
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(PasteProbe));
+  });
+
+  if (pasteHandlers.size !== 1) {
+    throw new Error(`expected 1 paste handler, got ${pasteHandlers.size}`);
+  }
+  for (const handler of pasteHandlers) handler("pasted text");
+  if (last.text !== "pasted text") {
+    throw new Error(`usePaste handler must receive the pasted text, got ${JSON.stringify(last.text)}`);
+  }
+
+  await act(async () => {
+    ternRoot.unmount();
+  });
+  if (pasteHandlers.size >= 1) throw new Error("paste handler must be detached on unmount");
+});
+
+Deno.test("usePaste with isActive: false stays detached", async () => {
+  const { renderer, pasteHandlers } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  function InactivePasteProbe() {
+    usePaste(() => {}, { isActive: false });
+    return createElement(Text, { text: "inactive" });
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(InactivePasteProbe));
+  });
+  if (pasteHandlers.size !== 0) throw new Error("inactive paste handler must not subscribe");
+});
+
+Deno.test("a focused Input auto-pastes routed paste events and fires onChange", async () => {
+  const { renderer, root, pasteHandlers } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const manager = new FocusManager();
+  const changes: Array<{ value: string; caret: number }> = [];
+  const treePastes: string[] = [];
+  // Length read through a function: TS narrows a const-typed empty array's
+  // `length` to 0 (the pushes happen inside closures it cannot see).
+  const changeCount = () => changes.length;
+  const treePasteCount = () => treePastes.length;
+
+  function App() {
+    // The tree-level paste subscription routes each paste through the manager
+    // before falling back to its own handler.
+    usePaste((text) => treePastes.push(text), { focusManager: manager });
+    return createElement(Input, {
+      focusId: "main",
+      focusManager: manager,
+      onChange: (state) => changes.push(state),
+    });
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(App));
+  });
+
+  if (!manager.has("main")) throw new Error("input must register under focusId");
+  // Not focused: pastes fall through to the tree handler.
+  for (const handler of pasteHandlers) handler("xy");
+  if (changeCount() !== 0) throw new Error("unfocused input must not receive pastes");
+  if (treePasteCount() !== 1 || treePastes[0] !== "xy") {
+    throw new Error(`tree handler must receive the paste while unfocused: ${JSON.stringify(treePastes)}`);
+  }
+
+  // Focused: the paste routes to the input's paste handler (core `pasteInto`)
+  // and fires onChange; the tree handler is skipped.
+  if (!manager.focus("main")) throw new Error("focus(main) must succeed");
+  for (const handler of pasteHandlers) handler("ab");
+  if (changeCount() !== 1 || changes[0]!.value !== "ab" || changes[0]!.caret !== 2) {
+    throw new Error(`onChange = ${JSON.stringify(changes)}`);
+  }
+  if (treePasteCount() !== 1) throw new Error("a routed paste must skip the tree handler");
+
+  // The routed paste lands on the scene node itself (value + caret advanced
+  // by the pasted text's display width).
+  const input = root.children[0]!;
+  if (input.props.value !== "ab" || input.props.caret !== 2) {
+    throw new Error(`node edited = ${input.props.value}/${input.props.caret}`);
+  }
+
+  // A second paste inserts at the caret (mid-value) and advances past it.
+  for (const handler of pasteHandlers) handler("XY");
+  if (changeCount() !== 2 || changes[1]!.value !== "abXY" || changes[1]!.caret !== 4) {
+    throw new Error(`second paste = ${JSON.stringify(changes)}`);
+  }
+  // Read through a function: TS control-flow narrowing would otherwise pin
+  // `input.props.value` to the literal of the first assertion.
+  const valueOf = () => input.props.value as string;
+  if (valueOf() !== "abXY") {
+    throw new Error(`node after second paste = ${JSON.stringify(valueOf())}`);
+  }
+
+  await act(async () => {
+    ternRoot.unmount();
+  });
+  if (manager.has("main")) throw new Error("input must unregister on unmount");
+  if (manager.activeId !== null) throw new Error("active focus must clear on unregister");
+});
+
+Deno.test("a focused Textarea auto-pastes routed paste events and fires onChange", async () => {
+  const { renderer, root, pasteHandlers } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const manager = new FocusManager();
+  const changes: Array<{ lines: string[]; row: number; col: number }> = [];
+  const treePastes: string[] = [];
+  // Length read through a function: TS narrows a const-typed empty array's
+  // `length` to 0 (the pushes happen inside closures it cannot see).
+  const changeCount = () => changes.length;
+  const treePasteCount = () => treePastes.length;
+
+  function App() {
+    // The tree-level paste subscription routes each paste through the manager
+    // before falling back to its own handler.
+    usePaste((text) => treePastes.push(text), { focusManager: manager });
+    return createElement(Textarea, {
+      lines: ["hi"],
+      focusId: "main",
+      focusManager: manager,
+      onChange: (state) => changes.push(state),
+    });
+  }
+
+  await act(async () => {
+    ternRoot.render(createElement(App));
+  });
+
+  if (!manager.has("main")) throw new Error("textarea must register under focusId");
+  // Not focused: pastes fall through to the tree handler.
+  for (const handler of pasteHandlers) handler("x");
+  if (changeCount() !== 0) throw new Error("unfocused textarea must not receive pastes");
+  if (treePasteCount() !== 1 || treePastes[0] !== "x") {
+    throw new Error(`tree handler must receive the paste while unfocused: ${JSON.stringify(treePastes)}`);
+  }
+
+  // Focused: the paste routes to the textarea's paste handler (core
+  // `pasteIntoTextarea`) and fires onChange; the tree handler is skipped.
+  // The caret starts at col 0 (no col prop), so the paste lands at the head.
+  if (!manager.focus("main")) throw new Error("focus(main) must succeed");
+  for (const handler of pasteHandlers) handler("XY");
+  if (changeCount() !== 1 || changes[0]!.lines.join(",") !== "XYhi" || changes[0]!.col !== 2) {
+    throw new Error(`onChange = ${JSON.stringify(changes)}`);
+  }
+  if (treePasteCount() !== 1) throw new Error("a routed paste must skip the tree handler");
+
+  // The routed paste lands on the scene node itself (one leaf per line).
+  const textarea = root.children[0]!;
+  if ((textarea.props as { lines?: string[] }).lines?.join(",") !== "XYhi") {
+    throw new Error(`node lines = ${JSON.stringify(textarea.props)}`);
+  }
+
+  // A multi-line paste splits into new logical lines; the caret lands at the
+  // end of the pasted text.
+  for (const handler of pasteHandlers) handler("a\nb");
+  const second = changes[1];
+  if (changeCount() !== 2 || second === undefined) {
+    throw new Error(`multi-line paste must fire onChange (${changeCount()})`);
+  }
+  if (second.lines.join("|") !== "XYa|bhi" || second.row !== 1 || second.col !== 1) {
+    throw new Error(`multi-line paste = ${JSON.stringify(second)}`);
+  }
+
+  await act(async () => {
+    ternRoot.unmount();
+  });
+  if (manager.has("main")) throw new Error("textarea must unregister on unmount");
+  if (manager.activeId !== null) throw new Error("active focus must clear on unregister");
+});
+
 Deno.test("useResize subscribes to renderer resize events, re-renders, and detaches on unmount", async () => {
   const { renderer, resizeHandlers, renderCalls } = mockRenderer();
   const ternRoot = createRoot(renderer);
@@ -1280,6 +1473,88 @@ Deno.test("StreamingText with autoScroll: false keeps the view pinned", async ()
     if ("autoScroll" in node.props) {
       throw new Error(`autoScroll leaked into props: ${JSON.stringify(node.props)}`);
     }
+
+    await act(async () => {
+      ternRoot.unmount();
+    });
+  } finally {
+    setAddonForTesting(null);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// StreamingText scroll-to-bottom affordance wiring
+//
+// A manual scroll above the tail detaches the follow and stamps a small `▼`
+// indicator leaf at the clip region's bottom-right (the core
+// `STREAM_AFFORDANCE_CHAR`); `followTail` (re-attach) and `scrollToBottom`
+// (one-shot jump to the tail) dismiss it. The appear/dismiss mechanics live
+// in @tern/core — the framework layers surface the helpers so an app can
+// wire the affordance's activation.
+// ---------------------------------------------------------------------------
+
+Deno.test("StreamingText stamps the scroll-to-bottom affordance on detach and dismisses on followTail/scrollToBottom", async () => {
+  setAddonForTesting(streamFakeAddon);
+  try {
+    const renderer = createRenderer();
+    const ternRoot = createRoot(renderer);
+    const source = manualSpanSource();
+
+    await act(async () => {
+      ternRoot.render(
+        createElement(StreamingText, { stream: source.stream, clip_height: 2, width: 10 }),
+      );
+    });
+    await act(async () => {}); // mount effects; the pump parks on next()
+    await act(async () => {
+      source.push({ text: "a\n" });
+    });
+    await act(async () => {
+      source.push({ text: "b\n" });
+    });
+    await act(async () => {
+      source.push({ text: "c\n" });
+    });
+
+    const node = renderer.root.children[0]!;
+    // Fresh reads per assertion — TS property-access narrowing would reject a
+    // later comparison against a different literal (see the core tests).
+    const count = (): number => node.children.length;
+    const y = (): number => node.props.scroll_y as number;
+    if (!isStreamFollowing(node)) throw new Error("autoScroll must default to following");
+    if (count() !== 0) throw new Error(`following children = ${count()}`);
+
+    // Scroll above the tail: the follow detaches and the ▼ affordance is
+    // stamped at the clip region's bottom-right.
+    scrollTo(node, 0, 0);
+    if (isStreamFollowing(node)) throw new Error("a scroll above the tail must detach");
+    if (count() !== 1) throw new Error(`affordance children = ${count()}`);
+    const leaf = node.children[0]!;
+    if (leaf.props.text !== STREAM_AFFORDANCE_CHAR) {
+      throw new Error(`affordance text = ${JSON.stringify(leaf.props.text)}`);
+    }
+    if (leaf.props.position !== "absolute" || leaf.props.right !== 0) {
+      throw new Error(`affordance position = ${JSON.stringify(leaf.props)}`);
+    }
+
+    // followTail: re-attach, snap back to the tail, and dismiss the
+    // affordance.
+    followTail(node);
+    if (!isStreamFollowing(node)) throw new Error("followTail must re-attach");
+    if (count() !== 0) throw new Error(`affordance after followTail = ${count()}`);
+
+    // Detach again, let the stream grow while pinned, then dismiss via
+    // scrollToBottom: a one-shot jump to the current tail (5 - 2 = 3).
+    scrollTo(node, 0, 0);
+    if (count() !== 1) throw new Error(`re-shown children = ${count()}`);
+    await act(async () => {
+      source.push({ text: "d\n" }); // 5 rows now — the view stays pinned
+    });
+    if (y() !== 0) throw new Error(`pinned scroll_y = ${y()}`);
+    const applied = scrollToBottom(node);
+    if (applied.y !== 3) throw new Error(`scrollToBottom applied = ${JSON.stringify(applied)}`);
+    if (count() !== 0) throw new Error(`affordance after scrollToBottom = ${count()}`);
+    if (y() !== 3) throw new Error(`jump scroll_y = ${y()}`);
 
     await act(async () => {
       ternRoot.unmount();
@@ -1797,7 +2072,9 @@ Deno.test("Table materializes with a sticky header and rows; tableKey drives the
   if (header?.children.length !== 2 || header?.children[0]?.props.text !== "Name".padEnd(10)) {
     throw new Error("the header row lays out padded header cells");
   }
-  if (region === undefined || region.children.length !== 4) {
+  // The content region is windowed: only the visible rows are materialized
+  // (clip_height 2 at scroll 0), not one node per data row.
+  if (region === undefined || region.children.length !== 2) {
     throw new Error(`rows = ${region?.children.length}`);
   }
   // The highlighted row (index 1) is reversed; the others are not.

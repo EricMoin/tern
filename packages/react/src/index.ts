@@ -31,7 +31,11 @@
  * - `useApp()` exposes the app handle (renderer, scene root, exit/unmount);
  *   `useInput(handler)` subscribes to keyboard input for the tree, routing
  *   each key to the focused element's handler first (via the core
- *   `FocusManager`) and falling back to the tree handler. `useFocus()` hooks
+ *   `FocusManager`) and falling back to the tree handler. `usePaste(handler)`
+ *   does the same for paste events: a paste routes to the focused element's
+ *   paste handler first (a focused `<Input focusId>` / `<Textarea focusId>`
+ *   auto-pastes into its node) and falls back to the tree handler.
+ *   `useFocus()` hooks
  *   an arbitrary element's node into a `FocusManager`. `useResize(handler)`
  *   subscribes to terminal resize events, re-invoking `renderer.render()`
  *   after each so the compositor re-lays out at the new terminal size.
@@ -59,6 +63,8 @@ import {
   focusAt,
   focusManager,
   mergeTheme,
+  pasteInto,
+  pasteIntoTextarea,
   resolveTheme,
   scrollBy,
   scrollTo,
@@ -81,6 +87,7 @@ import {
   type PanelDragHandle,
   type PanelDragResult,
   type PanelSpec,
+  type PasteHandler,
   type Renderer,
   type ResizeHandler,
   type SelectOption,
@@ -138,8 +145,11 @@ export interface StreamingTextProps extends TernNodeProps {
    * each appended span pins the node's `scroll_y` to the content tail — the
    * stream's `Node.contentSize()` height vs the `clip_height` viewport (see
    * `@tern/core` `syncStreamTail` / `followTail`). A manual scroll above the
-   * tail (via `scrollTo` / `scrollBy` / `scrollTop`) detaches the follow and
-   * pins the view where the user left it; `followTail` re-attaches.
+   * tail (via `scrollTo` / `scrollBy` / `scrollTop`) detaches the follow,
+   * pins the view where the user left it, and stamps the `▼` scroll-to-bottom
+   * affordance at the clip region's bottom-right (`@tern/core`
+   * `STREAM_AFFORDANCE_CHAR`); `followTail` re-attaches and `scrollToBottom`
+   * jumps to the tail, both dismissing it.
    */
   autoScroll?: boolean;
   /**
@@ -243,11 +253,13 @@ export function Text(props: TextProps): ReactElement<TextProps> {
  * With `autoScroll` (the default), each append also feeds the core auto-scroll
  * (`syncStreamTail`): the node's `scroll_y` stays pinned to the stream tail
  * (`Node.contentSize()` height vs the `clip_height` viewport) while the user
- * does not scroll up; a manual scroll above the tail detaches and
- * `followTail` re-attaches. A separate effect keeps the core follow state in
- * sync with the `autoScroll` prop (the reconciler strips the flag from the
- * scene props, so the core factory's default-on must be corrected for an
- * explicit `autoScroll: false`).
+ * does not scroll up; a manual scroll above the tail detaches, pins the view,
+ * and stamps the `▼` scroll-to-bottom affordance, and `followTail` (re-attach)
+ * or `scrollToBottom` (one-shot jump to the tail — exported by this package)
+ * dismiss it. A separate effect keeps the core follow state in sync with the
+ * `autoScroll` prop (the reconciler strips the flag from the scene props, so
+ * the core factory's default-on must be corrected for an explicit
+ * `autoScroll: false`).
  */
 export function StreamingText(props: StreamingTextProps): ReactElement<StreamingTextProps> {
   const { renderer } = useApp();
@@ -480,9 +492,11 @@ export interface SelectProps extends TernNodeProps {
  * value and caret (core `Input` factory). When `focusId` is given, the input
  * registers with a `FocusManager` on mount and routed keys (via `useInput`)
  * edit it through the core `editKey` — `onChange` fires after the value or
- * caret changes and `onSubmit` on Enter. The input's ref is managed
- * internally (like `<StreamingText>`); the element takes no React children —
- * its composition is fixed by the factory.
+ * caret changes and `onSubmit` on Enter. Routed paste events (via
+ * `usePaste`) auto-paste into the node through the core `pasteInto` when the
+ * input is focused — `onChange` fires after the paste changes the value. The
+ * input's ref is managed internally (like `<StreamingText>`); the element
+ * takes no React children — its composition is fixed by the factory.
  */
 export function Input(props: InputProps): ReactElement<InputProps> {
   const theme = useTheme();
@@ -507,7 +521,15 @@ export function Input(props: InputProps): ReactElement<InputProps> {
       } else if (changed) {
         onChangeRef.current?.({ value: next.value, caret: next.caret });
       }
-    }, manager).dispose;
+    }, manager, (text) => {
+      // A routed paste auto-pastes into the focused input (pasteInto is
+      // multi-width aware at the caret) and reports the new state, mirroring
+      // a char-key edit. An empty paste is a no-op (the value is unchanged).
+      const before = node.props;
+      const next = pasteInto(node, text);
+      const changed = next.value !== before.value || next.caret !== before.caret;
+      if (changed) onChangeRef.current?.({ value: next.value, caret: next.caret });
+    }).dispose;
   }, [props.focusId, manager]);
 
   return createElement(HOST_INPUT, {
@@ -557,8 +579,12 @@ export interface TextareaProps extends TernNodeProps {
  * the textarea registers with a `FocusManager` on mount and routed keys (via
  * `useInput`) edit it through the core `editTextareaKey` — `onChange` fires
  * after the lines/row/col change and `onSubmit` on Enter (which splits the
- * line). The textarea's ref is managed internally (like `<Input>`); the
- * element takes no React children — its composition is fixed by the factory.
+ * line). Routed paste events (via `usePaste`) auto-paste into the node
+ * through the core `pasteIntoTextarea` when the textarea is focused —
+ * `onChange` fires after the paste changes the lines/row/col (a pasted `\n`
+ * splits into new logical lines). The textarea's ref is managed internally
+ * (like `<Input>`); the element takes no React children — its composition is
+ * fixed by the factory.
  */
 export function Textarea(props: TextareaProps): ReactElement<TextareaProps> {
   const theme = useTheme();
@@ -584,7 +610,17 @@ export function Textarea(props: TextareaProps): ReactElement<TextareaProps> {
       } else if (changed) {
         onChangeRef.current?.(next);
       }
-    }, manager).dispose;
+    }, manager, (text) => {
+      // A routed paste auto-pastes into the focused textarea
+      // (pasteIntoTextarea splits pasted newlines into logical lines) and
+      // reports the new state, mirroring a char-key edit. An empty paste is
+      // a no-op (the lines are unchanged).
+      const before = node.props as TextareaProps;
+      const next = pasteIntoTextarea(node, text);
+      const changed =
+        next.lines !== before.lines || next.row !== before.row || next.col !== before.col;
+      if (changed) onChangeRef.current?.(next);
+    }).dispose;
   }, [props.focusId, manager]);
 
   return createElement(HOST_TEXTAREA, {
@@ -1016,7 +1052,7 @@ export function useClickToFocus(renderer: Renderer): void {
 // Public API
 // ---------------------------------------------------------------------------
 
-export { createRoot, render, useApp, useInput } from "./reconciler.ts";
+export { createRoot, render, useApp, useInput, usePaste } from "./reconciler.ts";
 export type {
   AppHandle,
   TernContainer,
@@ -1026,6 +1062,8 @@ export type {
   TernTimeoutHandle,
   UseInputHandler,
   UseInputOptions,
+  UsePasteHandler,
+  UsePasteOptions,
 } from "./reconciler.ts";
 // The HostConfig itself is internal, but exported for tooling/tests:
 export { hostConfig, toNodeProps } from "./reconciler.ts";
@@ -1043,6 +1081,7 @@ export type {
   PanelDragHandle,
   PanelDragResult,
   PanelSpec,
+  PasteHandler,
   Renderer,
   ResizeHandler,
   SelectOption,
@@ -1054,9 +1093,12 @@ export type {
   TextareaState,
 } from "@tern/core";
 // Core values re-exported: the focus machinery, the element edit helpers
-// used by the roadmap host components, the scroll helpers (including the
-// streaming auto-scroll `followTail` / `syncStreamTail` / `isStreamFollowing`),
-// the panel drag-resize helpers, the modal helpers, and the theme surface.
+// used by the roadmap host components (including the paste counterparts
+// `pasteInto` / `pasteIntoTextarea`, which the focused `<Input>` / `<Textarea>`
+// auto-paste through), the scroll helpers (including the streaming auto-scroll
+// `followTail` / `syncStreamTail` / `isStreamFollowing` / `scrollToBottom` and
+// the `STREAM_AFFORDANCE_CHAR` scroll-to-bottom indicator), the panel
+// drag-resize helpers, the modal helpers, and the theme surface.
 export {
   closeModal,
   defaultTheme,
@@ -1072,12 +1114,16 @@ export {
   mergeTheme,
   MODAL_Z_INDEX,
   openModal,
+  pasteInto,
+  pasteIntoTextarea,
   resolveTheme,
   scrollBy,
   scrollTo,
+  scrollToBottom,
   scrollTop,
   selectKey,
   startPanelDrag,
+  STREAM_AFFORDANCE_CHAR,
   syncStreamTail,
   tableKey,
   tick,
