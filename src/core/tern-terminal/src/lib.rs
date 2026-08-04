@@ -25,9 +25,7 @@
 pub mod backend;
 pub mod event;
 
-pub use backend::{
-    flush_cursor_to, flush_diff_to, flush_diff_with_cursor_to, Backend,
-};
+pub use backend::{flush_cursor_to, flush_diff_to, flush_diff_with_cursor_to, Backend};
 pub use event::{
     normalize, poll_events, run_event_loop, spawn_event_loop, EventLoopHandle, KeyName,
     MouseButton, MouseEventKind, TernEvent, TernKey, TernMouse,
