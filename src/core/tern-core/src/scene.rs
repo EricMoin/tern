@@ -1,7 +1,8 @@
 //! The scene tree: a node graph produced by the reconciler and consumed by
 //! layout and the compositor.
 
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 
 use crate::rect::Rect;
 use crate::style::Style;
@@ -76,11 +77,41 @@ pub struct SceneNode {
 /// All mutations keep parent/child links consistent: `add_child` links both
 /// directions, `remove` detaches the node (and its whole subtree) from its
 /// parent, and the root can never be removed.
+///
+/// Every successful mutation bumps [`Scene::epoch`]. The epoch is the
+/// renderer's change-detection signal: a renderer can skip repainting a
+/// scene whose epoch is unchanged since its last paint. It starts at `0` and
+/// only ever increases.
+///
+/// Alongside the epoch, every mutation pushes the id of the mutated node
+/// (for `remove`, every id of the removed subtree) into a dirty set, and a
+/// raw [`Scene::node_mut`] borrow additionally sets a force-full-scan flag
+/// (the scene cannot introspect what the caller changes through the raw
+/// borrow). The compositor consumes this hint per paint via
+/// [`Scene::take_dirty`] to limit its per-frame paint-signature walk to the
+/// mutated nodes instead of the whole tree. The hint is interior-mutable so
+/// a renderer holding only `&Scene` can drain it.
 #[derive(Debug)]
 pub struct Scene {
     nodes: HashMap<NodeId, SceneNode>,
     root: NodeId,
     next_id: u64,
+    /// Monotonic mutation counter: bumped by every successful tree change.
+    /// Unchanged across reads and failed (no-op) mutations, so an unchanged
+    /// [`Scene::epoch`] between two renders proves the scene was not mutated.
+    epoch: u64,
+    /// The ids of the nodes mutated since the last [`Scene::take_dirty`]
+    /// drain: every epoch-bumping mutation records the id it changed, and a
+    /// raw [`Scene::node_mut`] borrow records its id too. Drained (emptied)
+    /// by [`Scene::take_dirty`], so between two drains it holds exactly the
+    /// ids mutated in between. Interior-mutable so the compositor can drain
+    /// it through an `&Scene`; the scene's own mutation methods never read it
+    /// back.
+    dirty: RefCell<HashSet<NodeId>>,
+    /// Force-full-scan flag: set by [`Scene::node_mut`], whose raw borrow the
+    /// scene cannot introspect. When set, the compositor falls back to the
+    /// whole-tree paint-signature walk instead of the pushed set.
+    force_full_scan: Cell<bool>,
 }
 
 impl Default for Scene {
@@ -110,12 +141,39 @@ impl Scene {
             nodes,
             root,
             next_id: 1,
+            epoch: 0,
+            dirty: RefCell::new(HashSet::new()),
+            force_full_scan: Cell::new(false),
         }
+    }
+
+    /// The scene's mutation epoch: the number of successful tree mutations
+    /// since construction. Read-only; bumped by every mutating method. Two
+    /// reads that return the same value mean no mutation happened in between.
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// The id of the implicit root node.
     pub const fn root_id(&self) -> NodeId {
         self.root
+    }
+
+    /// Drain the mutation-site pushed dirty set: the ids of the nodes mutated
+    /// since the last drain, and whether a raw [`Scene::node_mut`] borrow
+    /// forces a full paint-signature scan (the scene cannot introspect what
+    /// the caller changed through the raw borrow).
+    ///
+    /// Draining resets the set and the flag, so a consumer that paints the
+    /// scene sees exactly the mutations since the last drain. The compositor
+    /// calls this on every paint (full and dirty) and uses the ids to limit
+    /// its per-frame paint-signature comparison to the mutated nodes. This is
+    /// a read of change-detection *hints*: it never affects the epoch, so the
+    /// guarantee "epoch unchanged between reads ⇒ no mutation" stays sound.
+    pub fn take_dirty(&self) -> (HashSet<NodeId>, bool) {
+        let ids = std::mem::take(&mut *self.dirty.borrow_mut());
+        let force = self.force_full_scan.replace(false);
+        (ids, force)
     }
 
     /// Number of nodes in the scene (including the root).
@@ -135,7 +193,19 @@ impl Scene {
     }
 
     /// Mutable access to a node.
+    ///
+    /// The borrow is raw, so the scene cannot know whether the caller mutates
+    /// the node through it. To keep the change-detection guarantee ("epoch
+    /// unchanged between renders ⇒ the scene was not mutated") sound, every
+    /// call bumps the epoch conservatively: at worst one extra repaint, never
+    /// a missed one. The same conservatism applies to the pushed dirty set:
+    /// the id is recorded AND the force-full-scan flag is set, so the
+    /// compositor falls back to the whole-tree paint-signature walk rather
+    /// than trusting the pushed set to name the changed node.
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut SceneNode> {
+        self.epoch += 1;
+        self.dirty.borrow_mut().insert(id);
+        self.force_full_scan.set(true);
         self.nodes.get_mut(&id)
     }
 
@@ -169,6 +239,8 @@ impl Scene {
             .expect("parent existence checked above")
             .children
             .push(id);
+        self.epoch += 1;
+        self.dirty.borrow_mut().insert(id);
         Some(id)
     }
 
@@ -214,6 +286,8 @@ impl Scene {
             .children;
         let index = index.min(children.len());
         children.insert(index, id);
+        self.epoch += 1;
+        self.dirty.borrow_mut().insert(id);
         Some(id)
     }
 
@@ -236,6 +310,8 @@ impl Scene {
             return false;
         }
         n.stream.get_or_insert_with(Vec::new).push(span);
+        self.epoch += 1;
+        self.dirty.borrow_mut().insert(id);
         true
     }
 
@@ -272,7 +348,12 @@ impl Scene {
         }
         for r in to_remove {
             self.nodes.remove(&r);
+            // Every removed subtree id is pushed: the compositor must repaint
+            // the OLD bounds of each (their new bounds are gone), so each is
+            // a dirty node in its own right.
+            self.dirty.borrow_mut().insert(r);
         }
+        self.epoch += 1;
         true
     }
 
@@ -297,14 +378,25 @@ impl Scene {
         if let Some(p) = props {
             n.props = p;
         }
+        self.epoch += 1;
+        self.dirty.borrow_mut().insert(id);
         true
     }
 
     /// Replace a node's style. Returns `false` when the node does not exist.
+    ///
+    /// An equal-value write (the incoming style equals the stored one) is a
+    /// no-op: the style is not replaced and the scene epoch is not bumped,
+    /// so a renderer's cached frame stays valid.
     pub fn set_style(&mut self, id: NodeId, style: Style) -> bool {
         match self.nodes.get_mut(&id) {
             Some(n) => {
+                if n.style == style {
+                    return true;
+                }
                 n.style = style;
+                self.epoch += 1;
+                self.dirty.borrow_mut().insert(id);
                 true
             }
             None => false,
@@ -316,6 +408,8 @@ impl Scene {
         match self.nodes.get_mut(&id) {
             Some(n) => {
                 n.kind = kind;
+                self.epoch += 1;
+                self.dirty.borrow_mut().insert(id);
                 true
             }
             None => false,
@@ -324,10 +418,19 @@ impl Scene {
 
     /// Replace a node's entire property map. Returns `false` when the node
     /// does not exist.
+    ///
+    /// An equal-value write (the incoming map equals the stored one) is a
+    /// no-op: nothing is replaced and the scene epoch is not bumped, so a
+    /// renderer's cached frame stays valid.
     pub fn set_props(&mut self, id: NodeId, props: PropMap) -> bool {
         match self.nodes.get_mut(&id) {
             Some(n) => {
+                if n.props == props {
+                    return true;
+                }
                 n.props = props;
+                self.epoch += 1;
+                self.dirty.borrow_mut().insert(id);
                 true
             }
             None => false,
@@ -336,10 +439,19 @@ impl Scene {
 
     /// Set a single property on a node. Returns `false` when the node does
     /// not exist.
+    ///
+    /// An equal-value write (the stored value already equals `value`) is a
+    /// no-op: the prop is not re-inserted and the scene epoch is not bumped,
+    /// so a renderer's cached frame stays valid.
     pub fn set_prop(&mut self, id: NodeId, key: &str, value: PropValue) -> bool {
         match self.nodes.get_mut(&id) {
             Some(n) => {
+                if n.props.get(key) == Some(&value) {
+                    return true;
+                }
                 n.props.insert(key.to_string(), value);
+                self.epoch += 1;
+                self.dirty.borrow_mut().insert(id);
                 true
             }
             None => false,
@@ -382,6 +494,8 @@ impl Scene {
             "clip_height".to_string(),
             PropValue::Int(clip.height as i64),
         );
+        self.epoch += 1;
+        self.dirty.borrow_mut().insert(id);
         true
     }
 
@@ -406,6 +520,8 @@ impl Scene {
             .insert("scroll_x".to_string(), PropValue::Int(x as i64));
         n.props
             .insert("scroll_y".to_string(), PropValue::Int(y as i64));
+        self.epoch += 1;
+        self.dirty.borrow_mut().insert(id);
         true
     }
 
@@ -867,5 +983,269 @@ mod tests {
         assert_eq!(scene.prop(b, "scroll_y"), Some(&PropValue::Int(-2)));
 
         assert!(!scene.set_scroll_offset(NodeId(999), 1, 1));
+    }
+
+    #[test]
+    fn epoch_starts_at_zero_and_bumps_on_every_mutation() {
+        let mut scene = Scene::new();
+        assert_eq!(scene.epoch(), 0, "a fresh scene has epoch 0");
+        let root = scene.root_id();
+        let mut next = 0;
+        let mut expect = |scene: &Scene, label: &str| {
+            next += 1;
+            assert_eq!(scene.epoch(), next, "{label} must bump the epoch");
+        };
+
+        let a = scene
+            .add_child(root, NodeKind::Box, Style::new())
+            .expect("add_child succeeds");
+        expect(&scene, "add_child");
+
+        let b = scene
+            .insert_child(root, 0, NodeKind::Text, Style::new())
+            .expect("insert_child succeeds");
+        expect(&scene, "insert_child");
+
+        scene.set_style(a, Style::new().fg(Color::Rgb(9, 9, 9)));
+        expect(&scene, "set_style");
+
+        scene.set_kind(a, NodeKind::Text);
+        expect(&scene, "set_kind");
+
+        scene.set_prop(a, "width", PropValue::Int(10));
+        expect(&scene, "set_prop");
+
+        scene.set_props(a, PropMap::new());
+        expect(&scene, "set_props");
+
+        scene.update(a, Some(NodeKind::Box), None, None);
+        expect(&scene, "update");
+
+        assert!(scene.set_clip_rect(a, Rect::new(0, 0, 4, 4)));
+        expect(&scene, "set_clip_rect");
+
+        assert!(scene.set_scroll_offset(a, 1, 1));
+        expect(&scene, "set_scroll_offset");
+
+        let s = scene
+            .add_child(root, NodeKind::StreamingText, Style::new())
+            .expect("add streaming node");
+        expect(&scene, "add_child (streaming)");
+
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "x".to_string(),
+                style: Style::new(),
+            }
+        ));
+        expect(&scene, "append_span");
+
+        assert!(scene.remove(b));
+        expect(&scene, "remove");
+
+        // `node_mut` hands out a raw borrow, so it bumps conservatively.
+        let node = scene.node_mut(a).expect("node exists");
+        node.props.insert("z".to_string(), PropValue::Int(1));
+        expect(&scene, "node_mut");
+    }
+
+    #[test]
+    fn epoch_does_not_bump_on_failed_operations() {
+        // Failed (no-op) mutations must leave the epoch untouched: the scene
+        // is provably unchanged, so a renderer's cached frame stays valid.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let t = scene.add_text(root, "x", Style::new()).unwrap();
+        let epoch = scene.epoch();
+
+        assert!(scene
+            .add_child(NodeId(999), NodeKind::Box, Style::new())
+            .is_none());
+        assert!(scene
+            .insert_child(NodeId(999), 0, NodeKind::Box, Style::new())
+            .is_none());
+        assert!(!scene.remove(root)); // root cannot be removed
+        assert!(!scene.remove(NodeId(999)));
+        assert!(!scene.set_style(NodeId(999), Style::new()));
+        assert!(!scene.set_kind(NodeId(999), NodeKind::Box));
+        assert!(!scene.set_prop(NodeId(999), "x", PropValue::Bool(true)));
+        assert!(!scene.set_props(NodeId(999), PropMap::new()));
+        assert!(!scene.update(NodeId(999), None, None, None));
+        assert!(!scene.set_clip_rect(NodeId(999), Rect::new(0, 0, 1, 1)));
+        assert!(!scene.set_scroll_offset(NodeId(999), 1, 1));
+        assert!(!scene.append_span(
+            NodeId(999),
+            Span {
+                text: "x".to_string(),
+                style: Style::new(),
+            }
+        ));
+        assert!(!scene.append_span(
+            t, // a plain Text node: rejected, stream untouched
+            Span {
+                text: "x".to_string(),
+                style: Style::new(),
+            }
+        ));
+
+        assert_eq!(scene.epoch(), epoch, "no-op mutations must not bump");
+    }
+
+    #[test]
+    fn equal_value_prop_writes_do_not_bump_epoch() {
+        // The props incremental-sync contract: a write whose value equals the
+        // stored one is a no-op — nothing is replaced, the epoch is not
+        // bumped, and (downstream) layout is not marked dirty. Only a real
+        // change may bump.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let t = scene.add_text(root, "x", Style::new()).unwrap();
+        let epoch = scene.epoch();
+
+        // Equal single-key writes: no bump.
+        assert!(scene.set_prop(t, "text", PropValue::Str("x".to_string())));
+        assert!(scene.set_prop(t, "text", PropValue::Str("x".to_string())));
+        assert_eq!(scene.epoch(), epoch, "equal set_prop must not bump");
+
+        // Equal whole-map writes: no bump.
+        let props = PropMap::from([("text".to_string(), PropValue::Str("x".to_string()))]);
+        assert!(scene.set_props(t, props.clone()));
+        assert!(scene.set_props(t, props));
+        assert_eq!(scene.epoch(), epoch, "equal set_props must not bump");
+
+        // Equal style writes: no bump.
+        assert!(scene.set_style(t, Style::new()));
+        assert_eq!(scene.epoch(), epoch, "equal set_style must not bump");
+
+        // A differing value still bumps (and stores).
+        let before = scene.epoch();
+        assert!(scene.set_prop(t, "text", PropValue::Str("y".to_string())));
+        assert_eq!(scene.epoch(), before + 1, "changed set_prop must bump");
+        assert_eq!(
+            scene.prop(t, "text"),
+            Some(&PropValue::Str("y".to_string()))
+        );
+
+        // A differing map still bumps (full-table replace semantics).
+        let before = scene.epoch();
+        assert!(scene.set_props(t, PropMap::from([("a".to_string(), PropValue::Int(1))])));
+        assert_eq!(scene.epoch(), before + 1, "changed set_props must bump");
+        assert!(
+            scene.prop(t, "text").is_none(),
+            "set_props replaces the map"
+        );
+
+        // A differing style still bumps.
+        let before = scene.epoch();
+        assert!(scene.set_style(t, Style::new().fg(Color::Rgb(1, 2, 3))));
+        assert_eq!(scene.epoch(), before + 1, "changed set_style must bump");
+        assert_eq!(scene.node(t).unwrap().style.fg, Color::Rgb(1, 2, 3));
+
+        // Same-value writes after real changes still do not bump.
+        let epoch = scene.epoch();
+        assert!(scene.set_prop(t, "a", PropValue::Int(1)));
+        assert!(scene.set_style(t, Style::new().fg(Color::Rgb(1, 2, 3))));
+        assert_eq!(scene.epoch(), epoch, "re-equal writes must not bump");
+    }
+
+    #[test]
+    fn take_dirty_drains_pushed_ids_and_force_flag() {
+        // Every epoch-bumping mutation records the mutated id; a raw
+        // `node_mut` borrow additionally sets the force-full-scan flag; a
+        // drain resets both.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let a = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        let b = scene.add_child(root, NodeKind::Text, Style::new()).unwrap();
+        let s = scene
+            .add_child(root, NodeKind::StreamingText, Style::new())
+            .unwrap();
+
+        scene.set_prop(b, "text", PropValue::Str("x".into()));
+        scene.set_clip_rect(a, Rect::new(0, 0, 4, 4));
+        scene.set_scroll_offset(a, 1, 1);
+        assert!(scene.append_span(
+            s,
+            Span {
+                text: "s".into(),
+                style: Style::new(),
+            }
+        ));
+
+        let (ids, force) = scene.take_dirty();
+        assert!(
+            ids.contains(&a),
+            "set_clip_rect/set_scroll_offset record the id"
+        );
+        assert!(ids.contains(&b), "set_prop records the id");
+        assert!(ids.contains(&s), "append_span records the id");
+        assert!(!force, "API mutations do not force a full scan");
+
+        // A raw borrow records its id and forces the full scan.
+        let _ = scene.node_mut(a).unwrap();
+        let (ids, force) = scene.take_dirty();
+        assert!(ids.contains(&a), "node_mut records the id");
+        assert!(force, "node_mut sets the force-full-scan flag");
+
+        // Draining resets both: no mutations in between ⇒ empty drain.
+        let (ids, force) = scene.take_dirty();
+        assert!(
+            ids.is_empty(),
+            "a drain with no mutation in between is empty"
+        );
+        assert!(!force);
+    }
+
+    #[test]
+    fn remove_records_every_subtree_id() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let a = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        let b = scene.add_child(a, NodeKind::Box, Style::new()).unwrap();
+        let c = scene.add_child(b, NodeKind::Text, Style::new()).unwrap();
+        let _d = scene.add_child(root, NodeKind::Text, Style::new()).unwrap();
+
+        let (_, _) = scene.take_dirty(); // clear the add-time pushes
+        assert!(scene.remove(a));
+        let (ids, _) = scene.take_dirty();
+        for id in [a, b, c] {
+            assert!(
+                ids.contains(&id),
+                "removed subtree id {id:?} must be recorded so the compositor \
+                 repaints its old bounds"
+            );
+        }
+        assert!(
+            !ids.contains(&root),
+            "the root is never removed and must not be recorded"
+        );
+    }
+
+    #[test]
+    fn noop_mutations_do_not_record_dirty() {
+        // Equal-value writes are no-ops: they neither bump the epoch nor push
+        // the id (a spurious push would widen the next dirty pass for nothing).
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let t = scene.add_text(root, "x", Style::new()).unwrap();
+        let (_, _) = scene.take_dirty(); // clear construction-time pushes
+
+        assert!(scene.set_prop(t, "text", PropValue::Str("x".to_string())));
+        assert!(scene.set_style(t, Style::new()));
+        let props = PropMap::from([("text".to_string(), PropValue::Str("x".to_string()))]);
+        assert!(scene.set_props(t, props));
+
+        let (ids, force) = scene.take_dirty();
+        assert!(
+            ids.is_empty(),
+            "no-op writes must not record ids (got {ids:?})"
+        );
+        assert!(!force);
+
+        // A real change records.
+        assert!(scene.set_prop(t, "text", PropValue::Str("y".to_string())));
+        let (ids, _) = scene.take_dirty();
+        assert!(ids.contains(&t), "a real change records the id");
     }
 }

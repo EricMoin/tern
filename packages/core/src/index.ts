@@ -359,10 +359,72 @@ export class Node {
   /**
    * Replace this node's props (and style keys) in the scene. On a detached
    * node the props are recorded and applied when the node materializes.
+   *
+   * Incremental sync: the new map is diffed against the current props, and
+   * only the changed keys are pushed to the scene through the native
+   * single-key `set_prop` path — never a full JSON serialization + whole-map
+   * replace. An equal-value write (nothing changed) performs no native call
+   * at all, so the scene's mutation epoch is untouched and a renderer's
+   * cached frame stays valid. A write that removes a key (or whose value is
+   * `undefined`, which the native layer drops) falls back to the full-map
+   * path, since a removal needs the table replace to clear the stale key.
    */
   setProps(props: NodeProps): void {
-    this.#props = { ...props };
-    if (this.#handle !== null) this.#handle.set_props(props);
+    const next = { ...props };
+    // `undefined` values have no scene representation (the binding drops
+    // them), so strip them up front: absent and undefined are equivalent.
+    for (const key of Object.keys(next)) {
+      if (next[key] === undefined) delete next[key];
+    }
+    if (this.#handle !== null) {
+      const prev = this.#props;
+      let removed = false;
+      for (const key of Object.keys(prev)) {
+        if (!(key in next)) {
+          removed = true;
+          break;
+        }
+      }
+      if (removed) {
+        this.#handle.set_props(next);
+      } else {
+        const changed: Array<[string, unknown]> = [];
+        for (const key of Object.keys(next)) {
+          if (!(key in prev) || prev[key] !== next[key]) {
+            changed.push([key, next[key]]);
+          }
+        }
+        for (const [key, value] of changed) this.#handle.set_prop(key, value as never);
+      }
+    }
+    this.#props = next;
+  }
+
+  /**
+   * Set a single property (or style key) on this node — the incremental
+   * counterpart of {@link setProps}. On an attached node the single key is
+   * pushed through the native single-key path (an equal-value write is
+   * skipped, so the scene epoch is untouched); on a detached node the key is
+   * recorded and applied when the node materializes.
+   *
+   * An `undefined` value is treated as a removal (the binding has no scene
+   * representation for it): the key is dropped from the mirror and, when the
+   * scene holds it, cleared through the full-map path.
+   */
+  setProp(key: string, value: unknown): void {
+    if (value === undefined) {
+      if (this.#handle !== null && key in this.#props) {
+        const next = { ...this.#props };
+        delete next[key];
+        this.#handle.set_props(next);
+      }
+      delete this.#props[key];
+      return;
+    }
+    if (this.#handle !== null && this.#props[key] !== value) {
+      this.#handle.set_prop(key, value as never);
+    }
+    this.#props[key] = value;
   }
 
   /**

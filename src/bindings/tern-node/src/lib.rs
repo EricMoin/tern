@@ -17,8 +17,8 @@
 //!   push delivery).
 //! * **Scene construction** — `create_node(type, props)` builds a node
 //!   handle (backed by the tern-components node model), and `NodeHandle`
-//!   methods (`add_child` / `remove` / `set_props`) mutate the shared scene
-//!   tree that `TuiRenderer::render` paints.
+//!   methods (`add_child` / `remove` / `set_props` / `set_prop`) mutate the
+//!   shared scene tree that `TuiRenderer::render` paints.
 //!
 //! ## Scene ownership
 //!
@@ -991,6 +991,51 @@ impl NodeHandle {
         Ok(())
     }
 
+    /// Set a single property (or style key) on this node — the incremental
+    /// counterpart of [`set_props`](Self::set_props): one key instead of the
+    /// whole object.
+    ///
+    /// Recognized style keys (`fg`, `bg`, `border_style`, the boolean
+    /// modifiers) are merged into the node's existing style; every other
+    /// scalar key lands in the node's property map. Non-scalar values (null,
+    /// arrays, objects) are dropped, exactly like `set_props`.
+    ///
+    /// An equal-value write is a no-op: the scene is not mutated and its
+    /// epoch is not bumped, so a renderer's cached frame stays valid.
+    #[napi(js_name = "set_prop")]
+    pub fn set_prop(&self, key: String, value: serde_json::Value) -> Result<()> {
+        let mut inner = self.inner.lock().expect("node inner poisoned");
+        let Some(id) = inner.id else {
+            // Detached template: record the single-key change for
+            // materialization (`add_child` snapshots `kind`/`style`/`props`).
+            if let Some(style) = apply_style_key(inner.style, &key, &value) {
+                inner.style = style;
+            } else if let Some(pv) = json_to_prop_value(value) {
+                inner.props.insert(key, pv);
+            }
+            return Ok(());
+        };
+        // Clone the scene handle so the lock below does not hold `inner`
+        // borrowed while the handle's own fields are mutated.
+        let scene_arc = inner.scene.clone();
+        let mut scene = scene_arc.lock().expect("scene poisoned");
+        if let Some(style) = apply_style_key(inner.style, &key, &value) {
+            if style != inner.style {
+                inner.style = style;
+                scene.set_style(id, style);
+            }
+            return Ok(());
+        }
+        let Some(pv) = json_to_prop_value(value) else {
+            return Ok(()); // non-scalar values are dropped, like set_props
+        };
+        if scene.prop(id, &key) != Some(&pv) {
+            inner.props.insert(key.clone(), pv.clone());
+            scene.set_prop(id, &key, pv);
+        }
+        Ok(())
+    }
+
     /// Append a styled span of text to a `streaming_text` node's stream.
     ///
     /// `style` follows the same style-key convention as `set_props` (`fg`,
@@ -1162,36 +1207,16 @@ pub fn highlight(language: String, source: String) -> Result<Vec<HighlightSpanJs
 }
 
 /// Split a JS props object into a tern style (style keys) and a tern property
-/// map (everything else).
+/// map (everything else). The style is built from scratch over the recognized
+/// style keys — a full-map replacement (see [`apply_style_key`] for the
+/// single-key merge variant).
 fn props_to_style_map(props: HashMap<String, serde_json::Value>) -> (Style, PropMap) {
     let mut style = Style::new();
     let mut map = PropMap::new();
     for (key, value) in props {
-        match key.as_str() {
-            "border_style" => {
-                if let serde_json::Value::String(s) = value {
-                    style = style.border_style(parse_border_style(&s));
-                }
-            }
-            "fg" => {
-                if let serde_json::Value::String(s) = value {
-                    style = style.fg(parse_color(&s));
-                }
-            }
-            "bg" => {
-                if let serde_json::Value::String(s) = value {
-                    style = style.bg(parse_color(&s));
-                }
-            }
-            "bold" => style = add_modifier_if(style, value, Modifiers::BOLD),
-            "dim" => style = add_modifier_if(style, value, Modifiers::DIM),
-            "italic" => style = add_modifier_if(style, value, Modifiers::ITALIC),
-            "underline" => style = add_modifier_if(style, value, Modifiers::UNDERLINE),
-            "blink" => style = add_modifier_if(style, value, Modifiers::BLINK),
-            "reversed" => style = add_modifier_if(style, value, Modifiers::REVERSED),
-            "hidden" => style = add_modifier_if(style, value, Modifiers::HIDDEN),
-            "strikethrough" => style = add_modifier_if(style, value, Modifiers::STRIKETHROUGH),
-            _ => {
+        match apply_style_key(style, &key, &value) {
+            Some(updated) => style = updated,
+            None => {
                 let Some(pv) = json_to_prop_value(value) else {
                     continue;
                 };
@@ -1202,12 +1227,55 @@ fn props_to_style_map(props: HashMap<String, serde_json::Value>) -> (Style, Prop
     (style, map)
 }
 
-/// Add `modifier` to `style` when the JSON value is `true`.
-fn add_modifier_if(style: Style, value: serde_json::Value, modifier: Modifiers) -> Style {
+/// Apply a single style key to `style` (merge semantics), mirroring
+/// `props_to_style_map`'s per-key handling. Returns `Some` when `key` is a
+/// recognized style key, `None` when it is a regular prop key.
+///
+/// Unlike the full-map path — which rebuilds the style from scratch over the
+/// given keys — this merges `key`'s effect into the existing style, so the
+/// single-key `set_prop` path leaves every other style field untouched. A
+/// boolean modifier key with a `false` (or non-true) value clears the
+/// modifier, matching what the full-map path produces for the same key (a
+/// freshly rebuilt style simply lacks it).
+fn apply_style_key(mut style: Style, key: &str, value: &serde_json::Value) -> Option<Style> {
+    match key {
+        "border_style" => {
+            if let serde_json::Value::String(s) = value {
+                style = style.border_style(parse_border_style(s));
+            }
+        }
+        "fg" => {
+            if let serde_json::Value::String(s) = value {
+                style = style.fg(parse_color(s));
+            }
+        }
+        "bg" => {
+            if let serde_json::Value::String(s) = value {
+                style = style.bg(parse_color(s));
+            }
+        }
+        "bold" => style = apply_modifier(style, value, Modifiers::BOLD),
+        "dim" => style = apply_modifier(style, value, Modifiers::DIM),
+        "italic" => style = apply_modifier(style, value, Modifiers::ITALIC),
+        "underline" => style = apply_modifier(style, value, Modifiers::UNDERLINE),
+        "blink" => style = apply_modifier(style, value, Modifiers::BLINK),
+        "reversed" => style = apply_modifier(style, value, Modifiers::REVERSED),
+        "hidden" => style = apply_modifier(style, value, Modifiers::HIDDEN),
+        "strikethrough" => style = apply_modifier(style, value, Modifiers::STRIKETHROUGH),
+        _ => return None,
+    }
+    Some(style)
+}
+
+/// Set or clear `modifier` on `style` from a JSON value: `true` adds it,
+/// anything else removes it (the full-map path builds a fresh style where a
+/// non-true modifier is simply absent, so the single-key path must clear the
+/// modifier to stay equivalent).
+fn apply_modifier(style: Style, value: &serde_json::Value, modifier: Modifiers) -> Style {
     if value.as_bool() == Some(true) {
         style.add_modifier(modifier)
     } else {
-        style
+        style.modifier(style.modifiers.remove(modifier))
     }
 }
 
@@ -1576,6 +1644,187 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.to_string().contains("streaming_text"), "{err}");
+    }
+
+    /// A root handle materialized over a fresh scene, for handle tests.
+    fn root_handle(scene: &Arc<Mutex<Scene>>) -> NodeHandle {
+        let root_id = scene.lock().expect("scene poisoned").root_id();
+        NodeHandle::materialized(
+            scene.clone(),
+            root_id,
+            NodeKind::Root,
+            Style::new(),
+            PropMap::new(),
+        )
+    }
+
+    #[test]
+    fn set_prop_updates_a_single_key_on_an_attached_node() {
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let root = root_handle(&scene);
+        let text = root.add_child(&text_template()).expect("add text");
+
+        text.set_prop("text".to_string(), serde_json::json!("hi"))
+            .expect("set_prop succeeds");
+        let s = scene.lock().expect("scene poisoned");
+        assert_eq!(
+            s.prop(attached_id(&text), "text"),
+            Some(&PropValue::Str("hi".to_string()))
+        );
+        // The handle's prop mirror stays in sync (the materialization source).
+        assert_eq!(
+            text.inner
+                .lock()
+                .expect("node inner poisoned")
+                .props
+                .get("text"),
+            Some(&PropValue::Str("hi".to_string()))
+        );
+    }
+
+    #[test]
+    fn set_prop_style_key_merges_into_the_existing_style() {
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let root = root_handle(&scene);
+        let text = root.add_child(&text_template()).expect("add text");
+
+        text.set_props(HashMap::from([(
+            "fg".to_string(),
+            serde_json::json!("#ff0000"),
+        )]))
+        .expect("set_props succeeds");
+        text.set_prop("bold".to_string(), serde_json::json!(true))
+            .expect("set_prop succeeds");
+
+        let s = scene.lock().expect("scene poisoned");
+        let node = s.node(attached_id(&text)).expect("node in scene");
+        assert_eq!(
+            node.style.fg,
+            _Color::Rgb(255, 0, 0),
+            "fg survives the merge"
+        );
+        assert!(node.style.modifiers.contains(Modifiers::BOLD));
+    }
+
+    #[test]
+    fn set_prop_false_modifier_clears_the_modifier_like_the_full_path() {
+        // The full-map path rebuilds the style from the given keys, so
+        // `bold: false` yields a style without bold; the single-key path must
+        // produce the same result by clearing the modifier.
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let root = root_handle(&scene);
+        let text = root.add_child(&text_template()).expect("add text");
+
+        text.set_props(HashMap::from([
+            ("fg".to_string(), serde_json::json!("#ff0000")),
+            ("bold".to_string(), serde_json::json!(true)),
+        ]))
+        .expect("set_props succeeds");
+        text.set_prop("bold".to_string(), serde_json::json!(false))
+            .expect("set_prop succeeds");
+
+        let s = scene.lock().expect("scene poisoned");
+        let node = s.node(attached_id(&text)).expect("node in scene");
+        assert!(
+            !node.style.modifiers.contains(Modifiers::BOLD),
+            "bold must be cleared"
+        );
+        assert_eq!(node.style.fg, _Color::Rgb(255, 0, 0), "fg stays untouched");
+    }
+
+    #[test]
+    fn equal_value_set_prop_and_set_props_do_not_bump_the_epoch() {
+        // The incremental-sync contract at the binding layer: an equal-value
+        // single-key or whole-map write leaves the scene epoch untouched, so
+        // the renderer's no-op fast path still applies.
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let root = root_handle(&scene);
+        let text = root.add_child(&text_template()).expect("add text");
+        text.set_props(HashMap::from([
+            ("text".to_string(), serde_json::json!("hi")),
+            ("fg".to_string(), serde_json::json!("#ff0000")),
+        ]))
+        .expect("initial set_props succeeds");
+        let epoch = scene.lock().expect("scene poisoned").epoch();
+
+        text.set_prop("text".to_string(), serde_json::json!("hi"))
+            .expect("equal set_prop succeeds");
+        text.set_prop("fg".to_string(), serde_json::json!("#ff0000"))
+            .expect("equal style set_prop succeeds");
+        text.set_props(HashMap::from([
+            ("text".to_string(), serde_json::json!("hi")),
+            ("fg".to_string(), serde_json::json!("#ff0000")),
+        ]))
+        .expect("equal set_props succeeds");
+
+        assert_eq!(
+            scene.lock().expect("scene poisoned").epoch(),
+            epoch,
+            "equal-value writes must not bump the scene epoch"
+        );
+
+        // A changed value does bump.
+        text.set_prop("text".to_string(), serde_json::json!("bye"))
+            .expect("changed set_prop succeeds");
+        assert_eq!(
+            scene.lock().expect("scene poisoned").epoch(),
+            epoch + 1,
+            "a changed set_prop must bump the scene epoch"
+        );
+    }
+
+    #[test]
+    fn set_prop_on_a_detached_template_materializes_with_the_change() {
+        // `set_prop` on a detached `create_node` template records the change
+        // on the handle; `add_child` materializes it into the scene.
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let root = root_handle(&scene);
+        let child = create_node("text".to_string(), None).expect("create text template");
+        child
+            .set_prop("text".to_string(), serde_json::json!("hi"))
+            .expect("set_prop on detached succeeds");
+        child
+            .set_prop("bold".to_string(), serde_json::json!(true))
+            .expect("style set_prop on detached succeeds");
+
+        let bound = root.add_child(&child).expect("add child");
+        let s = scene.lock().expect("scene poisoned");
+        assert_eq!(
+            s.prop(attached_id(&bound), "text"),
+            Some(&PropValue::Str("hi".to_string()))
+        );
+        assert!(
+            s.node(attached_id(&bound))
+                .expect("node in scene")
+                .style
+                .modifiers
+                .contains(Modifiers::BOLD),
+            "the detached style-key write must materialize"
+        );
+    }
+
+    #[test]
+    fn set_prop_drops_non_scalar_values_like_the_full_path() {
+        // The full-map path silently drops null/array/object values; the
+        // single-key path must too, without touching the scene.
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let root = root_handle(&scene);
+        let text = root.add_child(&text_template()).expect("add text");
+        let epoch = scene.lock().expect("scene poisoned").epoch();
+
+        text.set_prop("nested".to_string(), serde_json::json!({"a": 1}))
+            .expect("set_prop with an object value succeeds");
+        text.set_prop("missing".to_string(), serde_json::Value::Null)
+            .expect("set_prop with null succeeds");
+
+        assert_eq!(
+            scene.lock().expect("scene poisoned").epoch(),
+            epoch,
+            "dropped values must not bump the scene epoch"
+        );
+        let s = scene.lock().expect("scene poisoned");
+        assert!(s.prop(attached_id(&text), "nested").is_none());
+        assert!(s.prop(attached_id(&text), "missing").is_none());
     }
 
     #[test]
