@@ -51,7 +51,9 @@
  *   napi surface is introduced (constitution). The `@tern/react` /
  *   `@tern/solid` hosts resolve automatically; raw `@tern/core` users call
  *   `resolveTheme` explicitly at element-creation time.
- * - `Renderer` owns the render/input loop: `render()`, `events` (an
+ * - `Renderer` owns the render/input loop: `render()` (synchronous, immediate
+ *   paint), `requestFrame()` (coalesced paint on the next macrotask — several
+ *   calls within one tick collapse into a single native render), `events` (an
  *   `AsyncIterable` of tagged `TernEventJs` events pushed from the native
  *   thread), `onKey(cb)`, `onResize(cb)`, `onFocus(cb)`, `onMouse(cb)`,
  *   `onPaste(cb)` and
@@ -4999,6 +5001,13 @@ export class Renderer {
   #events = new TernEventStream();
   #streamStarted = false;
   #destroyed = false;
+  /** Whether a coalesced frame (see {@link requestFrame}) is currently
+   * scheduled — the pending-frame flag the coalescing dedupe keys on. */
+  #framePending = false;
+  /** The callbacks queued behind the pending coalesced frame, in call order. */
+  #frameCallbacks: Array<() => void> = [];
+  /** The macrotask handle of the pending coalesced frame, or `null`. */
+  #frameTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** The scene root. Attach content under it with `Node.addChild`. */
   readonly root: Node;
@@ -5094,9 +5103,82 @@ export class Renderer {
     }
   }
 
-  /** Paint the shared scene to the terminal (minimal diff vs the last frame). */
+  /** Paint the shared scene to the terminal (minimal diff vs the last frame).
+   *
+   * Stays synchronous and immediate. An explicit paint supersedes a pending
+   * coalesced frame (see {@link requestFrame}): the scheduled frame is
+   * canceled — the scene was just painted in full — and any callbacks queued
+   * for it run right after this paint, since they are promised to run once a
+   * native render completes and this is one. With no frame pending, this is
+   * exactly the native call, unchanged from a direct render.
+   */
   render(): void {
+    const callbacks = this.#frameCallbacks;
+    this.#cancelFrame();
     this.#native.render();
+    for (const callback of callbacks) callback();
+  }
+
+  /**
+   * Schedule a coalesced native render on the next macrotask
+   * (`setTimeout(0)`, falling back to `queueMicrotask` when timers are
+   * unavailable). Several `requestFrame` calls within one tick collapse into
+   * a single native `render()` — the pending-frame flag dedupes the schedule
+   * — so a burst of scene mutations repaints once instead of once per call.
+   * The optional `callback` runs after the native render completes (every
+   * call's callback, in call order). An explicit {@link render} while a
+   * coalesced frame is pending paints immediately and supersedes it, running
+   * the queued callbacks right after its own paint.
+   *
+   * Returns a cancel function that aborts a still-pending frame: the
+   * scheduled render never fires and its queued callbacks are dropped. A
+   * no-op once the frame has fired (or was already canceled).
+   */
+  requestFrame(callback?: () => void): () => void {
+    this.#scheduleFrame(callback);
+    return () => this.#cancelFrame();
+  }
+
+  /**
+   * The shared coalescing core: queue `callback` (if any) behind the pending
+   * frame and arm one for the next macrotask unless a frame is already
+   * pending. Both the schedule path (arming a fresh frame) and the coalesce
+   * path (a frame is already armed) go through here, so the pending-frame
+   * flag is the single source of truth for the dedupe.
+   */
+  #scheduleFrame(callback?: () => void): void {
+    if (callback !== undefined) this.#frameCallbacks.push(callback);
+    if (this.#framePending) return;
+    this.#framePending = true;
+    const run = () => {
+      // The flag may have been cleared by a cancel (or a superseding
+      // `render()`) while this task sat in the queue — only reachable via
+      // the `queueMicrotask` fallback, since a canceled timer never fires.
+      if (!this.#framePending) return;
+      this.#frameTimer = null;
+      this.#framePending = false;
+      this.#native.render();
+      const callbacks = this.#frameCallbacks;
+      this.#frameCallbacks = [];
+      for (const callback of callbacks) callback();
+    };
+    if (typeof setTimeout === "function") {
+      this.#frameTimer = setTimeout(run, 0);
+    } else {
+      queueMicrotask(run);
+    }
+  }
+
+  /** Cancel a still-pending coalesced frame, dropping its queued callbacks.
+   * No-op when no frame is pending. */
+  #cancelFrame(): void {
+    if (!this.#framePending) return;
+    this.#framePending = false;
+    if (this.#frameTimer !== null) {
+      clearTimeout(this.#frameTimer);
+      this.#frameTimer = null;
+    }
+    this.#frameCallbacks = [];
   }
 
   /**
@@ -5182,6 +5264,10 @@ export class Renderer {
   destroy(): void {
     if (this.#destroyed) return;
     this.#destroyed = true;
+    // A pending coalesced frame must not fire after teardown: the native
+    // renderer throws once destroyed, and the queued macrotask would call
+    // `render()` on it.
+    this.#cancelFrame();
     this.#events.close();
     this.#native.destroy();
   }
