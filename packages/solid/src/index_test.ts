@@ -530,6 +530,7 @@ class FakeStreamNodeHandle {
     return child;
   }
   set_props(_props: unknown): void {}
+  set_prop(_key: string, _value: unknown): void {}
   append_span(text: string, _style?: unknown): void {
     this.streamText += text;
   }
