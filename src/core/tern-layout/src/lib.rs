@@ -4,6 +4,11 @@
 //! scene tree is mirrored into a taffy tree, laid out against the viewport,
 //! and each taffy [`Layout`] is mapped back to a tern-core [`Rect`].
 //!
+//! The engine is stateful and incremental: the cached taffy tree is mutated
+//! in place across frames (see [`TaffyLayoutEngine`] for the reconciliation
+//! scheme and its conservative full-rebuild fallback), so a single-cell text
+//! change re-measures one leaf instead of rebuilding the whole tree.
+//!
 //! Layout keywords are carried on the scene node's `props` map (tern-core's
 //! own [`Style`](tern_core::style::Style) is cell styling only):
 //!
@@ -69,7 +74,7 @@
 //! `align_content` has no visible effect. The mapping is still wired through
 //! so the prop takes effect the moment multi-line wrapping is added.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use taffy::geometry::{Rect as TaffyRect, Size as TaffySize};
 use taffy::style::{
@@ -80,43 +85,194 @@ use taffy::tree::{Layout as TaffyLayout, NodeId as TaffyNodeId, TaffyTree};
 
 use tern_core::layout::LayoutEngine;
 use tern_core::rect::{Rect, Size};
-use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene};
+use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene, SceneNode, Span};
 
 use unicode_width::UnicodeWidthStr;
 
 /// The tern layout engine: a thin wrapper over taffy 0.7.
 ///
-/// Stateless: each [`compute`](LayoutEngine::compute) call builds a fresh
-/// taffy tree from the scene.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TaffyLayoutEngine;
+/// Stateful and incremental: the engine owns the taffy tree, the
+/// tern-node-id -> taffy-node-id map, and a per-node snapshot of the last
+/// layout-relevant state. Across [`compute`](LayoutEngine::compute) calls the
+/// tree is mutated in place — styles set, content refreshed, child lists
+/// reconciled — instead of being torn down and rebuilt, and taffy's own
+/// per-node cache skips the subtrees that did not change. A single-cell text
+/// change therefore re-measures one leaf and re-runs its ancestors' flex pass
+/// — never a full-tree rebuild.
+///
+/// Change detection is engine-side (the scene only carries a global mutation
+/// epoch, no per-node revision): every frame the scene is walked and each
+/// node's [`NodeSnapshot`] — kind, resolved taffy style, text/stream content
+/// signature, visible children — is compared against the previous one. Only
+/// differing nodes are reconciled onto the cached tree. taffy 0.7's
+/// `mark_dirty` (called by `set_style` and friends, and by this engine for
+/// content changes) marks the node and all its ancestors, so the layout pass
+/// re-solves exactly the affected path while clean sibling subtrees are
+/// served from cache.
+///
+/// Correctness over performance: any change class that cannot be reconciled
+/// safely — a node kind flip, or a frame touching more than half the tree —
+/// falls back to a full rebuild (clear + rebuild from the scene), which
+/// produces byte-identical rects to the previous stateless engine.
+///
+/// Instrumentation: [`full_rebuilds`](TaffyLayoutEngine::full_rebuilds),
+/// [`last_reconciled_node_count`](TaffyLayoutEngine::last_reconciled_node_count)
+/// and [`last_was_full_rebuild`](TaffyLayoutEngine::last_was_full_rebuild)
+/// expose how incremental each frame was, so tests can prove a single-cell
+/// text change performs no full-tree relayout.
+#[derive(Debug, Clone, Default)]
+pub struct TaffyLayoutEngine {
+    /// The cached taffy tree, mutated incrementally across frames.
+    taffy: TaffyTree<()>,
+    /// tern node id -> taffy node id, for every node currently in the tree.
+    node_map: HashMap<NodeId, TaffyNodeId>,
+    /// taffy node id -> measure content (a text leaf's `text` or a streaming
+    /// leaf's concatenated spans), consumed by the measure closure.
+    text_map: HashMap<TaffyNodeId, String>,
+    /// tern node id -> the layout-relevant state seen at the last compute.
+    snapshots: HashMap<NodeId, NodeSnapshot>,
+    /// The viewport the last layout ran at.
+    last_viewport: Option<Size>,
+    /// The scene epoch at the last compute. A lower epoch means a different
+    /// (fresh) scene instance, which forces a full rebuild.
+    last_epoch: u64,
+    /// Instrumentation: number of full tree rebuilds since construction.
+    full_rebuilds: u64,
+    /// Instrumentation: nodes touched by the last incremental reconciliation.
+    last_reconciled_node_count: usize,
+    /// Instrumentation: whether the last compute was a full rebuild.
+    last_was_full_rebuild: bool,
+}
 
-impl TaffyLayoutEngine {
-    /// Create a new layout engine.
-    pub const fn new() -> Self {
-        Self
+/// The layout-relevant state of a scene node, snapshotted per frame for
+/// change detection. Kept in lockstep with [`TaffyLayoutEngine::node_map`]:
+/// exactly the visible (non-`display: none`) nodes carry a snapshot.
+#[derive(Debug, Clone, PartialEq)]
+struct NodeSnapshot {
+    /// The node kind; a flip changes leaf/container semantics and forces a
+    /// conservative full rebuild.
+    kind: NodeKind,
+    /// The resolved taffy style (including the root viewport fill and the
+    /// `wrap: false` flex-shrink exemption).
+    style: TaffyStyle,
+    /// The `text` prop of a `Text` leaf (its measurement input).
+    content: Option<String>,
+    /// A cheap signature of a streaming leaf's content: `(span count, hash of
+    /// the last span)`. Streams only grow via append in this codebase, so a
+    /// length change catches every append; the last-span hash additionally
+    /// catches in-place mutation of the final span — without copying the whole
+    /// stream every frame.
+    stream_sig: Option<(usize, u64)>,
+    /// The node's visible children (display:none excluded; text/streaming
+    /// leaves keep only their absolutely-positioned children) — mirrors
+    /// [`build_node`]'s child filtering exactly.
+    children: Vec<NodeId>,
+}
+
+/// The mutable subset of the engine handed to the reconciliation helpers, so
+/// the recursive walks can borrow disjoint fields of the engine at once.
+struct EngineState<'a> {
+    taffy: &'a mut TaffyTree<()>,
+    node_map: &'a mut HashMap<NodeId, TaffyNodeId>,
+    text_map: &'a mut HashMap<TaffyNodeId, String>,
+    snapshots: &'a mut HashMap<NodeId, NodeSnapshot>,
+}
+
+/// Per-frame reconciliation counters (the input to the instrumentation).
+#[derive(Debug, Clone, Copy, Default)]
+struct ReconcileCounters {
+    /// Nodes whose style/content/children were reconciled in place.
+    changed: usize,
+    /// Nodes (re)built from scratch (new subtrees).
+    created: usize,
+    /// Nodes removed from the cached tree.
+    removed: usize,
+}
+
+impl ReconcileCounters {
+    fn total(self) -> usize {
+        self.changed + self.created + self.removed
     }
 }
 
-impl LayoutEngine for TaffyLayoutEngine {
-    fn compute(&mut self, scene: &Scene, viewport: Size) -> Vec<(NodeId, Rect)> {
-        let mut taffy: TaffyTree<()> = TaffyTree::new();
-        let mut node_map: HashMap<NodeId, TaffyNodeId> = HashMap::new();
-        let mut text_map: HashMap<TaffyNodeId, String> = HashMap::new();
+impl TaffyLayoutEngine {
+    /// Create a new layout engine with an empty cached tree.
+    pub fn new() -> Self {
+        Self {
+            taffy: TaffyTree::new(),
+            node_map: HashMap::new(),
+            text_map: HashMap::new(),
+            snapshots: HashMap::new(),
+            last_viewport: None,
+            last_epoch: 0,
+            full_rebuilds: 0,
+            last_reconciled_node_count: 0,
+            last_was_full_rebuild: true,
+        }
+    }
+
+    /// The number of full tree rebuilds since construction (test
+    /// instrumentation: the incremental fast path must not bump it).
+    pub fn full_rebuilds(&self) -> u64 {
+        self.full_rebuilds
+    }
+
+    /// The number of nodes touched by the last incremental reconciliation
+    /// (test instrumentation: a single-leaf change must keep it small).
+    pub fn last_reconciled_node_count(&self) -> usize {
+        self.last_reconciled_node_count
+    }
+
+    /// Whether the last [`compute`](LayoutEngine::compute) was a full rebuild.
+    pub fn last_was_full_rebuild(&self) -> bool {
+        self.last_was_full_rebuild
+    }
+
+    /// Tear down the cached tree and rebuild it from the scene — the
+    /// correctness baseline every incremental result is tested against.
+    fn full_rebuild(&mut self, scene: &Scene, viewport: Size) -> Vec<(NodeId, Rect)> {
+        self.taffy.clear();
+        self.node_map.clear();
+        self.text_map.clear();
+        self.snapshots.clear();
+        self.full_rebuilds += 1;
+        self.last_was_full_rebuild = true;
+        self.last_reconciled_node_count = 0;
+        let scene_epoch = scene.epoch();
 
         let root = scene.root_id();
-        let Some(taffy_root) = build_node(
-            scene,
-            root,
-            viewport,
-            /* is_root */ true,
-            &mut taffy,
-            &mut node_map,
-            &mut text_map,
-        ) else {
+        let taffy_root = {
+            let mut state = EngineState {
+                taffy: &mut self.taffy,
+                node_map: &mut self.node_map,
+                text_map: &mut self.text_map,
+                snapshots: &mut self.snapshots,
+            };
+            let built = build_node(scene, root, viewport, true, &mut state);
+            if let Some(t) = built {
+                snapshot_subtree(scene, root, viewport, &mut state);
+                Some(t)
+            } else {
+                None
+            }
+        };
+        let Some(taffy_root) = taffy_root else {
+            self.last_epoch = scene_epoch;
+            self.last_viewport = Some(viewport);
             return Vec::new();
         };
 
+        self.layout_and_read(viewport, taffy_root, scene_epoch)
+    }
+
+    /// Run the taffy layout pass over `taffy_root` and read back the rects,
+    /// recording the frame's cache state.
+    fn layout_and_read(
+        &mut self,
+        viewport: Size,
+        taffy_root: TaffyNodeId,
+        scene_epoch: u64,
+    ) -> Vec<(NodeId, Rect)> {
         let available = TaffySize {
             width: AvailableSpace::Definite(viewport.width as f32),
             height: AvailableSpace::Definite(viewport.height as f32),
@@ -125,8 +281,8 @@ impl LayoutEngine for TaffyLayoutEngine {
         // The measure closure runs for every leaf node: text leaves report
         // their content size, everything else falls back to taffy's default
         // zero measurement (matching `compute_layout`).
-        let text_ref = &text_map;
-        let _ = taffy.compute_layout_with_measure(
+        let text_ref = &self.text_map;
+        let _ = self.taffy.compute_layout_with_measure(
             taffy_root,
             available,
             |known, _available_space, node_id, _node_context, _style| match text_ref.get(&node_id) {
@@ -141,27 +297,98 @@ impl LayoutEngine for TaffyLayoutEngine {
             },
         );
 
-        node_map
-            .into_iter()
+        let result: Vec<(NodeId, Rect)> = self
+            .node_map
+            .iter()
             .filter_map(|(id, taffy_node)| {
-                let layout = taffy.layout(taffy_node).ok()?;
-                Some((id, layout_to_rect(layout)))
+                let layout = self.taffy.layout(*taffy_node).ok()?;
+                Some((*id, layout_to_rect(layout)))
             })
-            .collect()
+            .collect();
+        self.last_epoch = scene_epoch;
+        self.last_viewport = Some(viewport);
+        result
+    }
+}
+
+impl LayoutEngine for TaffyLayoutEngine {
+    fn compute(&mut self, scene: &Scene, viewport: Size) -> Vec<(NodeId, Rect)> {
+        self.last_reconciled_node_count = 0;
+        let scene_epoch = scene.epoch();
+
+        // Full rebuild on a cold cache or a different (fresh) scene instance
+        // (a fresh scene's epoch resets to 0, so it is always below the last
+        // epoch this engine saw).
+        let cold = self.node_map.is_empty();
+        let fresh_scene = scene_epoch < self.last_epoch;
+        if cold || fresh_scene {
+            return self.full_rebuild(scene, viewport);
+        }
+
+        // Incremental: reconcile the cached tree against the current scene.
+        let (force_rebuild, counters) = {
+            let mut counters = ReconcileCounters::default();
+            let mut state = EngineState {
+                taffy: &mut self.taffy,
+                node_map: &mut self.node_map,
+                text_map: &mut self.text_map,
+                snapshots: &mut self.snapshots,
+            };
+            let force_rebuild = reconcile(scene, viewport, &mut state, &mut counters);
+            if !force_rebuild {
+                // Drop cached nodes whose tern id is no longer in the scene.
+                let scene_ids = collect_scene_ids(scene);
+                let orphans: Vec<NodeId> = state
+                    .node_map
+                    .keys()
+                    .filter(|id| !scene_ids.contains(id))
+                    .copied()
+                    .collect();
+                for id in orphans {
+                    if let Some(t) = state.node_map.remove(&id) {
+                        let _ = state.taffy.remove(t);
+                        state.text_map.remove(&t);
+                        state.snapshots.remove(&id);
+                        counters.removed += 1;
+                    }
+                }
+            }
+            (force_rebuild, counters)
+        };
+
+        // Conservative fallback: a change touching more than half the tree —
+        // or one that could not be reconciled safely — is cheaper and safer as
+        // a full rebuild. Correctness is identical either way. Removed nodes
+        // are excluded: dropping them from the cached tree is cheap, so a
+        // removal-heavy frame stays on the incremental path.
+        if force_rebuild || counters.changed + counters.created > self.node_map.len() / 2 {
+            return self.full_rebuild(scene, viewport);
+        }
+
+        let Some(taffy_root) = self.node_map.get(&scene.root_id()).copied() else {
+            // The root is hidden (display: none): no geometry this frame.
+            self.last_epoch = scene_epoch;
+            self.last_viewport = Some(viewport);
+            return Vec::new();
+        };
+
+        let result = self.layout_and_read(viewport, taffy_root, scene_epoch);
+        self.last_was_full_rebuild = false;
+        self.last_reconciled_node_count = counters.total();
+        result
     }
 }
 
 /// Mirror `id` and its subtree into the taffy tree, recording the
 /// tern-node-id -> taffy-node-id mapping. Returns `None` (skipping the node)
-/// when the node is missing or `display: none`.
+/// when the node is missing or `display: none`. Serves both the full rebuild
+/// and the incremental path (new subtrees are built with exactly this code).
 fn build_node(
     scene: &Scene,
     id: NodeId,
     viewport: Size,
     is_root: bool,
-    taffy: &mut TaffyTree<()>,
-    node_map: &mut HashMap<NodeId, TaffyNodeId>,
-    text_map: &mut HashMap<TaffyNodeId, String>,
+    state: &mut EngineState<'_>,
 ) -> Option<TaffyNodeId> {
     let node = scene.node(id)?;
 
@@ -170,6 +397,56 @@ fn build_node(
         return None;
     }
 
+    let style = scene_node_style(node, viewport, is_root);
+
+    let children: Vec<TaffyNodeId> = visible_children(scene, node)
+        .into_iter()
+        .filter_map(|child| build_node(scene, child, viewport, false, state))
+        .collect();
+
+    let taffy_node = match node.kind {
+        NodeKind::Text => {
+            let t = if children.is_empty() {
+                state.taffy.new_leaf(style).ok()?
+            } else {
+                state.taffy.new_with_children(style, &children).ok()?
+            };
+            if let Some(PropValue::Str(content)) = node.props.get("text") {
+                state.text_map.insert(t, content.clone());
+            }
+            t
+        }
+        NodeKind::StreamingText => {
+            let t = if children.is_empty() {
+                state.taffy.new_leaf(style).ok()?
+            } else {
+                state.taffy.new_with_children(style, &children).ok()?
+            };
+            // The compositor renders the node's accumulated stream; register
+            // the concatenated span texts so the measure closure sizes the
+            // leaf to its display width (same path as `text` content).
+            let content: String = scene
+                .stream(id)
+                .map(|spans| spans.iter().map(|span| span.text.as_str()).collect())
+                .unwrap_or_default();
+            state.text_map.insert(t, content);
+            t
+        }
+        _ if children.is_empty() => state.taffy.new_leaf(style).ok()?,
+        _ => state.taffy.new_with_children(style, &children).ok()?,
+    };
+
+    state.node_map.insert(id, taffy_node);
+    Some(taffy_node)
+}
+
+/// The taffy style a node resolves to: its layout props translated by
+/// [`props_to_style`], plus the two engine-side adjustments — the `wrap:
+/// false` text/streaming leaf exemption from flex shrinking, and the root
+/// filling the viewport when it declares no own size. Shared by
+/// [`build_node`] and the incremental reconciler so the cached style always
+/// matches what was built.
+fn scene_node_style(node: &SceneNode, viewport: Size, is_root: bool) -> TaffyStyle {
     let mut style = props_to_style(&node.props);
 
     // A `wrap: false` text/streaming leaf is a single intrinsic-width line —
@@ -190,70 +467,312 @@ fn build_node(
             height: Dimension::Length(viewport.height as f32),
         };
     }
+    style
+}
 
-    // Text and StreamingText nodes are leaves: they measure only their own
-    // content (registered below for the measure closure), so their in-flow
-    // children are dropped. Absolutely positioned children — the only
-    // children a leaf carries today (e.g. a streaming node's scroll-to-bottom
-    // affordance cell, mirroring the scroll_view scrollbar leaf) — are laid
-    // out against the leaf, so the compositor paints them z-ordered above
-    // the in-flow content.
+/// The node's visible children: every child that is not `display: none`; for
+/// `Text`/`StreamingText` leaves (which are taffy leaves), only the
+/// absolutely-positioned children — mirroring [`build_node`]'s child
+/// filtering exactly.
+fn visible_children(scene: &Scene, node: &SceneNode) -> Vec<NodeId> {
     let is_leaf = matches!(node.kind, NodeKind::Text | NodeKind::StreamingText);
-    let children: Vec<TaffyNodeId> = if is_leaf {
-        node.children
-            .iter()
-            .filter(|&&child| {
-                scene
-                    .node(child)
-                    .is_some_and(|c| prop_str(&c.props, "position") == Some("absolute"))
-            })
-            .filter_map(|&child| {
-                build_node(scene, child, viewport, false, taffy, node_map, text_map)
-            })
-            .collect()
-    } else {
-        node.children
-            .iter()
-            .filter_map(|&child| {
-                build_node(scene, child, viewport, false, taffy, node_map, text_map)
-            })
-            .collect()
-    };
-
-    let taffy_node = match node.kind {
-        NodeKind::Text => {
-            let t = if children.is_empty() {
-                taffy.new_leaf(style).ok()?
-            } else {
-                taffy.new_with_children(style, &children).ok()?
+    node.children
+        .iter()
+        .filter(|&&child| {
+            let Some(c) = scene.node(child) else {
+                return false;
             };
-            if let Some(PropValue::Str(content)) = node.props.get("text") {
-                text_map.insert(t, content.clone());
+            if matches!(prop_str(&c.props, "display"), Some("none")) {
+                return false;
             }
-            t
+            if is_leaf && prop_str(&c.props, "position") != Some("absolute") {
+                return false;
+            }
+            true
+        })
+        .copied()
+        .collect()
+}
+
+/// Reconcile the cached taffy tree against the current scene, walking it
+/// pre-order and mutating only the nodes that changed. Returns `true` when a
+/// full rebuild is required (a change class too complex to reconcile safely).
+fn reconcile(
+    scene: &Scene,
+    viewport: Size,
+    state: &mut EngineState<'_>,
+    counters: &mut ReconcileCounters,
+) -> bool {
+    let mut force_rebuild = false;
+    walk(
+        scene,
+        scene.root_id(),
+        viewport,
+        state,
+        counters,
+        &mut force_rebuild,
+    );
+    force_rebuild
+}
+
+/// The pre-order reconciliation walk. Nodes that are hidden now (`display:
+/// none`) have their whole cached subtree removed; visible nodes are
+/// reconciled in place.
+fn walk(
+    scene: &Scene,
+    id: NodeId,
+    viewport: Size,
+    state: &mut EngineState<'_>,
+    counters: &mut ReconcileCounters,
+    force_rebuild: &mut bool,
+) {
+    let Some(node) = scene.node(id) else {
+        return;
+    };
+    if matches!(prop_str(&node.props, "display"), Some("none")) {
+        // Hidden now: the node and its whole subtree must leave the tree
+        // (display:none subtrees are never built, so this only fires when the
+        // node was visible at the previous frame).
+        if state.node_map.contains_key(&id) {
+            remove_subtree(scene, id, state, counters);
         }
-        NodeKind::StreamingText => {
-            let t = if children.is_empty() {
-                taffy.new_leaf(style).ok()?
-            } else {
-                taffy.new_with_children(style, &children).ok()?
-            };
-            // The compositor renders the node's accumulated stream; register
-            // the concatenated span texts so the measure closure sizes the
-            // leaf to its display width (same path as `text` content).
-            let content: String = scene
-                .stream(id)
-                .map(|spans| spans.iter().map(|span| span.text.as_str()).collect())
-                .unwrap_or_default();
-            text_map.insert(t, content);
-            t
+        return;
+    }
+    if reconcile_one(scene, node, id, viewport, state, counters).is_none() {
+        *force_rebuild = true;
+        return;
+    }
+    for &child in &node.children {
+        walk(scene, child, viewport, state, counters, force_rebuild);
+    }
+}
+
+/// Reconcile one visible node against its cached taffy node. Returns `None`
+/// when the change cannot be reconciled safely (a conservative full rebuild
+/// is required instead).
+fn reconcile_one(
+    scene: &Scene,
+    node: &SceneNode,
+    id: NodeId,
+    viewport: Size,
+    state: &mut EngineState<'_>,
+    counters: &mut ReconcileCounters,
+) -> Option<()> {
+    let is_root = node.parent.is_none();
+    let style = scene_node_style(node, viewport, is_root);
+    let content = match node.kind {
+        NodeKind::Text => match node.props.get("text") {
+            Some(PropValue::Str(s)) => Some(s.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let stream_sig = match node.kind {
+        NodeKind::StreamingText => scene.stream(id).map(stream_signature),
+        _ => None,
+    };
+    let children = visible_children(scene, node);
+
+    let t = match state.node_map.get(&id).copied() {
+        Some(t) => t,
+        None => {
+            // A brand-new subtree: build it exactly like a full rebuild would
+            // (and snapshot it so the walk's later visits see it as current).
+            let before = state.node_map.len();
+            build_node(scene, id, viewport, is_root, state)?;
+            counters.created += state.node_map.len() - before;
+            snapshot_subtree(scene, id, viewport, state);
+            return Some(());
         }
-        _ if children.is_empty() => taffy.new_leaf(style).ok()?,
-        _ => taffy.new_with_children(style, &children).ok()?,
     };
 
-    node_map.insert(id, taffy_node);
-    Some(taffy_node)
+    // node_map and snapshots are kept in lockstep; a missing snapshot is a
+    // conservative full-rebuild signal.
+    let prev = state.snapshots.get(&id)?;
+
+    // A kind flip changes leaf/container semantics — rebuild conservatively.
+    if prev.kind != node.kind {
+        return None;
+    }
+    if prev.style != style {
+        let _ = state.taffy.set_style(t, style.clone());
+        counters.changed += 1;
+    }
+    if prev.content != content {
+        match content.clone() {
+            Some(c) => {
+                state.text_map.insert(t, c);
+            }
+            None => {
+                state.text_map.remove(&t);
+            }
+        }
+        let _ = state.taffy.mark_dirty(t);
+        counters.changed += 1;
+    }
+    if prev.stream_sig != stream_sig {
+        // Refresh the concatenated content so the measure closure sizes the
+        // leaf to its new display width, then let taffy re-measure it.
+        let c: String = scene
+            .stream(id)
+            .map(|spans| spans.iter().map(|span| span.text.as_str()).collect())
+            .unwrap_or_default();
+        state.text_map.insert(t, c);
+        let _ = state.taffy.mark_dirty(t);
+        counters.changed += 1;
+    }
+    if prev.children != children {
+        // Count only the structural delta — the nodes added to or dropped
+        // from the child list — so a small structural change stays well below
+        // the full-rebuild threshold.
+        counters.changed += symmetric_diff_len(&prev.children, &children);
+        reconcile_children(scene, t, &children, viewport, state, counters);
+    }
+    state.snapshots.insert(
+        id,
+        NodeSnapshot {
+            kind: node.kind,
+            style,
+            content,
+            stream_sig,
+            children,
+        },
+    );
+    Some(())
+}
+
+/// Reconcile a node's taffy children list with its current visible children:
+/// build any new child subtrees, then apply the new child list (taffy's
+/// `set_children` re-parents moved children and marks the parent dirty).
+fn reconcile_children(
+    scene: &Scene,
+    taffy_parent: TaffyNodeId,
+    children: &[NodeId],
+    viewport: Size,
+    state: &mut EngineState<'_>,
+    counters: &mut ReconcileCounters,
+) {
+    let mut taffy_children = Vec::with_capacity(children.len());
+    for &child in children {
+        match state.node_map.get(&child).copied() {
+            Some(t) => taffy_children.push(t),
+            None => {
+                let before = state.node_map.len();
+                if let Some(t) = build_node(scene, child, viewport, false, state) {
+                    taffy_children.push(t);
+                    counters.created += state.node_map.len() - before;
+                    snapshot_subtree(scene, child, viewport, state);
+                }
+            }
+        }
+    }
+    let current = state.taffy.children(taffy_parent).unwrap_or_default();
+    if current != taffy_children {
+        let _ = state.taffy.set_children(taffy_parent, &taffy_children);
+    }
+}
+
+/// The number of ids that appear in exactly one of the two child lists (the
+/// structural delta between two frames).
+fn symmetric_diff_len(a: &[NodeId], b: &[NodeId]) -> usize {
+    let set_b: HashSet<NodeId> = b.iter().copied().collect();
+    let mut n = a.iter().filter(|id| !set_b.contains(id)).count();
+    let set_a: HashSet<NodeId> = a.iter().copied().collect();
+    n += b.iter().filter(|id| !set_a.contains(id)).count();
+    n
+}
+
+/// Record snapshots for every visible node in the subtree rooted at `id` —
+/// exactly the nodes [`build_node`] just built — so a walk that visits them
+/// later sees them as up to date.
+fn snapshot_subtree(scene: &Scene, id: NodeId, viewport: Size, state: &mut EngineState<'_>) {
+    let Some(node) = scene.node(id) else {
+        return;
+    };
+    if matches!(prop_str(&node.props, "display"), Some("none")) {
+        return; // display:none subtrees are never built
+    }
+    let is_root = node.parent.is_none();
+    state.snapshots.insert(
+        id,
+        NodeSnapshot {
+            kind: node.kind,
+            style: scene_node_style(node, viewport, is_root),
+            content: match node.kind {
+                NodeKind::Text => match node.props.get("text") {
+                    Some(PropValue::Str(s)) => Some(s.clone()),
+                    _ => None,
+                },
+                _ => None,
+            },
+            stream_sig: match node.kind {
+                NodeKind::StreamingText => scene.stream(id).map(stream_signature),
+                _ => None,
+            },
+            children: visible_children(scene, node),
+        },
+    );
+    for &child in &node.children {
+        snapshot_subtree(scene, child, viewport, state);
+    }
+}
+
+/// Remove `id` and every built descendant from the cached tree (a
+/// `display: none` toggle hides the whole subtree).
+fn remove_subtree(
+    scene: &Scene,
+    id: NodeId,
+    state: &mut EngineState<'_>,
+    counters: &mut ReconcileCounters,
+) {
+    let mut stack = vec![id];
+    while let Some(cur) = stack.pop() {
+        if let Some(t) = state.node_map.remove(&cur) {
+            let _ = state.taffy.remove(t);
+            state.text_map.remove(&t);
+            state.snapshots.remove(&cur);
+            counters.removed += 1;
+        }
+        if let Some(n) = scene.node(cur) {
+            stack.extend(n.children.iter().copied());
+        }
+    }
+}
+
+/// All node ids currently in the scene (the orphan pass diffs the cached tree
+/// against this set to drop removed nodes).
+fn collect_scene_ids(scene: &Scene) -> HashSet<NodeId> {
+    let mut out = HashSet::new();
+    let mut stack = vec![scene.root_id()];
+    while let Some(id) = stack.pop() {
+        if !out.insert(id) {
+            continue;
+        }
+        if let Some(n) = scene.node(id) {
+            stack.extend(n.children.iter().copied());
+        }
+    }
+    out
+}
+
+/// A cheap change signature for a streaming leaf's content: the span count
+/// and a hash of the last span's text + style. The scene API only appends
+/// spans (no in-place stream mutation), so the length catches every append;
+/// the last-span hash additionally catches in-place mutation of the final
+/// span. This avoids copying the whole stream per frame.
+fn stream_signature(spans: &[Span]) -> (usize, u64) {
+    let len = spans.len();
+    let hash = match spans.last() {
+        Some(last) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            last.text.hash(&mut h);
+            last.style.hash(&mut h);
+            h.finish()
+        }
+        None => 0,
+    };
+    (len, hash)
 }
 
 /// Translate a scene node's `props` into a taffy `Style`.
