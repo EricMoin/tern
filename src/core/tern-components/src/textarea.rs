@@ -1064,7 +1064,8 @@ mod tests {
         // A root textarea fills the viewport; padding 1 puts the leaves at
         // row 1; the caret (display col 2 on the second line) paints the
         // reversed block caret over the cell at (3,2).
-        let buffer = crate::compositor::Compositor::new().paint(
+        let mut compositor = crate::compositor::Compositor::new();
+        let buffer = compositor.paint(
             Textarea::with_value("ab\ncd").with_height(2),
             tern_core::Size::new(6, 4),
         );
@@ -1088,7 +1089,8 @@ mod tests {
         // "hello world" wraps at the 4-cell text area (6-wide viewport minus
         // padding) into "hell" / "o wo" / "rld"; the caret at the end sits at
         // display col 3 of the last row.
-        let buffer = crate::compositor::Compositor::new().paint(
+        let mut compositor = crate::compositor::Compositor::new();
+        let buffer = compositor.paint(
             Textarea::with_value("hello world"),
             tern_core::Size::new(6, 6),
         );

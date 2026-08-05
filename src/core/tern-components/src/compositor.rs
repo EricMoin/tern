@@ -65,7 +65,7 @@
 //! Geometry comes from the layout engine ([`LayoutEngine`]); cells outside
 //! the viewport are ignored.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tern_core::buffer::{Buffer, Region};
 use tern_core::cell::{char_width, Cell};
@@ -81,12 +81,112 @@ use crate::renderable::Renderable;
 
 /// Paints a scene (or a single renderable tree) into a [`Buffer`].
 ///
-/// A fresh layout pass runs on every [`paint`](Compositor::paint) /
-/// [`paint_scene`](Compositor::paint_scene) call; the compositor itself is
-/// stateless apart from the layout engine.
-#[derive(Debug, Clone, Copy, Default)]
+/// Stateful and incremental: the compositor owns the layout engine (which
+/// owns the cached, incrementally-mutated taffy tree) plus the retained paint
+/// state — the last buffer, the last scene-absolute rects and the last
+/// per-node paint signatures. A frame whose scene changed repaints only the
+/// regions whose content changed (dirty-region repaint): the retained buffer
+/// is copied, the dirty rects (the union over changed nodes of their OLD ∪
+/// NEW painted bounds) are blanked, and every z-ordered node whose painted
+/// bounds intersect the dirty union is repainted. The result is cell-for-cell
+/// identical to a full fresh paint (the tests enforce this), so the renderer
+/// diff against the previous frame is unchanged.
+///
+/// The dirty set is detected from two sources. The scene itself pushes the id
+/// of every node it mutates ([`Scene::take_dirty`]) — a mutation-site pushed
+/// set that replaces the per-frame whole-tree paint-signature scan with an
+/// O(mutated) one: paint signatures are collected and compared only for the
+/// pushed ids, with the whole-tree walk kept as the fallback when a raw
+/// [`Scene::node_mut`] borrow (which the scene cannot introspect) set the
+/// force-full-scan flag. The all-node old-vs-new RECT comparison is retained
+/// as the correctness backbone: geometry, structural and overflow changes
+/// move rects, and the union of the changed nodes' OLD ∪ NEW bounds is what
+/// the repaint region is built from, so the pushed set only ever narrows the
+/// signature work — it never gates the repaint decision.
+///
+/// Full repaint (discard the retained state) happens only on explicit
+/// invalidation: a cold cache, a viewport change, a different (fresh) scene
+/// instance, or when the dirty region covers more than half the viewport
+/// (cheaper than a patchwork of small repaints). It never falls back to full
+/// repaint on "the scene epoch changed" alone — every successful mutation
+/// bumps the epoch, which would bypass dirty repaint on all relevant updates.
+///
+/// Snapshot/test paths that only ever paint once create a fresh compositor
+/// per call, which is exactly the stateful pattern for them (a fresh
+/// instance, never reused across frames).
+#[derive(Debug, Clone, Default)]
 pub struct Compositor {
     layout: TaffyLayoutEngine,
+    /// The retained frame from the last paint, copied and patched by the
+    /// dirty path.
+    last_buffer: Option<Buffer>,
+    /// The scene-absolute rects (post status-bar pinning) of the last paint.
+    last_rects: HashMap<NodeId, Rect>,
+    /// The per-node paint signatures of the last paint (change detection).
+    last_paint_sig: HashMap<NodeId, PaintSig>,
+    /// The viewport the last paint ran at.
+    last_viewport: Option<Size>,
+    /// The scene epoch at the last paint; a lower epoch means a different
+    /// (fresh) scene instance.
+    last_scene_epoch: u64,
+    /// Instrumentation: how the last frame was painted.
+    last_paint_mode: PaintMode,
+    /// Instrumentation: nodes in the paint order of the last frame.
+    last_painted_node_count: usize,
+    /// Instrumentation: nodes repainted by the last dirty pass.
+    last_repainted_node_count: usize,
+}
+
+/// How the last [`paint_scene`](Compositor::paint_scene) produced its frame.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum PaintMode {
+    /// The scene was unchanged since the last paint: the retained buffer was
+    /// returned as-is.
+    #[default]
+    NoPaint,
+    /// The whole scene was painted into a fresh buffer.
+    Full,
+    /// Only the dirty regions were repainted; the payload is the number of
+    /// nodes repainted.
+    Dirty(usize),
+}
+
+/// The paint-relevant state of a scene node — everything that can change what
+/// its painted cells look like. Compared per frame to detect the dirty set
+/// (the layout engine separately tracks the layout-relevant state).
+#[derive(Debug, Clone, PartialEq)]
+struct PaintSig {
+    /// The node's cell style (fg/bg/modifiers/border) — paint, not layout.
+    style: Style,
+    /// `display: none` hides the node (and removes its geometry).
+    display_none: bool,
+    /// A `Text` leaf's content.
+    text: Option<String>,
+    /// The `caret` display column (painted by the input component).
+    caret: Option<i64>,
+    /// The node's clip rect (`clip_*` props), if declared.
+    clip: Option<Rect>,
+    /// The node's scroll offset (`scroll_*` props).
+    scroll: (i32, i32),
+    /// The paint z-index.
+    z_index: i32,
+    /// The `wrap` prop (single-row vs soft-wrap painting).
+    wrap: Option<bool>,
+    /// The `status_bar` marker (reserved bottom row).
+    status_bar: bool,
+    /// A cheap signature of a streaming leaf's content: `(span count, hash of
+    /// the last span)` — the scene API only appends spans, so the length
+    /// catches every append without copying the stream each frame.
+    stream: Option<(usize, u64)>,
+}
+
+/// The frame state retained after a paint: the painted buffer, the
+/// scene-absolute rects, the per-node paint signatures and the paint order.
+struct FrameState {
+    rects: HashMap<NodeId, Rect>,
+    sigs: HashMap<NodeId, PaintSig>,
+    order: Vec<NodeId>,
+    buffer: Buffer,
 }
 
 impl Compositor {
@@ -94,7 +194,36 @@ impl Compositor {
     pub fn new() -> Self {
         Self {
             layout: TaffyLayoutEngine::new(),
+            last_buffer: None,
+            last_rects: HashMap::new(),
+            last_paint_sig: HashMap::new(),
+            last_viewport: None,
+            last_scene_epoch: 0,
+            last_paint_mode: PaintMode::NoPaint,
+            last_painted_node_count: 0,
+            last_repainted_node_count: 0,
         }
+    }
+
+    /// How the last frame was painted (test instrumentation: a localized
+    /// mutation must take the dirty path, a resize the full path).
+    #[cfg(test)]
+    fn last_paint_mode(&self) -> &PaintMode {
+        &self.last_paint_mode
+    }
+
+    /// The number of nodes in the paint order of the last frame (test
+    /// instrumentation).
+    #[cfg(test)]
+    fn last_painted_node_count(&self) -> usize {
+        self.last_painted_node_count
+    }
+
+    /// The number of nodes repainted by the last dirty pass (test
+    /// instrumentation).
+    #[cfg(test)]
+    fn last_repainted_node_count(&self) -> usize {
+        self.last_repainted_node_count
     }
 
     /// Paint a single renderable tree into a fresh `viewport`-sized buffer.
@@ -170,8 +299,40 @@ impl Compositor {
     }
 
     /// Paint a whole scene into a fresh `viewport`-sized buffer.
+    ///
+    /// Full repaint when the retained state is invalid (cold cache, viewport
+    /// change, different scene instance); otherwise, when the scene mutated,
+    /// a dirty-region repaint that copies the clean cells from the retained
+    /// buffer; when the scene is unchanged, the retained buffer is returned
+    /// as-is.
     pub fn paint_scene(&mut self, scene: &Scene, viewport: Size) -> Buffer {
-        let mut buffer = Buffer::new(viewport.width, viewport.height);
+        let scene_epoch = scene.epoch();
+        let cold = self.last_buffer.is_none() || self.last_rects.is_empty();
+        let viewport_changed = self.last_viewport != Some(viewport);
+        // A fresh scene instance resets its epoch below the last one this
+        // compositor saw; its retained buffer is meaningless, so repaint
+        // everything.
+        let fresh_scene = self.last_scene_epoch > scene_epoch;
+        if cold || viewport_changed || fresh_scene {
+            return self.paint_full(scene, viewport, scene_epoch);
+        }
+        if scene_epoch == self.last_scene_epoch {
+            // No mutation since the last paint: the retained frame is current.
+            self.last_paint_mode = PaintMode::NoPaint;
+            return self.last_buffer.clone().expect("retained buffer present");
+        }
+        self.paint_dirty(scene, viewport, scene_epoch)
+    }
+
+    /// Paint the whole scene into a fresh buffer — the correctness baseline
+    /// every dirty repaint is tested against — and retain the frame state.
+    fn paint_full(&mut self, scene: &Scene, viewport: Size, scene_epoch: u64) -> Buffer {
+        // Consume the mutation-site pushed dirty set: a full paint rebuilds
+        // every paint signature anyway, so the hint is only drained to keep
+        // the set consistent for the next dirty pass (a mutation recorded
+        // between this drain and the next paint is what the next pass must
+        // see).
+        let _ = scene.take_dirty();
         // taffy 0.7 reports each node's `Layout.location` relative to its
         // parent (verified against taffy's `round_layout` in
         // `taffy/src/compute/mod.rs`: `layout.location = round(unrounded
@@ -185,27 +346,201 @@ impl Compositor {
         // components' group/panel -> text leaves — land at their real scene
         // positions.
         let rects = self.layout_rects(scene, viewport);
+        let mut buffer = Buffer::new(viewport.width, viewport.height);
         // Collect every laid-out node in pre-order, then paint by ascending
         // effective z-index. The sort is stable, so equal z-indexes keep
         // pre-order: with no `z_index` prop anywhere this paints exactly like
         // the historical pre-order traversal.
-        let mut order: Vec<NodeId> = Vec::new();
-        collect_paint_order(scene, scene.root_id(), &rects, &mut order);
-        order.sort_by(|&a, &b| z_index(scene, a).cmp(&z_index(scene, b)));
-        for id in order {
-            if let Some(node) = scene.node(id) {
-                if let Some(&rect) = rects.get(&id) {
+        let order = paint_order(scene, &rects);
+        for id in &order {
+            if let Some(node) = scene.node(*id) {
+                if let Some(&rect) = rects.get(id) {
                     // A node's frame (box background/border) is drawn through
                     // its ancestors' regions only; its content (text, stream,
                     // children) also applies its own scroll offset, so a pane
                     // scrolls its content inside its own fixed frame.
-                    let frame = effective_region(scene, id, viewport, false);
-                    let content = effective_region(scene, id, viewport, true);
+                    let frame = effective_region(scene, *id, viewport, false);
+                    let content = effective_region(scene, *id, viewport, true);
                     paint_node(node, rect, frame, content, &mut buffer);
                 }
             }
         }
+        let sigs = collect_paint_sigs(scene, &rects);
+        self.retain_frame(
+            viewport,
+            scene_epoch,
+            FrameState {
+                rects,
+                sigs,
+                order,
+                buffer: buffer.clone(),
+            },
+            PaintMode::Full,
+            0,
+        );
         buffer
+    }
+
+    /// Repaint only the regions whose content changed since the last paint,
+    /// copying the clean cells from the retained buffer. The result is
+    /// cell-for-cell identical to [`paint_full`](Compositor::paint_full) (the
+    /// tests enforce this), so the renderer's diff against the previous frame
+    /// is unchanged.
+    fn paint_dirty(&mut self, scene: &Scene, viewport: Size, scene_epoch: u64) -> Buffer {
+        let rects = self.layout_rects(scene, viewport);
+        // Consume the mutation-site pushed dirty set: the ids of the nodes
+        // mutated since the last drain, plus the force-full-scan flag a raw
+        // `node_mut` borrow sets (the scene cannot introspect a raw
+        // mutation). Paint signatures are collected — and compared — ONLY for
+        // the pushed ids, replacing the per-frame whole-tree signature walk
+        // with an O(mutated) one; the force flag falls back to the full walk.
+        // The all-node old-vs-new RECT comparison below stays: geometry,
+        // structural and overflow changes move rects, and the union of the
+        // changed nodes' OLD ∪ NEW bounds is the repaint region's correctness
+        // backbone, so a missed signature can never lose a repaint it was
+        // responsible for.
+        let (pushed, force_full_scan) = scene.take_dirty();
+        let sigs = if force_full_scan {
+            collect_paint_sigs(scene, &rects)
+        } else {
+            collect_paint_sigs_for(scene, &rects, &pushed)
+        };
+
+        // The dirty union: over every changed node, its OLD ∪ NEW painted
+        // bounds — never the new bounds alone, so moves, shrinks, removals
+        // and display:none toggles leave no stale cells.
+        let viewport_rect = Rect::new(0, 0, viewport.width as u32, viewport.height as u32);
+        let mut dirty: Option<Rect> = None;
+        let mut ids: Vec<NodeId> = self.last_rects.keys().copied().collect();
+        ids.extend(rects.keys().copied());
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            let old = self.last_rects.get(&id).copied();
+            let new = rects.get(&id).copied();
+            // Paint signatures are compared only for the pushed ids (or for
+            // every id when a raw `node_mut` forced the full scan): an id the
+            // scene did not report as mutated cannot have changed its
+            // paint-relevant state, so its old signature is still current.
+            let sig_changed = if force_full_scan || pushed.contains(&id) {
+                match (self.last_paint_sig.get(&id), sigs.get(&id)) {
+                    (Some(a), Some(b)) => a != b,
+                    (None, Some(_)) | (Some(_), None) => true,
+                    (None, None) => false,
+                }
+            } else {
+                false
+            };
+            if old == new && !sig_changed {
+                continue;
+            }
+            let mut region = match (old, new) {
+                (Some(o), Some(n)) => rect_union(o, n),
+                (Some(o), None) | (None, Some(o)) => o,
+                (None, None) => continue,
+            };
+            // A text/streaming leaf's caret paints at rect.x + caret_col,
+            // which can lie outside the rect: cover the whole row to be safe.
+            let is_caret_leaf = matches!(
+                scene.node(id).map(|n| n.kind),
+                Some(NodeKind::Text | NodeKind::StreamingText)
+            ) && matches!(scene.prop(id, "caret"), Some(PropValue::Int(_)));
+            if is_caret_leaf && region.height == 1 {
+                region = Rect::new(0, region.y, viewport.width as u32, region.height);
+            }
+            if let Some(r) = region.intersection(&viewport_rect) {
+                if r.width > 0 && r.height > 0 {
+                    dirty = Some(match dirty {
+                        Some(d) => rect_union(d, r),
+                        None => r,
+                    });
+                }
+            }
+        }
+
+        let Some(union) = dirty else {
+            // Defensive: nothing changed (cannot normally happen when the
+            // scene epoch advanced). Return the retained frame unchanged.
+            self.last_paint_mode = PaintMode::NoPaint;
+            return self.last_buffer.clone().expect("retained buffer present");
+        };
+
+        // Coverage fallback (perf knob): more than half the viewport is
+        // dirty, so a full repaint is cheaper and equally correct.
+        if union.area() * 2 > viewport_rect.area() {
+            return self.paint_full(scene, viewport, scene_epoch);
+        }
+
+        // Repaint every z-ordered node whose painted bounds intersect the
+        // dirty union — the changed nodes themselves and any overlay or
+        // sibling that shares cells with them — into a blank scratch frame,
+        // then copy just the union's cells back over the retained buffer.
+        //
+        // Painting into a scratch frame (rather than painting in place, or
+        // narrowing each node's clip to the union) is what makes the dirty
+        // result identical to a full paint:
+        //   * in place, a node paints its WHOLE rect — a bg-filled or bordered
+        //     box extends far beyond the union and would clobber retained
+        //     cells belonging to nodes that are not in the repaint set;
+        //   * narrowing each node's clip would change what it paints, because
+        //     text/stream wrapping is computed against the node's own clip
+        //     bounds — the glyph layout inside the union would differ.
+        // With a scratch frame every node paints exactly as it would in a full
+        // paint, and only the union's cells are taken. Cells outside the union
+        // are provably unchanged: any cell whose value could differ is covered
+        // by some changed node's OLD ∪ NEW bounds, i.e. by the union itself.
+        let order = paint_order(scene, &rects);
+        let mut scratch = Buffer::new(viewport.width, viewport.height);
+        let mut repainted = 0usize;
+        for id in &order {
+            let Some(&rect) = rects.get(id) else {
+                continue;
+            };
+            if rect.intersection(&union).is_none() && !caret_cell_in(scene, *id, rect, &union) {
+                continue;
+            }
+            if let Some(node) = scene.node(*id) {
+                let frame = effective_region(scene, *id, viewport, false);
+                let content = effective_region(scene, *id, viewport, true);
+                paint_node(node, rect, frame, content, &mut scratch);
+                repainted += 1;
+            }
+        }
+        let mut buffer = self.last_buffer.clone().expect("retained buffer present");
+        copy_rect(&mut buffer, &scratch, union);
+
+        self.retain_frame(
+            viewport,
+            scene_epoch,
+            FrameState {
+                rects,
+                sigs,
+                order,
+                buffer: buffer.clone(),
+            },
+            PaintMode::Dirty(repainted),
+            repainted,
+        );
+        buffer
+    }
+
+    /// Record the frame state after a full or dirty paint.
+    fn retain_frame(
+        &mut self,
+        viewport: Size,
+        scene_epoch: u64,
+        state: FrameState,
+        mode: PaintMode,
+        repainted: usize,
+    ) {
+        self.last_buffer = Some(state.buffer);
+        self.last_rects = state.rects;
+        self.last_paint_sig = state.sigs;
+        self.last_viewport = Some(viewport);
+        self.last_scene_epoch = scene_epoch;
+        self.last_paint_mode = mode;
+        self.last_painted_node_count = state.order.len();
+        self.last_repainted_node_count = repainted;
     }
 
     /// The ids of the nodes covering the cell at (`col`, `row`), ordered
@@ -495,6 +830,157 @@ fn z_index(scene: &Scene, id: NodeId) -> i32 {
         Some(PropValue::Int(i)) => *i as i32,
         _ => 0,
     }
+}
+
+/// The stable z-ordered paint list for the given rects: every laid-out node
+/// in pre-order, sorted by ascending effective z-index (stable, so equal
+/// indexes keep pre-order).
+fn paint_order(scene: &Scene, rects: &HashMap<NodeId, Rect>) -> Vec<NodeId> {
+    let mut order: Vec<NodeId> = Vec::new();
+    collect_paint_order(scene, scene.root_id(), rects, &mut order);
+    order.sort_by(|&a, &b| z_index(scene, a).cmp(&z_index(scene, b)));
+    order
+}
+
+/// Per-node paint signatures for every node with geometry this frame — the
+/// whole-tree walk, used by [`Compositor::paint_full`] and as the
+/// force-full-scan fallback of [`Compositor::paint_dirty`].
+fn collect_paint_sigs(scene: &Scene, rects: &HashMap<NodeId, Rect>) -> HashMap<NodeId, PaintSig> {
+    let mut sigs = HashMap::new();
+    let mut stack = vec![scene.root_id()];
+    while let Some(id) = stack.pop() {
+        if rects.contains_key(&id) {
+            if let Some(sig) = paint_sig_of(scene, id) {
+                sigs.insert(id, sig);
+            }
+        }
+        if let Some(node) = scene.node(id) {
+            stack.extend(node.children.iter().copied());
+        }
+    }
+    sigs
+}
+
+/// Per-node paint signatures for exactly the given ids (each with geometry
+/// this frame). The pushed-id counterpart of [`collect_paint_sigs`]: O(|ids|)
+/// instead of O(nodes). The mutation-site pushed dirty set
+/// ([`Scene::take_dirty`]) names precisely the nodes that could have changed
+/// since the last drain, so their signatures are the only ones that need
+/// re-collecting and comparing.
+fn collect_paint_sigs_for(
+    scene: &Scene,
+    rects: &HashMap<NodeId, Rect>,
+    ids: &HashSet<NodeId>,
+) -> HashMap<NodeId, PaintSig> {
+    let mut sigs = HashMap::new();
+    for &id in ids {
+        if rects.contains_key(&id) {
+            if let Some(sig) = paint_sig_of(scene, id) {
+                sigs.insert(id, sig);
+            }
+        }
+    }
+    sigs
+}
+
+/// The paint-relevant state of a node: everything that can change what its
+/// painted cells look like.
+fn paint_sig_of(scene: &Scene, id: NodeId) -> Option<PaintSig> {
+    let node = scene.node(id)?;
+    let stream = if matches!(node.kind, NodeKind::StreamingText) {
+        scene.stream(id).map(stream_paint_signature)
+    } else {
+        None
+    };
+    Some(PaintSig {
+        style: node.style,
+        display_none: matches!(prop_str_scene(scene, id, "display"), Some("none")),
+        text: match node.props.get("text") {
+            Some(PropValue::Str(s)) => Some(s.clone()),
+            _ => None,
+        },
+        caret: match node.props.get("caret") {
+            Some(PropValue::Int(i)) => Some(*i),
+            _ => None,
+        },
+        clip: scene.clip_rect(id),
+        scroll: scene.scroll_offset(id),
+        z_index: z_index(scene, id),
+        wrap: match node.props.get("wrap") {
+            Some(PropValue::Bool(b)) => Some(*b),
+            _ => None,
+        },
+        status_bar: matches!(node.props.get("status_bar"), Some(PropValue::Bool(true))),
+        stream,
+    })
+}
+
+/// Read a string property from a scene node (local helper so the paint
+/// signature does not borrow the node past the map access).
+fn prop_str_scene<'a>(scene: &'a Scene, id: NodeId, key: &str) -> Option<&'a str> {
+    match scene.prop(id, key) {
+        Some(PropValue::Str(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// A cheap change signature for a streaming leaf's content: the span count
+/// and a hash of the last span's text + style. The scene API only appends
+/// spans (no in-place stream mutation), so the length catches every append;
+/// the last-span hash additionally catches in-place mutation of the final
+/// span — without copying the whole stream each frame.
+fn stream_paint_signature(spans: &[Span]) -> (usize, u64) {
+    let len = spans.len();
+    let hash = match spans.last() {
+        Some(last) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            last.text.hash(&mut h);
+            last.style.hash(&mut h);
+            h.finish()
+        }
+        None => 0,
+    };
+    (len, hash)
+}
+
+/// The smallest rect containing both `a` and `b`.
+fn rect_union(a: Rect, b: Rect) -> Rect {
+    let x0 = a.x.min(b.x);
+    let y0 = a.y.min(b.y);
+    let x1 = a.right().max(b.right());
+    let y1 = a.bottom().max(b.bottom());
+    Rect::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32)
+}
+
+/// Copy the cells inside `r` from `src` into `dst` (both viewport-sized;
+/// the rect is clipped to the buffer bounds). This is how a dirty repaint
+/// lands: the freshly painted scratch frame supplies the union's cells, and
+/// every cell outside it keeps its retained value.
+fn copy_rect(dst: &mut Buffer, src: &Buffer, r: Rect) {
+    let x0 = r.x.max(0) as u16;
+    let y0 = r.y.max(0) as u16;
+    let x1 = r.right().min(dst.width as i32).max(0) as u16;
+    let y1 = r.bottom().min(dst.height as i32).max(0) as u16;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if let Some(&cell) = src.cell(x, y) {
+                dst.set_cell(x, y, cell);
+            }
+        }
+    }
+}
+
+/// Whether `id`'s caret cell (rect origin + its `caret` display column) falls
+/// inside `r` — a text/streaming leaf with a caret paints that cell even
+/// outside its own rect, so it must be repainted when the dirty region
+/// touches it.
+fn caret_cell_in(scene: &Scene, id: NodeId, rect: Rect, r: &Rect) -> bool {
+    let col = match scene.prop(id, "caret") {
+        Some(PropValue::Int(i)) => *i,
+        _ => return false,
+    };
+    r.contains(rect.x + col as i32, rect.y)
 }
 
 /// Paint a single node into its laid-out rect, drawing its frame through
@@ -958,7 +1444,8 @@ mod tests {
     /// Paint a renderable tree and return it as a `Vec<String>` grid for
     /// debugging and golden comparisons.
     fn render_rows(root: impl Into<Renderable>, viewport: Size) -> Vec<String> {
-        let buffer = Compositor::new().paint(root, viewport);
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(root, viewport);
         (0..buffer.height)
             .map(|y| {
                 (0..buffer.width)
@@ -971,7 +1458,8 @@ mod tests {
     /// Paint a raw scene and return it as a `Vec<String>` grid for golden
     /// comparisons.
     fn render_scene_rows(scene: &Scene, viewport: Size) -> Vec<String> {
-        let buffer = Compositor::new().paint_scene(scene, viewport);
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(scene, viewport);
         (0..buffer.height)
             .map(|y| {
                 (0..buffer.width)
@@ -979,6 +1467,14 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// The character at (`x`, `y`) in a buffer, or a space outside it.
+    fn cell_char(buffer: &Buffer, x: i32, y: i32) -> char {
+        if x < 0 || y < 0 || x >= buffer.width as i32 || y >= buffer.height as i32 {
+            return ' ';
+        }
+        buffer.cell(x as u16, y as u16).map(|c| c.ch).unwrap_or(' ')
     }
 
     /// A scene with a `StreamingText` child sized to `width` x `height` at the
@@ -1002,7 +1498,8 @@ mod tests {
         let box_style = Style::new().border_style(BorderStyle::Rounded);
         let tree = Box::new(box_style, vec![Text::new("Hi", Style::new()).into()]).padding(1);
 
-        let buffer = Compositor::new().paint(tree.clone(), Size::new(10, 4));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(tree.clone(), Size::new(10, 4));
 
         // Expected cell grid:
         //   ┌────────┐
@@ -1031,7 +1528,8 @@ mod tests {
         // A bare text root paints its content from the top-left, clipped to
         // the buffer.
         let tree = Text::new("Hello", Style::new());
-        let buffer = Compositor::new().paint(tree, Size::new(3, 1));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(tree, Size::new(3, 1));
         assert_eq!(buffer.cell(0, 0).unwrap().ch, 'H');
         assert_eq!(buffer.cell(1, 0).unwrap().ch, 'e');
         assert_eq!(buffer.cell(2, 0).unwrap().ch, 'l');
@@ -1061,7 +1559,8 @@ mod tests {
             .width(3)
             .height(2);
 
-        let buffer = Compositor::new().paint(tree, Size::new(5, 3));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(tree, Size::new(5, 3));
         for y in 0..2 {
             for x in 0..3 {
                 let c = buffer.cell(x, y).unwrap();
@@ -1100,7 +1599,8 @@ mod tests {
         scene.set_prop(b, "padding", PropValue::Int(1));
         scene.add_text(b, "ok", Style::new()).unwrap();
 
-        let buffer = Compositor::new().paint_scene(&scene, Size::new(6, 3));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(6, 3));
         // A non-root box sizes to its content: 4x3 (2 + 2 padding), at the
         // origin of the 6x3 viewport.
         //   +--+
@@ -1130,7 +1630,8 @@ mod tests {
         // text leaf lands at (1,1), and the caret prop (display col 2) paints
         // the reversed block caret over the blank cell at (3,1).
         let input = Input::with_value("ab");
-        let buffer = Compositor::new().paint(input, Size::new(6, 3));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(input, Size::new(6, 3));
 
         assert_eq!(buffer.cell(1, 1).unwrap().ch, 'a');
         assert_eq!(buffer.cell(2, 1).unwrap().ch, 'b');
@@ -1157,7 +1658,8 @@ mod tests {
         // An empty input shows the dimmed placeholder; the caret sits at
         // display col 0, adding REVERSED over the placeholder's DIM.
         let input = Input::new().placeholder("ask");
-        let buffer = Compositor::new().paint(input, Size::new(6, 3));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(input, Size::new(6, 3));
 
         let c = buffer.cell(1, 1).unwrap();
         assert_eq!(c.ch, 'a');
@@ -1173,7 +1675,8 @@ mod tests {
     #[test]
     fn input_hidden_caret_paints_no_block() {
         let input = Input::with_value("ab").hide_caret();
-        let buffer = Compositor::new().paint(input, Size::new(6, 3));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(input, Size::new(6, 3));
         for x in 0..6 {
             let c = buffer.cell(x, 1).unwrap();
             assert!(!c.style.modifiers.contains(Modifiers::REVERSED));
@@ -1187,7 +1690,8 @@ mod tests {
         // -> '▓' + 3 '░' + " 25%".
         let mut spinner = Spinner::determinate(4).bar_width(4);
         spinner.set_progress(1);
-        let buffer = Compositor::new().paint(spinner, Size::new(8, 1));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(spinner, Size::new(8, 1));
         let row: String = (0..8).map(|x| buffer.cell(x, 0).unwrap().ch).collect();
         assert_eq!(row, "▓░░░ 25%");
     }
@@ -1195,7 +1699,8 @@ mod tests {
     #[test]
     fn spinner_indeterminate_paints_current_frame() {
         let spinner = Spinner::with_frames(&["⠋", "⠙"]);
-        let buffer = Compositor::new().paint(spinner, Size::new(4, 1));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(spinner, Size::new(4, 1));
         assert_eq!(buffer.cell(0, 0).unwrap().ch, '⠋');
         assert_eq!(buffer.cell(1, 0).unwrap().ch, ' ');
     }
@@ -1220,7 +1725,8 @@ mod tests {
                     .align(SegmentAlign::Right)
                     .priority(3),
             );
-        let buffer = Compositor::new().paint(bar, Size::new(12, 1));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(bar, Size::new(12, 1));
         let row: String = (0..12).map(|x| buffer.cell(x, 0).unwrap().ch).collect();
 
         assert!(row.starts_with("cde"), "row = {row:?}");
@@ -1234,7 +1740,8 @@ mod tests {
         let bar = StatusBar::new(Style::new())
             .left("L", Style::new())
             .right("R", Style::new());
-        let buffer = Compositor::new().paint(bar, Size::new(20, 1));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(bar, Size::new(20, 1));
         assert_eq!(buffer.cell(0, 0).unwrap().ch, 'L');
         assert_eq!(buffer.cell(19, 0).unwrap().ch, 'R');
     }
@@ -1247,7 +1754,8 @@ mod tests {
         let bar = StatusBar::new(Style::new())
             .left("L", Style::new())
             .right("R", Style::new());
-        let buffer = Compositor::new().paint(bar, Size::new(20, 3));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(bar, Size::new(20, 3));
         assert_eq!(buffer.cell(0, 2).unwrap().ch, 'L');
         assert_eq!(buffer.cell(19, 2).unwrap().ch, 'R');
         for y in 0..2 {
@@ -1285,7 +1793,8 @@ mod tests {
         )
         .column();
 
-        let buffer = Compositor::new().paint(tree, Size::new(20, 8));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(tree, Size::new(20, 8));
         let rows: Vec<String> = (0..8)
             .map(|y| (0..20).map(|x| buffer.cell(x, y).unwrap().ch).collect())
             .collect();
@@ -1324,7 +1833,8 @@ mod tests {
             Panel::new("one", Text::new("body-a", Style::new())).collapsed(),
             Panel::new("two", Text::new("body-b", Style::new())),
         ]);
-        let buffer = Compositor::new().paint(panels, Size::new(20, 5));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(panels, Size::new(20, 5));
         let rows: Vec<String> = (0..5)
             .map(|y| (0..20).map(|x| buffer.cell(x, y).unwrap().ch).collect())
             .collect();
@@ -1366,7 +1876,8 @@ mod tests {
             }
         ));
 
-        let buffer = Compositor::new().paint_scene(&scene, Size::new(12, 3));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(12, 3));
 
         // Expected cell grid:
         //   abcdef
@@ -1420,7 +1931,8 @@ mod tests {
             }
         ));
 
-        let buffer = Compositor::new().paint_scene(&scene, Size::new(3, 1));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(3, 1));
         assert_eq!(buffer.cell(0, 0).unwrap().ch, 'a');
         assert_eq!(buffer.cell(1, 0).unwrap().ch, 'b');
         // Column 2 stays blank: コ was dropped, not truncated to a half-glyph
@@ -1439,7 +1951,8 @@ mod tests {
                 style: Style::new(),
             }
         ));
-        let buffer2 = Compositor::new().paint_scene(&scene2, Size::new(1, 1));
+        let mut compositor = Compositor::new();
+        let buffer2 = compositor.paint_scene(&scene2, Size::new(1, 1));
         assert_eq!(buffer2.cell(0, 0).unwrap(), &Cell::default());
     }
 
@@ -1461,7 +1974,8 @@ mod tests {
             }
         ));
 
-        let buffer = Compositor::new().paint_scene(&scene, Size::new(4, 2));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(4, 2));
 
         // Expected cell grid:
         //   ab
@@ -1496,7 +2010,8 @@ mod tests {
             }
         ));
 
-        let buffer = Compositor::new().paint_scene(&scene, Size::new(4, 2));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(4, 2));
 
         // Expected cell grid:
         //   abcd
@@ -1528,7 +2043,8 @@ mod tests {
             }
         ));
 
-        let buffer = Compositor::new().paint_scene(&scene, Size::new(3, 1));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(3, 1));
 
         // Expected cell grid:
         //   ab
@@ -1557,7 +2073,8 @@ mod tests {
         scene.set_prop(t, "width", PropValue::Int(4));
         scene.set_prop(t, "height", PropValue::Int(1));
 
-        let buffer = Compositor::new().paint_scene(&scene, Size::new(4, 1));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(4, 1));
 
         // Expected cell grid:
         //   abcd
@@ -1599,7 +2116,8 @@ mod tests {
     fn z_order_higher_z_paints_on_top() {
         // The overlay (z_index 2) paints over the in-flow box where their
         // rects overlap; each keeps its own background where they do not.
-        let buffer = Compositor::new().paint_scene(&overlay_scene(Some(2)), Size::new(20, 12));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&overlay_scene(Some(2)), Size::new(20, 12));
         // Overlap cell (1..4, 1..4): the higher-z overlay wins.
         assert_eq!(buffer.cell(2, 2).unwrap().style.bg, Color::Indexed(2));
         // Overlay-only cell.
@@ -1613,7 +2131,8 @@ mod tests {
         // No z_index anywhere: both nodes stack at 0 and the stable sort
         // keeps pre-order, so the later sibling (the overlay) paints on top —
         // exactly the pre-z-order behavior.
-        let buffer = Compositor::new().paint_scene(&overlay_scene(None), Size::new(20, 12));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&overlay_scene(None), Size::new(20, 12));
         assert_eq!(buffer.cell(2, 2).unwrap().style.bg, Color::Indexed(2));
     }
 
@@ -1627,7 +2146,8 @@ mod tests {
         let flow = scene.children(root).unwrap()[0];
         scene.set_prop(flow, "z_index", PropValue::Int(3));
 
-        let buffer = Compositor::new().paint_scene(&scene, Size::new(20, 12));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(20, 12));
         assert_eq!(buffer.cell(2, 2).unwrap().style.bg, Color::Indexed(2));
     }
 
@@ -1645,7 +2165,8 @@ mod tests {
             "flow box z defaults to 0"
         );
 
-        let buffer = Compositor::new().paint_scene(&scene, Size::new(20, 12));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(20, 12));
         // Overlap cell: the overlay wins.
         assert_eq!(buffer.cell(2, 2).unwrap().style.bg, Color::Indexed(2));
         // Flow-only cell: the flow box's background still shows through.
@@ -1674,7 +2195,8 @@ mod tests {
             let _ = row;
         }
 
-        let buffer = Compositor::new().paint_scene(&scene, Size::new(6, 3));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(6, 3));
         // Clip rows 0-1: 'a' and 'b' visible, 'c' (row 2) clipped away.
         assert_eq!(buffer.cell(0, 0).unwrap().ch, 'a');
         assert_eq!(buffer.cell(0, 1).unwrap().ch, 'b');
@@ -1696,7 +2218,8 @@ mod tests {
         scene.set_clip_rect(b, Rect::new(10, 10, 2, 2));
         scene.add_text(b, "hi", Style::new()).expect("text");
 
-        let buffer = Compositor::new().paint_scene(&scene, Size::new(4, 1));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(4, 1));
         for x in 0..4 {
             assert_eq!(buffer.cell(x, 0).unwrap(), &Cell::default());
         }
@@ -1724,7 +2247,8 @@ mod tests {
             scene.set_prop(t, "align_self", PropValue::Str("flex-start".into()));
         }
 
-        let buffer = Compositor::new().paint_scene(&scene, Size::new(4, 3));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(4, 3));
         // 'a' (row 0) is scrolled out; 'b' renders at row 0, 'c' at row 1.
         assert_eq!(buffer.cell(0, 0).unwrap().ch, 'b');
         assert_eq!(buffer.cell(0, 1).unwrap().ch, 'c');
@@ -1752,7 +2276,8 @@ mod tests {
             scene.set_prop(t, "align_self", PropValue::Str("flex-start".into()));
         }
 
-        let buffer = Compositor::new().paint_scene(&scene, Size::new(4, 3));
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(4, 3));
         // Content rows 2 and 3 map to buffer rows 0 and 1.
         assert_eq!(buffer.cell(0, 0).unwrap().ch, 'c');
         assert_eq!(buffer.cell(0, 1).unwrap().ch, 'd');
@@ -2069,5 +2594,333 @@ mod tests {
         );
         scene.set_prop(b, "display", PropValue::Str("none".into()));
         assert_eq!(comp.content_size(&scene, b, Size::new(20, 12)), None);
+    }
+
+    // ---------------------------------------------------------------------
+    // Dirty-region repaint (round 2)
+    // ---------------------------------------------------------------------
+
+    /// The ids of the dirty-repaint test scene's nodes.
+    struct DirtyIds {
+        left: NodeId,
+        text: NodeId,
+        right: NodeId,
+        stream: NodeId,
+        overlay: NodeId,
+    }
+
+    /// A non-trivial scene for dirty-repaint parity: a padded root holding a
+    /// row of two boxes — one with a text leaf, one with a streaming leaf and
+    /// an absolutely positioned z-ordered overlay.
+    fn dirty_repaint_scene() -> (Scene, DirtyIds) {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        scene.set_prop(root, "padding", PropValue::Int(1));
+        let row = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        scene.set_prop(row, "width", PropValue::Int(38));
+        scene.set_prop(row, "height", PropValue::Int(8));
+        let left = scene.add_child(row, NodeKind::Box, Style::new()).unwrap();
+        scene.set_prop(left, "width", PropValue::Int(18));
+        scene.set_prop(left, "height", PropValue::Int(6));
+        let text = scene.add_text(left, "Hello", Style::new()).unwrap();
+        let right = scene.add_child(row, NodeKind::Box, Style::new()).unwrap();
+        scene.set_prop(right, "width", PropValue::Int(18));
+        scene.set_prop(right, "height", PropValue::Int(6));
+        let stream = scene
+            .add_child(right, NodeKind::StreamingText, Style::new())
+            .unwrap();
+        assert!(scene.append_span(
+            stream,
+            Span {
+                text: "s1".into(),
+                style: Style::new(),
+            }
+        ));
+        let overlay = scene.add_child(right, NodeKind::Box, Style::new()).unwrap();
+        scene.set_prop(overlay, "position", PropValue::Str("absolute".into()));
+        scene.set_prop(overlay, "top", PropValue::Int(0));
+        scene.set_prop(overlay, "left", PropValue::Int(4));
+        scene.set_prop(overlay, "width", PropValue::Int(4));
+        scene.set_prop(overlay, "height", PropValue::Int(2));
+        scene.set_prop(overlay, "z_index", PropValue::Int(5));
+        (
+            scene,
+            DirtyIds {
+                left,
+                text,
+                right,
+                stream,
+                overlay,
+            },
+        )
+    }
+
+    /// Warm a compositor with frame 1, apply `mutate`, paint frame 2 on the
+    /// warm compositor (the dirty path) and on a fresh compositor (the full
+    /// recompute oracle), and assert the two invariants: the buffers are
+    /// cell-for-cell equal, and the diffs vs the same previous frame are
+    /// identical (so the renderer's terminal output is unchanged).
+    fn assert_dirty_parity(
+        warm: &mut Compositor,
+        scene: &mut Scene,
+        ids: &DirtyIds,
+        viewport: Size,
+        mutate: impl FnOnce(&mut Scene, &DirtyIds),
+    ) {
+        let prev = warm.paint_scene(scene, viewport);
+        assert!(matches!(warm.last_paint_mode(), PaintMode::Full));
+        mutate(scene, ids);
+        let dirty = warm.paint_scene(scene, viewport);
+        let mut fresh = Compositor::new();
+        let full = fresh.paint_scene(scene, viewport);
+        assert_eq!(
+            dirty, full,
+            "dirty repaint must equal a full recompute cell-for-cell"
+        );
+        assert_eq!(
+            dirty.diff_from(&prev),
+            full.diff_from(&prev),
+            "the diff vs the previous frame must be identical between the paths"
+        );
+    }
+
+    #[test]
+    fn dirty_repaint_buffer_equals_full_recompute_on_single_leaf_change() {
+        let (mut scene, ids) = dirty_repaint_scene();
+        let viewport = Size::new(40, 10);
+        let mut warm = Compositor::new();
+        assert_dirty_parity(&mut warm, &mut scene, &ids, viewport, |scene, ids| {
+            assert!(scene.set_prop(ids.text, "text", PropValue::Str("Hello, world!".into())));
+        });
+        // A single-leaf change repaints a small subset, never everything.
+        assert!(
+            matches!(warm.last_paint_mode(), PaintMode::Dirty(n) if *n < warm.last_painted_node_count()),
+            "a single-leaf change must take the dirty path, got {:?}",
+            warm.last_paint_mode()
+        );
+    }
+
+    #[test]
+    fn dirty_repaint_buffer_equals_full_recompute_on_stream_append() {
+        let (mut scene, ids) = dirty_repaint_scene();
+        let viewport = Size::new(40, 10);
+        let mut warm = Compositor::new();
+        assert_dirty_parity(&mut warm, &mut scene, &ids, viewport, |scene, ids| {
+            assert!(scene.append_span(
+                ids.stream,
+                Span {
+                    text: " s2".into(),
+                    style: Style::new(),
+                }
+            ));
+        });
+    }
+
+    #[test]
+    fn dirty_repaint_buffer_equals_full_recompute_on_move() {
+        // A style change that shifts the sibling subtree: the dirty region is
+        // the union of the old and new bounds, so no stale cells survive.
+        let (mut scene, ids) = dirty_repaint_scene();
+        let viewport = Size::new(80, 20);
+        let mut warm = Compositor::new();
+        assert_dirty_parity(&mut warm, &mut scene, &ids, viewport, |scene, ids| {
+            assert!(scene.set_prop(ids.left, "width", PropValue::Int(10)));
+        });
+    }
+
+    #[test]
+    fn dirty_repaint_buffer_equals_full_recompute_on_shrink() {
+        let (mut scene, ids) = dirty_repaint_scene();
+        let viewport = Size::new(80, 20);
+        let mut warm = Compositor::new();
+        assert_dirty_parity(&mut warm, &mut scene, &ids, viewport, |scene, ids| {
+            assert!(scene.set_prop(ids.right, "height", PropValue::Int(3)));
+        });
+    }
+
+    #[test]
+    fn dirty_repaint_buffer_equals_full_recompute_on_removal() {
+        let (mut scene, ids) = dirty_repaint_scene();
+        let viewport = Size::new(80, 20);
+        let mut warm = Compositor::new();
+        assert_dirty_parity(&mut warm, &mut scene, &ids, viewport, |scene, ids| {
+            assert!(scene.remove(ids.right), "removing the right subtree");
+        });
+    }
+
+    #[test]
+    fn dirty_repaint_buffer_equals_full_recompute_on_display_none() {
+        let (mut scene, ids) = dirty_repaint_scene();
+        let viewport = Size::new(80, 20);
+        let mut warm = Compositor::new();
+        assert_dirty_parity(&mut warm, &mut scene, &ids, viewport, |scene, ids| {
+            assert!(scene.set_prop(ids.left, "display", PropValue::Str("none".into())));
+        });
+    }
+
+    #[test]
+    fn dirty_repaint_buffer_equals_full_recompute_on_z_overlay() {
+        // A z-index change re-stacks the overlay: the dirty region is the
+        // overlay's rect, and the intersecting nodes (the stream beneath it)
+        // repaint in the new z-order.
+        let (mut scene, ids) = dirty_repaint_scene();
+        let viewport = Size::new(80, 20);
+        let mut warm = Compositor::new();
+        assert_dirty_parity(&mut warm, &mut scene, &ids, viewport, |scene, ids| {
+            assert!(scene.set_prop(ids.overlay, "z_index", PropValue::Int(-1)));
+        });
+    }
+
+    #[test]
+    fn dirty_repaint_buffer_equals_full_recompute_on_status_bar() {
+        // A status-bar scene: the strip owns the reserved bottom row. A
+        // segment text change must dirty-repaint without disturbing the
+        // pinned strip or the panels above it.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let panel = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        scene.set_prop(panel, "width", PropValue::Int(20));
+        scene.set_prop(panel, "height", PropValue::Int(5));
+        let _pcontent = scene.add_text(panel, "content", Style::new()).unwrap();
+        let strip = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        scene.set_prop(strip, "status_bar", PropValue::Bool(true));
+        scene.set_prop(strip, "width", PropValue::Int(40));
+        scene.set_prop(strip, "height", PropValue::Int(1));
+        let seg = scene.add_text(strip, "seg", Style::new()).unwrap();
+
+        let viewport = Size::new(40, 10);
+        let mut warm = Compositor::new();
+        let prev = warm.paint_scene(&scene, viewport);
+        // The strip is pinned to the reserved bottom row (row 9); the panel
+        // content sits at the top-left.
+        assert!(
+            (0..40).any(|x| cell_char(&prev, x, 9) == 's'),
+            "the pinned strip segment must sit on the reserved bottom row"
+        );
+        assert_eq!(cell_char(&prev, 0, 0), 'c');
+
+        assert!(scene.set_prop(seg, "text", PropValue::Str("SEG!".into())));
+        let dirty = warm.paint_scene(&scene, viewport);
+        let mut fresh = Compositor::new();
+        let full = fresh.paint_scene(&scene, viewport);
+        assert_eq!(
+            dirty, full,
+            "status-bar dirty repaint must equal a full paint"
+        );
+        assert_eq!(dirty.diff_from(&prev), full.diff_from(&prev));
+        // The reserved row still holds the strip (now "SEG!"), and the panel
+        // content above is untouched by the pinning.
+        assert!(
+            (0..40).any(|x| "SEG!".contains(cell_char(&dirty, x, 9))),
+            "the updated segment must be painted on the reserved bottom row"
+        );
+        assert_eq!(cell_char(&dirty, 0, 0), 'c');
+        assert!(matches!(warm.last_paint_mode(), PaintMode::Dirty(_)));
+    }
+
+    #[test]
+    fn dirty_repaint_localized_mutation_takes_dirty_path() {
+        let (mut scene, ids) = dirty_repaint_scene();
+        let viewport = Size::new(40, 10);
+        let mut warm = Compositor::new();
+        let _ = warm.paint_scene(&scene, viewport);
+        assert!(scene.set_prop(ids.text, "text", PropValue::Str("Hi".into())));
+        let _ = warm.paint_scene(&scene, viewport);
+        assert!(
+            matches!(warm.last_paint_mode(), PaintMode::Dirty(n) if *n < warm.last_painted_node_count()),
+            "a localized mutation must take the dirty path, got {:?}",
+            warm.last_paint_mode()
+        );
+        assert_eq!(
+            warm.last_repainted_node_count(),
+            *match warm.last_paint_mode() {
+                PaintMode::Dirty(n) => n,
+                other => panic!("expected Dirty, got {other:?}"),
+            }
+        );
+    }
+
+    #[test]
+    fn dirty_repaint_resize_takes_full_path() {
+        // A viewport change is explicit global invalidation: full repaint.
+        let (scene, _ids) = dirty_repaint_scene();
+        let mut warm = Compositor::new();
+        let _ = warm.paint_scene(&scene, Size::new(40, 10));
+        let _ = warm.paint_scene(&scene, Size::new(30, 8));
+        assert_eq!(
+            warm.last_paint_mode(),
+            &PaintMode::Full,
+            "a viewport resize must take the full-repaint path"
+        );
+    }
+
+    #[test]
+    fn dirty_repaint_unchanged_scene_returns_retained_buffer() {
+        // The scene is painted twice without mutation: the second frame is the
+        // retained buffer (no repaint at all), and the diff is empty — the
+        // unchanged-scene diff output is byte-identical (empty) exactly as
+        // before the dirty-repaint change.
+        let (scene, _ids) = dirty_repaint_scene();
+        let viewport = Size::new(40, 10);
+        let mut warm = Compositor::new();
+        let first = warm.paint_scene(&scene, viewport);
+        let second = warm.paint_scene(&scene, viewport);
+        assert_eq!(warm.last_paint_mode(), &PaintMode::NoPaint);
+        assert_eq!(first, second, "the retained buffer is returned unchanged");
+        assert!(
+            second.diff_from(&first).is_empty(),
+            "an unchanged scene produces an empty diff"
+        );
+    }
+
+    #[test]
+    fn dirty_repaint_hit_test_parity() {
+        // After a dirty repaint, hit_test on the warm compositor must route
+        // exactly like a fresh compositor (same cached/incremental layout).
+        let (mut scene, ids) = dirty_repaint_scene();
+        let viewport = Size::new(40, 10);
+        let mut warm = Compositor::new();
+        let _ = warm.paint_scene(&scene, viewport);
+        assert!(scene.set_prop(ids.text, "text", PropValue::Str("Hello, world!".into())));
+        let _ = warm.paint_scene(&scene, viewport);
+
+        let mut fresh = Compositor::new();
+        let _ = fresh.paint_scene(&scene, viewport);
+        for (col, row) in [(1, 1), (2, 2), (20, 2), (0, 9), (39, 9)] {
+            let a = warm.hit_test(&scene, col, row, viewport);
+            let b = fresh.hit_test(&scene, col, row, viewport);
+            assert_eq!(a, b, "hit_test parity at ({col},{row})");
+        }
+    }
+
+    #[test]
+    fn dirty_repaint_content_size_parity() {
+        // After a dirty repaint, content_size on the warm compositor matches a
+        // fresh compositor — including after a viewport resize (full path).
+        let (mut scene, ids) = dirty_repaint_scene();
+        let mut warm = Compositor::new();
+        let _ = warm.paint_scene(&scene, Size::new(40, 10));
+        assert!(scene.set_prop(ids.left, "width", PropValue::Int(10)));
+        let _ = warm.paint_scene(&scene, Size::new(40, 10));
+
+        let mut fresh = Compositor::new();
+        let _ = fresh.paint_scene(&scene, Size::new(40, 10));
+        assert_eq!(
+            warm.content_size(&scene, ids.left, Size::new(40, 10)),
+            fresh.content_size(&scene, ids.left, Size::new(40, 10))
+        );
+        assert_eq!(
+            warm.content_size(&scene, ids.text, Size::new(40, 10)),
+            fresh.content_size(&scene, ids.text, Size::new(40, 10))
+        );
+
+        // Resize case: repaint at a new viewport (full path), then measure.
+        let _ = warm.paint_scene(&scene, Size::new(30, 8));
+        let mut fresh2 = Compositor::new();
+        let _ = fresh2.paint_scene(&scene, Size::new(30, 8));
+        assert_eq!(
+            warm.content_size(&scene, ids.stream, Size::new(30, 8)),
+            fresh2.content_size(&scene, ids.stream, Size::new(30, 8))
+        );
     }
 }

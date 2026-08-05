@@ -321,8 +321,8 @@ mod tests {
     fn paint_determinate_bar_paints_exact_cells() {
         let mut spinner = Spinner::determinate(4).bar_width(4);
         spinner.set_progress(1);
-        let buffer =
-            crate::compositor::Compositor::new().paint(spinner, tern_core::Size::new(8, 1));
+        let mut compositor = crate::compositor::Compositor::new();
+        let buffer = compositor.paint(spinner, tern_core::Size::new(8, 1));
         let row: String = (0..8).map(|x| buffer.cell(x, 0).unwrap().ch).collect();
         assert_eq!(row, "▓░░░ 25%");
     }
@@ -330,8 +330,8 @@ mod tests {
     #[test]
     fn paint_indeterminate_paints_current_frame() {
         let spinner = Spinner::with_frames(&["⠋", "⠙"]);
-        let buffer =
-            crate::compositor::Compositor::new().paint(spinner, tern_core::Size::new(4, 1));
+        let mut compositor = crate::compositor::Compositor::new();
+        let buffer = compositor.paint(spinner, tern_core::Size::new(4, 1));
         assert_eq!(buffer.cell(0, 0).unwrap().ch, '⠋');
         assert_eq!(buffer.cell(1, 0).unwrap().ch, ' ');
     }
