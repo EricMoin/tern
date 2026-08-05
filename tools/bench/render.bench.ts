@@ -1,20 +1,45 @@
 #!/usr/bin/env -S deno run --allow-ffi --allow-read --allow-env
 /**
- * render.bench.ts — baseline render round-trip benchmark for the tern TUI
- * engine, JS side.
+ * render.bench.ts — render benchmarks for the tern TUI engine, JS side.
  *
- * Loads the real tern-node addon through `@tern/core`, builds the same
- * synthetic scene the Rust bench uses (see
- * `src/core/tern-components/tests/bench_timing.rs`), and times `N = 1000`
- * `renderer.render()` calls — paint + diff + terminal flush, the full
- * per-frame round trip — with a `Spinner` tick between each frame so the
- * scene animates (the diff is non-empty every frame, like a real app).
+ * Loads the real tern-node addon through `@tern/core` and times four
+ * scenarios against the same synthetic scene (see
+ * `src/core/tern-components/tests/bench_timing.rs` for the Rust twin), at the
+ * real terminal size under a PTY:
+ *
+ *   scenario 0 — animated round-trip: N = 1000 `renderer.render()` calls
+ *     (paint + diff + terminal flush) with a `Spinner` tick between frames so
+ *     the diff is non-empty every frame. The canonical round-1 baseline
+ *     scenario (every frame paints a changed scene).
+ *   scenario 1 — no-change frames: N = 2000 consecutive `render()` calls with
+ *     zero scene mutation. Exercises the scene-epoch idle fast path: the
+ *     first call paints, the rest hit the native no-op fast path (epoch
+ *     unchanged + viewport unchanged -> return without paint/diff/flush).
+ *   scenario 2 — single-cell change frames: N = 1000 frames, each mutating
+ *     exactly ONE cell (one text leaf's content cycles through a single
+ *     digit) before `render()`. The future incremental-layout target scene:
+ *     today the whole scene repaints, so this measures the per-frame cost an
+ *     incremental layout would cut.
+ *   scenario 3 — requestFrame burst: 200 rounds, each issuing BURST_SIZE =
+ *     1000 `requestFrame()` calls within one tick (scene mutated first so the
+ *     coalesced render paints a changed frame), then awaiting the coalesced
+ *     frame. Verifies JS frame coalescing end to end: the burst wall time is
+ *     compared against a single-`requestFrame` control — a ~1.0 ratio proves
+ *     all 1000 calls collapsed into ONE native render (a broken coalescer
+ *     would cost ~1000x the control).
  *
  * Run from the repo root (a PTY is required for raw mode; the native addon
  * needs `--allow-ffi` plus read access to the `.node` binding, and the napi
  * loader reads env vars, hence `--allow-env`):
  *
  *   deno run --allow-ffi --allow-read --allow-env tools/bench/render.bench.ts
+ *
+ * The PTY must be sized to the synthetic scene's 120x40 viewport — `run.sh`
+ * wraps the invocation in `script` with `stty cols 120 rows 40`. Without a
+ * real size (a headless shell's `script` PTY reports 0x0), the native
+ * renderer treats the viewport as the "never painted" sentinel, which
+ * disables the scene-epoch no-op fast path (scenario 1) and skews every
+ * scenario's absolute numbers.
  *
  * When the addon cannot be loaded (or the terminal is unusable, e.g. no
  * PTY), the script prints an explicit SKIP message and exits 0, so the bench
@@ -33,8 +58,17 @@ import {
 } from "@tern/core";
 import type { Node } from "@tern/core";
 
-/** The number of render round-trips to time. */
+/** The number of render round-trips to time (scenario 0). */
 const N = 1000;
+/** The number of consecutive no-change renders to time (scenario 1). */
+const NO_CHANGE_N = 2000;
+/** The number of single-cell-change frames to time (scenario 2). */
+const SMALL_CHANGE_N = 1000;
+/** The number of requestFrame rounds (scenario 3): one burst + one single
+ * control per round. */
+const BURST_ROUNDS = 200;
+/** The number of requestFrame calls issued within one tick (scenario 3). */
+const BURST_SIZE = 1000;
 /** The synthetic scene's target viewport, mirroring the Rust bench. */
 const VIEWPORT_W = 120;
 const VIEWPORT_H = 40;
@@ -61,8 +95,15 @@ function skip(reason: unknown): never {
  *
  * The spinner sits first so its changing glyph is visible inside the
  * viewport; `tick(spinner)` between renders keeps the frame diff non-empty.
+ * The first text leaf is returned too: scenario 2 mutates exactly one cell of
+ * it per frame.
+ *
+ * Returns `{ spinner, leaf }`.
  */
-function buildScene(renderer: ReturnType<typeof createRenderer>): Node {
+function buildScene(renderer: ReturnType<typeof createRenderer>): {
+  spinner: Node;
+  leaf: Node;
+} {
   const rootBox = Box({
     width: VIEWPORT_W,
     height: VIEWPORT_H,
@@ -72,16 +113,17 @@ function buildScene(renderer: ReturnType<typeof createRenderer>): Node {
   const spinner = Spinner({});
   rootBox.addChild(spinner);
 
+  let leaf: Node | null = null;
   for (let i = 0; i < BOX_COUNT; i++) {
     const leaves: Node[] = [];
     const count = 3 + (i % 3);
     for (let j = 0; j < count; j++) {
-      leaves.push(
-        Text({
-          text: `cell ${i}-${j} 0123456789`,
-          fg: `#${((j * 7 + 3) % 256).toString(16).padStart(2, "0")}7f00`,
-        }),
-      );
+      const text = Text({
+        text: `cell ${i}-${j} 0123456789`,
+        fg: `#${((j * 7 + 3) % 256).toString(16).padStart(2, "0")}7f00`,
+      });
+      if (leaf === null) leaf = text;
+      leaves.push(text);
     }
     rootBox.addChild(Box({ width: VIEWPORT_W - 2, height: 1 }, ...leaves));
   }
@@ -95,7 +137,8 @@ function buildScene(renderer: ReturnType<typeof createRenderer>): Node {
   rootBox.addChild(Text({ text: "input value", caret: 4 }));
 
   renderer.root.addChild(rootBox);
-  return spinner;
+  if (leaf === null) throw new Error("scene has no text leaf");
+  return { spinner, leaf };
 }
 
 /** The nearest-rank percentile of a sorted sample: `p` in 0..=100. */
@@ -104,7 +147,164 @@ function percentile(sorted: number[], p: number): number {
   return sorted[Math.min(idx, sorted.length - 1)] ?? 0;
 }
 
-function main(): void {
+/** Summarize a sample into `{ mean, p50, fps }` (fps = 1000 / mean). */
+function summarize(samples: number[]): { mean: number; p50: number; fps: number } {
+  const sorted = [...samples].sort((a, b) => a - b);
+  const mean = samples.reduce((sum, ms) => sum + ms, 0) / samples.length;
+  return { mean, p50: percentile(sorted, 50), fps: 1000 / mean };
+}
+
+/**
+ * Scenario 0 — animated round-trip. Times N `render()` calls with a spinner
+ * tick between frames, so each frame paints a changed scene: the canonical
+ * end-to-end per-frame cost (paint + diff + flush through the real addon and
+ * terminal).
+ */
+function scenario0(
+  renderer: ReturnType<typeof createRenderer>,
+  spinner: Node,
+): { mean: number; p50: number; fps: number } {
+  const perFrameMs: number[] = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const t0 = performance.now();
+    renderer.render();
+    perFrameMs[i] = performance.now() - t0;
+    tick(spinner);
+  }
+  const { mean, p50, fps } = summarize(perFrameMs);
+  console.log(`render.bench: scenario 0 — animated round-trip (${N} frames)`);
+  console.log(`  mean: ${mean.toFixed(3)} ms/frame`);
+  console.log(`  p50:  ${p50.toFixed(3)} ms/frame`);
+  console.log(`  fps:  ${fps.toFixed(1)}`);
+  return { mean, p50, fps };
+}
+
+/**
+ * Scenario 1 — no-change frames (scene-epoch idle fast path). The warmup
+ * render paints the scene and records its epoch + viewport; every timed
+ * render then sees an unchanged scene and exits through the native no-op fast
+ * path (no paint, no diff, no terminal writes). The per-frame cost should be
+ * orders of magnitude below a painted frame — the number the epoch fast path
+ * buys.
+ */
+function scenario1(
+  renderer: ReturnType<typeof createRenderer>,
+  paintedMean: number,
+): { mean: number; p50: number; fps: number } {
+  renderer.render(); // warmup: paint once, record epoch + viewport
+  const perFrameMs: number[] = new Array(NO_CHANGE_N);
+  for (let i = 0; i < NO_CHANGE_N; i++) {
+    const t0 = performance.now();
+    renderer.render();
+    perFrameMs[i] = performance.now() - t0;
+  }
+  const { mean, p50, fps } = summarize(perFrameMs);
+  const speedup = mean > 0 ? (paintedMean / mean).toFixed(0) : "n/a";
+  console.log(
+    `render.bench: scenario 1 — no-change frames, epoch idle fast path (${NO_CHANGE_N} frames)`,
+  );
+  console.log(`  mean: ${mean.toFixed(3)} ms/frame`);
+  console.log(`  p50:  ${p50.toFixed(3)} ms/frame`);
+  console.log(`  fps:  ${fps.toFixed(1)}`);
+  console.log(`  no-op speedup vs a painted frame: ${speedup}x`);
+  return { mean, p50, fps };
+}
+
+/**
+ * Scenario 2 — single-cell change frames (the incremental-layout target). Per
+ * frame exactly one cell changes: the first text leaf's content cycles a
+ * single digit, keeping the string (and layout) the same width. Today the
+ * whole scene repaints, so this is the per-frame cost incremental layout
+ * would cut. The mutation itself stays outside the timer (it is app work,
+ * like scenario 0's spinner tick); the timer covers only the render.
+ */
+function scenario2(
+  renderer: ReturnType<typeof createRenderer>,
+  leaf: Node,
+): { mean: number; p50: number; fps: number } {
+  const perFrameMs: number[] = new Array(SMALL_CHANGE_N);
+  for (let i = 0; i < SMALL_CHANGE_N; i++) {
+    // One cell changes: the trailing digit of `cell 0-0 <d> 0123456789`
+    // cycles 0-9; string length (and thus layout) never changes.
+    leaf.setProps({ ...leaf.props, text: `cell 0-0 ${i % 10} 0123456789` });
+    const t0 = performance.now();
+    renderer.render();
+    perFrameMs[i] = performance.now() - t0;
+  }
+  const { mean, p50, fps } = summarize(perFrameMs);
+  console.log(
+    `render.bench: scenario 2 — single-cell change frames (${SMALL_CHANGE_N} frames)`,
+  );
+  console.log(`  mean: ${mean.toFixed(3)} ms/frame`);
+  console.log(`  p50:  ${p50.toFixed(3)} ms/frame`);
+  console.log(`  fps:  ${fps.toFixed(1)}`);
+  return { mean, p50, fps };
+}
+
+/** Time one coalesced frame: `requestFrame()` armed once, awaited. */
+function singleFrame(renderer: ReturnType<typeof createRenderer>): Promise<number> {
+  const t0 = performance.now();
+  return new Promise<void>((resolve) => {
+    renderer.requestFrame(resolve);
+  }).then(() => performance.now() - t0);
+}
+
+/**
+ * Time one burst: `burstSize` `requestFrame()` calls issued within one tick,
+ * awaited via the first call's callback (which runs after the coalesced
+ * native render). If coalescing works, all `burstSize` calls collapse into
+ * ONE native render and the wall time matches {@link singleFrame}; if it
+ * broke, the burst would cost ~`burstSize`x the control.
+ */
+function burstFrame(
+  renderer: ReturnType<typeof createRenderer>,
+  burstSize: number,
+): Promise<number> {
+  const t0 = performance.now();
+  return new Promise<void>((resolve) => {
+    renderer.requestFrame(resolve);
+    for (let i = 1; i < burstSize; i++) renderer.requestFrame();
+  }).then(() => performance.now() - t0);
+}
+
+/**
+ * Scenario 3 — requestFrame burst coalescing. Each round ticks the spinner
+ * first (bumping the scene epoch so the coalesced render paints a changed
+ * frame — a no-op epoch render would not measure the render path), then
+ * issues either a single `requestFrame` (control) or a burst of
+ * `BURST_SIZE` within one tick. A burst/single ratio of ~1.0 proves the
+ * whole burst collapsed into one native render.
+ */
+async function scenario3(
+  renderer: ReturnType<typeof createRenderer>,
+  spinner: Node,
+): Promise<{ mean: number; p50: number; ratio: number; expected: number }> {
+  const singleMs: number[] = new Array(BURST_ROUNDS);
+  for (let r = 0; r < BURST_ROUNDS; r++) {
+    tick(spinner);
+    singleMs[r] = await singleFrame(renderer);
+  }
+  const burstMs: number[] = new Array(BURST_ROUNDS);
+  for (let r = 0; r < BURST_ROUNDS; r++) {
+    tick(spinner);
+    burstMs[r] = await burstFrame(renderer, BURST_SIZE);
+  }
+  const single = summarize(singleMs);
+  const burst = summarize(burstMs);
+  const ratio = burst.mean / single.mean;
+  const expected = Math.round(ratio);
+  console.log(
+    `render.bench: scenario 3 — requestFrame burst coalescing (${BURST_ROUNDS} rounds of ${BURST_SIZE} calls)`,
+  );
+  console.log(`  mean burst: ${burst.mean.toFixed(3)} ms (1 native render expected)`);
+  console.log(`  p50 burst:  ${burst.p50.toFixed(3)} ms`);
+  console.log(`  mean single: ${single.mean.toFixed(3)} ms (control)`);
+  console.log(`  coalescing ratio: ${ratio.toFixed(2)} (burst / single, ~1.0 = coalesced)`);
+  console.log(`  expected native renders per burst: ${expected}`);
+  return { mean: burst.mean, p50: burst.p50, ratio, expected };
+}
+
+async function main(): Promise<void> {
   // 1. Load the addon; the whole bench is skipped (exit 0) when it is
   //    unavailable — e.g. the .node binding was not built for this platform.
   try {
@@ -123,29 +323,29 @@ function main(): void {
   }
 
   try {
-    // 3. Build the synthetic scene and time N render round-trips, ticking
-    //    the spinner between frames so each render paints a changed frame.
-    const spinner = buildScene(renderer);
-    const perFrameMs: number[] = new Array(N);
-    const started = performance.now();
-    for (let i = 0; i < N; i++) {
-      const t0 = performance.now();
-      renderer.render();
-      perFrameMs[i] = performance.now() - t0;
-      tick(spinner);
-    }
-    const totalMs = performance.now() - started;
+    // 3. Build the synthetic scene once and run the four scenarios against
+    //    it (the spinner + one text leaf are the mutation points).
+    const { spinner, leaf } = buildScene(renderer);
 
-    // 4. Report mean / p50 round-trip time and fps.
-    const sorted = [...perFrameMs].sort((a, b) => a - b);
-    const mean = totalMs / N;
-    const p50 = percentile(sorted, 50);
-    const fps = 1000 / mean;
+    // Scenario 0 — the animated round-trip (the round-1 canonical number).
+    const s0 = scenario0(renderer, spinner);
 
-    console.log(`render.bench: ${N} render() round-trips @ ${VIEWPORT_W}x${VIEWPORT_H} synthetic scene`);
-    console.log(`  mean: ${mean.toFixed(3)} ms/frame`);
-    console.log(`  p50:  ${p50.toFixed(3)} ms/frame`);
-    console.log(`  fps:  ${fps.toFixed(1)}`);
+    // Scenario 1 — no-change frames; the epoch idle fast path. Nothing
+    // mutates, so every timed render hits the native no-op path.
+    const s1 = scenario1(renderer, s0.mean);
+
+    // Scenario 2 — single-cell change frames (incremental-layout target).
+    const s2 = scenario2(renderer, leaf);
+
+    // Scenario 3 — requestFrame burst coalescing.
+    const s3 = await scenario3(renderer, spinner);
+
+    console.log();
+    console.log(
+      `render.bench: summary — round-trip p50 ${s0.p50.toFixed(3)} ms | no-change p50 ${s1.p50.toFixed(3)} ms | ` +
+        `single-cell p50 ${s2.p50.toFixed(3)} ms | burst ratio ${s3.ratio.toFixed(2)} ` +
+        `(${s3.expected} native render(s) per ${BURST_SIZE}-call burst)`,
+    );
   } finally {
     try {
       renderer.destroy();
