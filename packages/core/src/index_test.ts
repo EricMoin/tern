@@ -147,6 +147,10 @@ const fakeContentSizes = new Map<object, { width: number; height: number }>();
  * `null` when the snapshot method was never called. */
 let lastSnapshotSize: [number | undefined, number | undefined] | null = null;
 
+/** The last `FakeTuiRenderer` constructed (via the fake addon), or `null`.
+ * Tests read its `renderCalls` to assert native render counts. */
+let lastFakeRenderer: FakeTuiRenderer | null = null;
+
 /**
  * A fake native `NodeHandle` standing in for the real addon's scene handle.
  * `content_size` returns the per-handle override set via `fakeContentSizes`
@@ -184,11 +188,15 @@ class FakeNodeHandle {
 /** A fake native `TuiRenderer` standing in for the real addon. */
 class FakeTuiRenderer {
   destroyed = false;
+  /** The number of native `render()` invocations (the frame-coalescing
+   * tests assert on this). */
+  renderCalls = 0;
   /** The scene root handle, reused across `root()` calls so the scene the
    * `Renderer` builds is captured for `render_to_buffer`. */
   private rootHandle = new FakeNodeHandle("root", {});
   constructor(options: unknown) {
     lastRendererOptions = options;
+    lastFakeRenderer = this;
   }
   root(): NodeHandle {
     return this.rootHandle as unknown as NodeHandle;
@@ -200,7 +208,9 @@ class FakeTuiRenderer {
     lastHitTest = [col, row];
     return fakeHitPath;
   }
-  render(): void {}
+  render(): void {
+    this.renderCalls++;
+  }
   render_to_buffer(width?: number, height?: number): string[] {
     lastSnapshotSize = [width, height];
     return paintSceneRows(this.rootHandle, width, height);
@@ -278,8 +288,13 @@ function paintSceneRows(
   return rows;
 }
 
-/** Run `fn` with the fake addon installed, resetting the seam afterwards. */
-function withFakeAddon(fn: () => void): void {
+/**
+ * Run `fn` with the fake addon installed, resetting the seam afterwards. An
+ * async `fn` keeps the seam installed until its promise settles (the renderer
+ * holds its native reference directly, but renderer work after an `await`
+ * should still resolve against the fake), then resets.
+ */
+function withFakeAddon<T>(fn: () => T): T {
   streamCallback = null;
   lastHitTest = null;
   fakeHitPath = [7n, 3n];
@@ -288,13 +303,24 @@ function withFakeAddon(fn: () => void): void {
   lastSetTitle = null;
   lastRendererOptions = null;
   lastSnapshotSize = null;
+  lastFakeRenderer = null;
   setAddonForTesting(fakeAddon);
-  try {
-    fn();
-  } finally {
-    setAddonForTesting(null);
-    streamCallback = null;
+  const result = fn();
+  if (result instanceof Promise) {
+    return result.finally(() => {
+      setAddonForTesting(null);
+      streamCallback = null;
+    }) as T;
   }
+  setAddonForTesting(null);
+  streamCallback = null;
+  return result;
+}
+
+/** Drain the macrotask queue (a `setTimeout(0)` round-trip): lets a
+ * coalesced frame scheduled via `requestFrame` fire before the test asserts. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 /** Feed `event` to the renderer's push callback (the fake's
@@ -1044,6 +1070,89 @@ Deno.test("framesEqual compares row counts and row strings", () => {
   if (framesEqual([], ["x"])) {
     throw new Error("empty vs non-empty must be unequal");
   }
+});
+
+// ---------------------------------------------------------------------------
+// Frame coalescing (fake native addon — render-call counting)
+// ---------------------------------------------------------------------------
+
+/** Assert `actual === expected`, reporting `label` with the actual value.
+ * A helper rather than inline comparisons keeps the comparison out of any
+ * narrowed scope (a prior `!== 0` guard would narrow `renderCalls` to the
+ * literal `0` and make a later `!== 1` check a type error). */
+function expectEqual<T>(actual: T, expected: T, label: string): void {
+  if (actual !== expected) {
+    throw new Error(`${label} = ${JSON.stringify(actual)}`);
+  }
+}
+
+/** The native renderer instance behind the last `createRenderer` (the fake
+ * addon constructs one per renderer; its `renderCalls` counts native
+ * renders). */
+function fakeRenderer(): FakeTuiRenderer {
+  if (lastFakeRenderer === null) throw new Error("no fake renderer constructed");
+  return lastFakeRenderer;
+}
+
+Deno.test("3 requestFrame calls in one tick collapse into a single native render", async () => {
+  await withFakeAddon(async () => {
+    const renderer = createRenderer();
+    const fake = fakeRenderer();
+    renderer.requestFrame();
+    renderer.requestFrame();
+    renderer.requestFrame();
+    // Nothing paints synchronously: the frame is scheduled, not fired.
+    expectEqual(fake.renderCalls, 0, "render calls before flush");
+    await flush();
+    // The three calls collapsed into one coalesced native render.
+    expectEqual(fake.renderCalls, 1, "render calls after flush");
+    renderer.destroy();
+  });
+});
+
+Deno.test("requestFrame callbacks run after the coalesced native render, in call order", async () => {
+  await withFakeAddon(async () => {
+    const renderer = createRenderer();
+    const fake = fakeRenderer();
+    const order: string[] = [];
+    renderer.requestFrame(() => order.push("a"));
+    renderer.requestFrame(() => order.push("b"));
+    expectEqual(order.length, 0, "callbacks before the frame fires");
+    await flush();
+    expectEqual(fake.renderCalls, 1, "render calls");
+    if (order.join("") !== "ab") {
+      throw new Error(`callback order = ${JSON.stringify(order)}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("an explicit render() during a pending coalesced frame still paints immediately", async () => {
+  await withFakeAddon(async () => {
+    const renderer = createRenderer();
+    const fake = fakeRenderer();
+    renderer.requestFrame();
+    expectEqual(fake.renderCalls, 0, "render calls before render()");
+    renderer.render();
+    // The synchronous paint happens right away, superseding the pending
+    // coalesced frame: no second render fires when the macrotask would have.
+    expectEqual(fake.renderCalls, 1, "render calls after render()");
+    await flush();
+    expectEqual(fake.renderCalls, 1, "render calls after flush");
+    renderer.destroy();
+  });
+});
+
+Deno.test("the requestFrame cancel function prevents the scheduled frame", async () => {
+  await withFakeAddon(async () => {
+    const renderer = createRenderer();
+    const fake = fakeRenderer();
+    const cancel = renderer.requestFrame();
+    cancel();
+    await flush();
+    expectEqual(fake.renderCalls, 0, "render calls after cancel");
+    renderer.destroy();
+  });
 });
 
 // ---------------------------------------------------------------------------

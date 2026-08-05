@@ -24,7 +24,9 @@
  *   child is a reposition (keyed-list move) and is realized as a
  *   remove-then-insert against the core API, which throws on duplicates.
  * - `commitUpdate` -> `Node.setProps` (React-only props stripped).
- * - `prepareForCommit` / `resetAfterCommit` -> `renderer.render()`.
+ * - `resetAfterCommit` -> `renderer.render()` (the single paint per commit;
+ *   `prepareForCommit` no longer paints — the pre-commit paint was redundant
+ *   with the post-commit one).
  * - `noTimeout: -1`; `scheduleTimeout` / `cancelTimeout` -> `setTimeout` /
  *   `clearTimeout`.
  * - Event priority: react-reconciler 0.33 renamed `getCurrentEventPriority`
@@ -96,8 +98,8 @@ export type TernProps = NodeProps & {
 
 /**
  * The root container for a tern tree: the scene root node plus the renderer
- * that owns it. `prepareForCommit` / `resetAfterCommit` paint the scene
- * through `renderer.render()`.
+ * that owns it. `resetAfterCommit` paints the scene through
+ * `renderer.render()` — the single paint per commit.
  */
 export interface TernContainer {
   /** The scene root node content is attached under. */
@@ -427,11 +429,10 @@ export const hostConfig: HostConfig = {
 
   // --- commit phase ---------------------------------------------------------
 
-  prepareForCommit(container) {
-    // Per the MVP strategy both prepareForCommit and resetAfterCommit paint
-    // through renderer.render(); the pre-commit paint is redundant with the
-    // post-commit one but keeps the mapping explicit.
-    container.renderer.render();
+  prepareForCommit(_container) {
+    // No paint here: the pre-commit paint (of the pre-mutation tree) was
+    // redundant with the post-commit one — resetAfterCommit renders the
+    // mutated tree and is the single paint per commit.
     return null;
   },
 
