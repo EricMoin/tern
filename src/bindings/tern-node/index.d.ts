@@ -41,7 +41,21 @@ export declare class NodeHandle {
    * `blink`, `reversed`, `hidden`, `strikethrough`). Every other key lands
    * in the node's property map (`text`, layout keywords, ...).
    */
-  set_props(props: Record<string, unknown>): void
+  set_props(props: Record<string, any>): void
+  /**
+   * Set a single property (or style key) on this node — the incremental
+   * counterpart of [`set_props`](Self::set_props): one key instead of the
+   * whole object.
+   *
+   * Recognized style keys (`fg`, `bg`, `border_style`, the boolean
+   * modifiers) are merged into the node's existing style; every other
+   * scalar key lands in the node's property map. Non-scalar values (null,
+   * arrays, objects) are dropped, exactly like `set_props`.
+   *
+   * An equal-value write is a no-op: the scene is not mutated and its
+   * epoch is not bumped, so a renderer's cached frame stays valid.
+   */
+  set_prop(key: string, value: any): void
   /**
    * Append a styled span of text to a `streaming_text` node's stream.
    *
@@ -52,7 +66,7 @@ export declare class NodeHandle {
    * when the node is detached from the scene or is not a `streaming_text`
    * node.
    */
-  append_span(text: string, style?: Record<string, unknown> | undefined | null): void
+  append_span(text: string, style?: Record<string, any> | undefined | null): void
   /**
    * The laid-out content size of this node: `{ width, height }` in cells.
    *
@@ -99,18 +113,26 @@ export declare class TuiRenderer {
    * Paint the shared scene into a fresh buffer at the current terminal
    * size and flush the minimal diff (vs the previous frame) to the
    * terminal.
+   *
+   * No-op fast path: when the scene has not mutated since the last paint
+   * and the viewport is unchanged, the previous frame is still on screen,
+   * so the render returns `Ok(())` without the size probe, paint, diff,
+   * flush, or buffer storage — zero terminal writes for an unchanged
+   * frame (the high-frame-rate path: JS re-renders every animation tick,
+   * but only real changes pay for I/O).
    */
   render(): void
   /**
    * Paint the shared scene into a fresh buffer at the given viewport —
    * `width`/`height` in cells, each defaulting to the most recent
-   * `render` terminal size — and return the frame as one string per row.
-   * Masked/continuation cells (the zero-width right halves of wide glyphs)
-   * are spaces, so every row has exactly `width` display columns
-   * (multi-width aware). Performs no terminal I/O; the result is a pure
-   * snapshot for JS-side testing and golden comparisons.
+   * [`render`](Self::render) terminal size — and return the frame as one
+   * string per row. Masked/continuation cells (the zero-width right
+   * halves of wide glyphs) are spaces, so every row has exactly `width`
+   * display columns (multi-width aware). Performs no terminal I/O; the
+   * result is a pure snapshot for JS-side testing and golden
+   * comparisons.
    */
-  render_to_buffer(width?: number, height?: number): Array<string>
+  render_to_buffer(width?: number | undefined | null, height?: number | undefined | null): Array<string>
   /**
    * Leave the alternate screen and raw mode and stop event listening,
    * restoring the terminal. Also stops the push event loop (with the
@@ -147,7 +169,7 @@ export declare class TuiRenderer {
    * the renderer also stops the loop. Errors if the renderer is already
    * destroyed or a stream was already started.
    */
-  start_event_stream(callback: ((err: Error | null, arg: TernEventJs) => unknown)): void
+  start_event_stream(callback: ((err: Error | null, arg: TernEventJs) => any)): void
 }
 
 /** The laid-out content size of a scene node, in cells. */
@@ -164,7 +186,7 @@ export interface ContentSize {
  * when it is added to a bound parent via `NodeHandle.add_child`. See
  * `set_props` for the style-key convention.
  */
-export declare function create_node(type: string, props?: Record<string, unknown> | undefined | null): NodeHandle
+export declare function create_node(type: string, props?: Record<string, any> | undefined | null): NodeHandle
 
 /**
  * Token-highlight `source` in `language` (a Markdown fence info string:
