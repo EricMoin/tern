@@ -10,8 +10,11 @@
 // `type` is a no-op.
 
 import { readFileSync, writeFileSync } from "node:fs";
+// fileURLToPath is required for Windows: URL.pathname keeps a leading slash
+// before the drive letter, producing D:\D:\... when resolved.
+import { fileURLToPath } from "node:url";
 
-const target = new URL("./index.d.ts", import.meta.url).pathname;
+const target = fileURLToPath(new URL("./index.d.ts", import.meta.url));
 const dts = readFileSync(target, "utf8");
 const fixed = dts.replaceAll("create_node(r#type:", "create_node(type:");
 
