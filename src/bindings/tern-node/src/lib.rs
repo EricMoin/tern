@@ -48,6 +48,7 @@
 //! pull path, for hosts that cannot host a napi JS thread).
 
 use std::collections::HashMap;
+use std::io;
 #[cfg(feature = "push-events")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -62,6 +63,7 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
 use tern_components::Compositor;
 use tern_core::buffer::{diff, Buffer};
+use tern_core::cell::CellUpdate;
 use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene, Span};
 use tern_core::style::{BorderStyle, Modifiers, Style};
 use tern_core::{Color, Size};
@@ -90,6 +92,58 @@ fn shared_viewport_ref() -> &'static Mutex<(u32, u32)> {
     VIEWPORT.get_or_init(|| Mutex::new((80, 24)))
 }
 
+/// Sentinel for [`RendererInner::last_viewport`]: no render has painted yet.
+/// A real terminal is never 0 columns by 0 rows, so this doubles as the
+/// "a viewport was already recorded" guard that keeps a fresh renderer from
+/// taking the no-op fast path before its first paint.
+const NO_VIEWPORT: (u16, u16) = (0, 0);
+
+/// The backend surface [`TuiRenderer`] talks to, split out so unit tests can
+/// inject a counting mock and prove the no-op render fast path performs zero
+/// terminal writes. [`Backend`] implements this with real terminal I/O; the
+/// tests substitute a mock whose counters record every call.
+trait RenderBackend: Send + Sync {
+    /// The terminal size as `(columns, rows)`.
+    fn size(&self) -> io::Result<(u16, u16)>;
+    /// Flush a diff of cell updates to the terminal, recording the park
+    /// position so an empty no-op frame can skip the flush entirely.
+    fn flush_diff(&mut self, updates: &[CellUpdate], cursor_pos: (u16, u16)) -> io::Result<()>;
+    /// Set the terminal window title (OSC 0).
+    fn set_title(&self, title: &str) -> io::Result<()>;
+    /// Stop mouse / focus-change / bracketed-paste event reporting.
+    fn disable_event_listening(&self) -> io::Result<()>;
+    /// Leave the alternate screen.
+    fn exit_alt_screen(&self) -> io::Result<()>;
+    /// Leave raw mode.
+    fn exit_raw_mode(&self) -> io::Result<()>;
+}
+
+impl RenderBackend for Backend {
+    fn size(&self) -> io::Result<(u16, u16)> {
+        Backend::size(self)
+    }
+
+    fn flush_diff(&mut self, updates: &[CellUpdate], cursor_pos: (u16, u16)) -> io::Result<()> {
+        Backend::flush_diff(self, updates, cursor_pos)
+    }
+
+    fn set_title(&self, title: &str) -> io::Result<()> {
+        Backend::set_title(self, title)
+    }
+
+    fn disable_event_listening(&self) -> io::Result<()> {
+        Backend::disable_event_listening(self)
+    }
+
+    fn exit_alt_screen(&self) -> io::Result<()> {
+        Backend::exit_alt_screen(self)
+    }
+
+    fn exit_raw_mode(&self) -> io::Result<()> {
+        Backend::exit_raw_mode(self)
+    }
+}
+
 /// Convert a painted buffer to one string per row, mapping masked
 /// continuation cells (the zero-width right halves of wide glyphs) to spaces
 /// so every row has exactly `buffer.width` display columns. Multi-width
@@ -116,7 +170,10 @@ fn buffer_rows(buffer: &Buffer) -> Vec<String> {
 /// [`TuiRenderer::render_to_buffer`] and its unit test use, so the tested
 /// path is the shipped path.
 fn paint_scene_rows(scene: &Scene, viewport: Size) -> Vec<String> {
-    let buffer = Compositor::new().paint_scene(scene, viewport);
+    // A pure snapshot: a fresh compositor (and thus a fresh taffy tree) per
+    // call — nothing is cached across calls.
+    let mut compositor = Compositor::new();
+    let buffer = compositor.paint_scene(scene, viewport);
     buffer_rows(&buffer)
 }
 
@@ -369,10 +426,28 @@ pub struct TuiRenderer {
 }
 
 struct RendererInner {
-    backend: Backend,
+    backend: Box<dyn RenderBackend>,
+    /// The stateful compositor, held across frames: it owns the layout
+    /// engine, which owns the cached taffy tree and the last layout results
+    /// (structural preparation — every frame still recomputes this phase).
     compositor: Compositor,
     scene: Arc<Mutex<Scene>>,
     last: Option<Buffer>,
+    /// The scene epoch at the most recent successful paint. A render whose
+    /// scene epoch still matches — and whose viewport is unchanged — has
+    /// nothing new to draw and returns without touching the terminal.
+    last_painted_epoch: u64,
+    /// The viewport the last successful render painted at; [`NO_VIEWPORT`]
+    /// before any render. Doubles as the "a viewport was already recorded"
+    /// guard: a fresh renderer must not take the no-op fast path before its
+    /// first paint.
+    last_viewport: (u16, u16),
+    /// The terminal size as last probed, cached so the hot render path skips
+    /// the per-frame `backend.size()` ioctl. `None` before the first probe or
+    /// after a resize event invalidated it; [`TuiRenderer::render`] and
+    /// [`TuiRenderer::hit_test`] re-query the backend only when it is `None`
+    /// (first use or post-invalidation), and refresh it from the probe.
+    cached_size: Option<(u16, u16)>,
     #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
     exit_on_ctrl_c: bool,
     /// Whether the alternate screen was entered: `false` renders inline in
@@ -412,10 +487,13 @@ impl TuiRenderer {
         }
         Ok(Self {
             inner: Arc::new(Mutex::new(RendererInner {
-                backend,
+                backend: Box::new(Backend::new()),
                 compositor: Compositor::new(),
                 scene: shared_scene().clone(),
                 last: None,
+                last_painted_epoch: 0,
+                last_viewport: NO_VIEWPORT,
+                cached_size: None,
                 #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
                 exit_on_ctrl_c: options.exit_on_ctrl_c.unwrap_or(false),
                 use_alt_screen,
@@ -448,10 +526,18 @@ impl TuiRenderer {
         if inner.destroyed {
             return Err(Error::from_reason("renderer is destroyed"));
         }
-        let (w, h) = inner
-            .backend
-            .size()
-            .map_err(|e| Error::from_reason(format!("terminal size: {e}")))?;
+        // Serve the terminal size from the cache when it is still valid;
+        // re-query the backend only when the cache is empty (first use or a
+        // resize event invalidated it), and refresh the cache from the probe
+        // so the next render skips the ioctl too.
+        let (w, h) = match inner.cached_size {
+            Some((w, h)) => (w, h),
+            None => inner
+                .backend
+                .size()
+                .map_err(|e| Error::from_reason(format!("terminal size: {e}")))?,
+        };
+        inner.cached_size = Some((w, h));
         let scene = inner.scene.clone();
         let path = {
             let scene_guard = scene.lock().expect("scene poisoned");
@@ -465,24 +551,55 @@ impl TuiRenderer {
     /// Paint the shared scene into a fresh buffer at the current terminal
     /// size and flush the minimal diff (vs the previous frame) to the
     /// terminal.
+    ///
+    /// No-op fast path: when the scene has not mutated since the last paint
+    /// and the viewport is unchanged, the previous frame is still on screen,
+    /// so the render returns `Ok(())` without the size probe, paint, diff,
+    /// flush, or buffer storage — zero terminal writes for an unchanged
+    /// frame (the high-frame-rate path: JS re-renders every animation tick,
+    /// but only real changes pay for I/O).
     #[napi(js_name = "render")]
     pub fn render(&self) -> Result<()> {
         let mut inner = self.inner.lock().expect("renderer inner poisoned");
         if inner.destroyed {
             return Err(Error::from_reason("renderer is destroyed"));
         }
-        let (w, h) = inner
-            .backend
-            .size()
-            .map_err(|e| Error::from_reason(format!("terminal size: {e}")))?;
+        let scene_epoch = inner.scene.lock().expect("scene poisoned").epoch();
+        let (cached_w, cached_h) = *shared_viewport_ref().lock().expect("viewport poisoned");
+        // The fast path additionally requires a valid size cache: a resize
+        // event invalidates it (sets `None`), so the next render falls
+        // through and repaints at the re-queried terminal size instead of
+        // skipping a frame whose viewport changed.
+        if inner.last_viewport != NO_VIEWPORT
+            && inner.cached_size.is_some()
+            && inner.last_painted_epoch == scene_epoch
+            && inner.last_viewport == (cached_w as u16, cached_h as u16)
+        {
+            return Ok(());
+        }
+        // Serve the terminal size from the cache when it is still valid;
+        // re-query the backend only on the first probe or after a resize
+        // event invalidated the cache, and refresh the cache from the probe.
+        let (w, h) = match inner.cached_size {
+            Some((w, h)) => (w, h),
+            None => inner
+                .backend
+                .size()
+                .map_err(|e| Error::from_reason(format!("terminal size: {e}")))?,
+        };
+        inner.cached_size = Some((w, h));
         // Remember the viewport for `NodeHandle.content_size`, so its layout
         // matches the geometry that was just painted.
         *shared_viewport_ref().lock().expect("viewport poisoned") = (w as u32, h as u32);
         let viewport = Size::new(w, h);
         let scene = inner.scene.clone();
-        let buffer = {
+        let (buffer, painted_epoch) = {
             let scene_guard = scene.lock().expect("scene poisoned");
-            inner.compositor.paint_scene(&scene_guard, viewport)
+            let buffer = inner.compositor.paint_scene(&scene_guard, viewport);
+            // Record the epoch under the same lock that painted the frame, so
+            // the cached value always describes the painted state.
+            let painted_epoch = scene_guard.epoch();
+            (buffer, painted_epoch)
         };
         let updates = match &inner.last {
             Some(prev) => buffer.diff_from(prev),
@@ -493,6 +610,8 @@ impl TuiRenderer {
             .flush_diff(&updates, (0, 0))
             .map_err(|e| Error::from_reason(format!("flush: {e}")))?;
         inner.last = Some(buffer);
+        inner.last_painted_epoch = painted_epoch;
+        inner.last_viewport = (w, h);
         Ok(())
     }
 
@@ -617,6 +736,10 @@ impl TuiRenderer {
         let loop_stop = stop.clone();
         let sink = tsfn.clone();
         let handle = spawn_event_loop(stop, move |event: TernEvent| {
+            // A resize event invalidates the cached terminal size so the next
+            // render re-queries the backend instead of painting at the stale
+            // viewport (see `invalidate_size_on_resize`).
+            invalidate_size_on_resize(&inner_for_loop, &event);
             let mut push = |js: TernEventJs| {
                 let status = sink.call(Ok(js), ThreadsafeFunctionCallMode::NonBlocking);
                 if status == Status::Closing {
@@ -680,6 +803,12 @@ impl TuiRenderer {
                 let _ = inner.backend.exit_raw_mode();
                 inner.destroyed = true;
                 return Ok(out);
+            }
+            // A resize event invalidates the cached terminal size so the next
+            // render re-queries the backend (the guard is already held here,
+            // mirroring `invalidate_size_on_resize`).
+            if matches!(ev, TernEvent::Resize { .. }) {
+                inner.cached_size = None;
             }
             out.push(TernEventJs::from_tern(ev));
         }
@@ -930,6 +1059,20 @@ fn is_ctrl_c(event: &TernEvent) -> bool {
     matches!(event, TernEvent::Key(key) if key.ctrl && key.char == Some('c'))
 }
 
+/// Invalidate the cached terminal size when a resize event arrives: the next
+/// [`TuiRenderer::render`] / [`TuiRenderer::hit_test`] re-queries the backend
+/// instead of painting or hit-testing at the stale viewport. Called from the
+/// event delivery paths (the push event loop's callback and the poll
+/// fallback) for every delivered event; a no-op for non-resize events.
+#[cfg(any(feature = "push-events", feature = "poll-fallback"))]
+fn invalidate_size_on_resize(inner: &Mutex<RendererInner>, event: &TernEvent) {
+    if matches!(event, TernEvent::Resize { .. }) {
+        if let Ok(mut inner) = inner.lock() {
+            inner.cached_size = None;
+        }
+    }
+}
+
 /// Deliver a batch of normalized terminal events to the JS thread through
 /// `push`, in arrival order, converting each to its JS form. Returns `true`
 /// when the batch contained a Ctrl+C press and `exit_on_ctrl_c` is enabled —
@@ -1150,6 +1293,7 @@ fn key_name_str(name: KeyName) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tern_core::color::Color as _Color;
 
     #[test]
@@ -1480,10 +1624,13 @@ mod tests {
         // renderer cannot snapshot (mirrors `render`).
         let scene = Arc::new(Mutex::new(Scene::new()));
         let inner = RendererInner {
-            backend: Backend::new(),
+            backend: Box::new(Backend::new()),
             compositor: Compositor::new(),
             scene,
             last: None,
+            last_painted_epoch: 0,
+            last_viewport: NO_VIEWPORT,
+            cached_size: None,
             #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
             exit_on_ctrl_c: false,
             use_alt_screen: false,
@@ -1950,5 +2097,214 @@ mod tests {
         // Non-key events are never ctrl+c.
         assert!(!is_ctrl_c(&TernEvent::Resize { w: 80, h: 24 }));
         assert!(!is_ctrl_c(&TernEvent::FocusGained));
+    }
+
+    /// A backend that counts every terminal operation instead of performing
+    /// it, so tests can assert exactly which renders touched the terminal.
+    ///
+    /// Counters are `Arc`-shared so the test keeps reading them after the
+    /// backend is moved into the renderer. `size()` reports a fixed 80x24
+    /// viewport, keeping the viewport cache stable across renders.
+    #[derive(Clone, Default)]
+    struct CountingBackend {
+        size_calls: Arc<AtomicUsize>,
+        flush_calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingBackend {
+        /// Total terminal operations so far (size probes + flushes).
+        fn ops(&self) -> usize {
+            self.size_calls.load(Ordering::Relaxed) + self.flush_calls.load(Ordering::Relaxed)
+        }
+    }
+
+    impl RenderBackend for CountingBackend {
+        fn size(&self) -> io::Result<(u16, u16)> {
+            self.size_calls.fetch_add(1, Ordering::Relaxed);
+            Ok((80, 24))
+        }
+
+        fn flush_diff(
+            &mut self,
+            _updates: &[CellUpdate],
+            _cursor_pos: (u16, u16),
+        ) -> io::Result<()> {
+            self.flush_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn set_title(&self, _title: &str) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn disable_event_listening(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn exit_alt_screen(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn exit_raw_mode(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A renderer wired to a [`CountingBackend`] over a scene with one Text
+    /// child, so the no-op fast path can be exercised end to end.
+    fn counting_renderer(backend: CountingBackend) -> (TuiRenderer, Arc<Mutex<Scene>>) {
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        {
+            let mut s = scene.lock().expect("scene poisoned");
+            let root = s.root_id();
+            s.add_child(root, NodeKind::Text, Style::new())
+                .expect("add text node");
+        }
+        let inner = RendererInner {
+            backend: Box::new(backend),
+            compositor: Compositor::new(),
+            scene: scene.clone(),
+            last: None,
+            last_painted_epoch: 0,
+            last_viewport: NO_VIEWPORT,
+            cached_size: None,
+            #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
+            exit_on_ctrl_c: false,
+            use_alt_screen: false,
+            destroyed: false,
+            #[cfg(feature = "push-events")]
+            event_loop: None,
+        };
+        let renderer = TuiRenderer {
+            inner: Arc::new(Mutex::new(inner)),
+        };
+        (renderer, scene)
+    }
+
+    #[test]
+    fn unchanged_scene_renders_perform_zero_terminal_writes() {
+        // Two consecutive renders with no intervening mutation: the first
+        // paints (a size probe plus a flush), the second must hit the no-op
+        // fast path and perform zero terminal writes — no size probe, no
+        // paint, no diff, no flush.
+        let backend = CountingBackend::default();
+        let probe = backend.clone(); // keeps the counters after the move
+        let (renderer, _scene) = counting_renderer(backend);
+
+        renderer.render().expect("first render paints the scene");
+        let after_first = probe.ops();
+        assert!(after_first > 0, "first render must touch the backend");
+
+        renderer.render().expect("second render succeeds");
+        assert_eq!(
+            probe.ops(),
+            after_first,
+            "an unchanged-scene render must perform zero terminal writes"
+        );
+    }
+
+    #[test]
+    fn mutated_scene_renders_repaint() {
+        // A mutation between renders invalidates the scene cache: the next
+        // render must repaint (paying for a flush again). The terminal size
+        // is served from the size cache — a mutation does not invalidate it,
+        // so no second `size()` probe happens.
+        let backend = CountingBackend::default();
+        let probe = backend.clone();
+        let (renderer, scene) = counting_renderer(backend);
+
+        renderer.render().expect("first render paints the scene");
+        let after_first = probe.ops();
+        assert!(after_first > 0);
+
+        {
+            let mut s = scene.lock().expect("scene poisoned");
+            let root = s.root_id();
+            s.add_child(root, NodeKind::Box, Style::new())
+                .expect("mutate the scene");
+        }
+        renderer.render().expect("render after mutation succeeds");
+        assert!(
+            probe.ops() > after_first,
+            "a mutated scene must repaint (flush; the size probe is served from the cache)"
+        );
+        assert_eq!(
+            probe.size_calls.load(Ordering::Relaxed),
+            1,
+            "a mutation repaint must not re-probe the terminal size"
+        );
+    }
+
+    #[test]
+    fn fresh_renderer_never_fast_paths_before_first_paint() {
+        // The (0,0) viewport sentinel must force a first paint even when the
+        // scene epoch already matches `last_painted_epoch` (0 == 0): a
+        // renderer that never painted has nothing cached to skip to.
+        let backend = CountingBackend::default();
+        let probe = backend.clone();
+        let (renderer, _scene) = counting_renderer(backend);
+
+        renderer.render().expect("first render paints");
+        assert!(
+            probe.ops() > 0,
+            "the first render must paint, not fast-path"
+        );
+    }
+
+    #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
+    #[test]
+    fn size_cache_serves_n_unchanged_renders_with_one_probe_and_resize_invalidates() {
+        // The high-frame-rate contract: N consecutive renders of an unchanged
+        // scene must perform exactly one `backend.size()` call. The first
+        // render probes and caches the terminal size; every later render
+        // either hits the no-op fast path (zero calls) or repaints from the
+        // cache — no per-frame ioctl.
+        let backend = CountingBackend::default();
+        let probe = backend.clone();
+        let (renderer, _scene) = counting_renderer(backend);
+
+        let n = 5;
+        for _ in 0..n {
+            renderer.render().expect("render succeeds");
+        }
+        assert_eq!(
+            probe.size_calls.load(Ordering::Relaxed),
+            1,
+            "{n} unchanged renders must perform exactly one size() call"
+        );
+
+        // A delivered resize event invalidates the cache — this is exactly
+        // what the event delivery callback does for every resize event — so
+        // the next render must re-query the backend size instead of painting
+        // at the stale viewport.
+        let probed_before = probe.size_calls.load(Ordering::Relaxed);
+        invalidate_size_on_resize(&renderer.inner, &TernEvent::Resize { w: 100, h: 30 });
+        renderer.render().expect("render after resize succeeds");
+        assert_eq!(
+            probe.size_calls.load(Ordering::Relaxed),
+            probed_before + 1,
+            "a delivered resize event must cause the next render to re-query size"
+        );
+
+        // The re-queried size is cached again: the render after that probes
+        // nothing more.
+        renderer.render().expect("render after re-probe succeeds");
+        assert_eq!(
+            probe.size_calls.load(Ordering::Relaxed),
+            probed_before + 1,
+            "the re-queried size is cached again for subsequent renders"
+        );
+
+        // Only resize events invalidate: a focus event leaves the cache
+        // intact, so the next render still probes nothing.
+        invalidate_size_on_resize(&renderer.inner, &TernEvent::FocusGained);
+        renderer
+            .render()
+            .expect("render after focus event succeeds");
+        assert_eq!(
+            probe.size_calls.load(Ordering::Relaxed),
+            probed_before + 1,
+            "a non-resize event must not invalidate the size cache"
+        );
     }
 }

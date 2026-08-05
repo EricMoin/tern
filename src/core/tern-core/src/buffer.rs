@@ -338,9 +338,41 @@ impl Buffer {
 /// extent are compared against a blank cell, so default cells in newly-grown
 /// regions are not emitted. Updates are produced row-major (top-to-bottom,
 /// left-to-right).
+///
+/// Fast path: each row is first compared as a whole [`Cell`] slice. An
+/// identical row (or a row that is blank in a region `prev` does not cover)
+/// is skipped entirely, so the per-cell scan only runs on rows that actually
+/// changed — the common case between frames.
 pub fn diff(prev: &Buffer, next: &Buffer) -> Vec<CellUpdate> {
     let mut updates = Vec::new();
+    let prev_w = prev.width as usize;
+    let next_w = next.width as usize;
     for y in 0..next.height {
+        // Row-skip fast path: when the whole row matches between prev and
+        // next (or is blank in a region prev does not cover), no cell in the
+        // row can change, so the per-cell scan below is skipped entirely.
+        let row_start = y as usize * next_w;
+        let next_row = &next.cells[row_start..row_start + next_w];
+        let row_changed = if y < prev.height {
+            let prev_row = &prev.cells[y as usize * prev_w..][..prev_w];
+            let common = prev_w.min(next_w);
+            if prev_row[..common] != next_row[..common] {
+                true
+            } else if next_w > prev_w {
+                // Cells in this row beyond prev's width compare against blank.
+                next_row[prev_w..].iter().any(|c| c != &Cell::default())
+            } else {
+                false
+            }
+        } else {
+            // Rows below prev's extent compare against blank; only non-blank
+            // cells emit, so a wholly blank row is skipped.
+            next_row.iter().any(|c| c != &Cell::default())
+        };
+        if !row_changed {
+            continue;
+        }
+
         let mut x: u16 = 0;
         while x < next.width {
             let n = next.cell(x, y).expect("x < width, y < height");
@@ -586,6 +618,82 @@ mod tests {
         assert_eq!(u[0].x, 2);
         assert_eq!(u[0].y, 1);
         assert_eq!(u[0].ch, 'z');
+    }
+
+    #[test]
+    fn diff_identical_multi_row_buffers_are_empty() {
+        // Several rows with distinct content (including a wide char) that
+        // match exactly: the row-skip path must produce no updates at all.
+        let mut a = Buffer::new(6, 3);
+        a.set_string(0, 0, "コabc", Style::new());
+        a.set_string(0, 1, "def", Style::new());
+        a.set_string(0, 2, "ghi", Style::new());
+        let b = a.clone();
+        assert!(diff(&a, &b).is_empty());
+        assert!(b.diff_from(&a).is_empty());
+    }
+
+    #[test]
+    fn diff_change_in_one_row_only_updates_that_row() {
+        let mut prev = Buffer::new(5, 3);
+        prev.set_string(0, 0, "abcde", Style::new());
+        prev.set_string(0, 1, "fghij", Style::new());
+        prev.set_string(0, 2, "klmno", Style::new());
+        let mut next = prev.clone();
+        next.set_string(3, 1, "X", Style::new());
+        let u = diff(&prev, &next);
+        // Only the changed cell in row 1 is emitted; rows 0 and 2 are skipped.
+        assert_eq!(u.len(), 1);
+        assert_eq!((u[0].x, u[0].y), (3, 1));
+        assert_eq!(u[0].ch, 'X');
+        assert!(u.iter().all(|c| c.y == 1));
+    }
+
+    #[test]
+    fn diff_row_skip_keeps_wide_and_masked_semantics() {
+        // Row 0 holds a wide char in both buffers and is otherwise identical:
+        // the row-skip must not emit anything for it. Row 1 changes from
+        // single chars to a wide char, emitting the lead + masked neighbor
+        // pairing exactly as before.
+        let mut prev = Buffer::new(6, 2);
+        prev.set_string(0, 0, "コab", Style::new()); // コ at 0-1, 'a' at 2, 'b' at 3
+        prev.set_string(0, 1, "xy", Style::new());
+        let mut next = prev.clone();
+        next.set_string(0, 1, "コ", Style::new()); // lead at 0, mask at 1
+        let u = diff(&prev, &next);
+        // Row 1: lead at (0,1) + masked neighbor at (1,1); row 0 skipped.
+        assert_eq!(u.len(), 2);
+        assert_eq!((u[0].x, u[0].y), (0, 1));
+        assert_eq!(u[0].ch, 'コ');
+        assert_eq!(u[0].width, 2);
+        assert!(!u[0].masked);
+        assert_eq!((u[1].x, u[1].y), (1, 1));
+        assert_eq!(u[1].ch, '\0');
+        assert_eq!(u[1].width, 0);
+        assert!(u[1].masked);
+        assert!(u.iter().all(|c| c.y == 1));
+    }
+
+    #[test]
+    fn diff_grown_default_rows_are_skipped() {
+        // next is taller than prev with matching row 0; the grown rows 1-2
+        // are blank and lie beyond prev's extent, so nothing is emitted.
+        let mut prev = Buffer::new(2, 1);
+        prev.set_string(0, 0, "ab", Style::new());
+        let mut next = Buffer::new(2, 3);
+        next.set_string(0, 0, "ab", Style::new());
+        assert!(diff(&prev, &next).is_empty());
+    }
+
+    #[test]
+    fn diff_grown_default_tail_columns_are_skipped() {
+        // next is wider than prev in the same row; the extra blank columns
+        // compare against blank cells and are skipped.
+        let mut prev = Buffer::new(2, 1);
+        prev.set_string(0, 0, "ab", Style::new());
+        let mut next = Buffer::new(5, 1);
+        next.set_string(0, 0, "ab", Style::new());
+        assert!(diff(&prev, &next).is_empty());
     }
 
     #[test]
