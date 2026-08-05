@@ -93,6 +93,7 @@ import {
   setProgress,
 } from "./index.ts";
 import type {
+  NodeProps,
   SelectOption,
   TabSpec,
   TableColumn,
@@ -163,6 +164,10 @@ class FakeNodeHandle {
   readonly kind: string;
   readonly props: Record<string, unknown>;
   readonly children: FakeNodeHandle[] = [];
+  /** Single-key writes recorded via `set_prop`, in call order. */
+  readonly propWrites: Array<[string, unknown]> = [];
+  /** The number of whole-map `set_props` calls. */
+  fullWrites = 0;
   constructor(type: string, props: Record<string, unknown> | null | undefined) {
     this.kind = type;
     this.props = props ?? {};
@@ -178,7 +183,14 @@ class FakeNodeHandle {
     this.children.push(child as FakeNodeHandle);
     return child;
   }
-  set_props(_props: unknown): void {}
+  set_props(props: unknown): void {
+    this.fullWrites++;
+    Object.assign(this.props, props as Record<string, unknown>);
+  }
+  set_prop(key: string, value: unknown): void {
+    this.propWrites.push([key, value]);
+    this.props[key] = value;
+  }
   append_span(_text: string, _style?: unknown): void {}
   remove(): boolean {
     return true;
@@ -512,6 +524,173 @@ Deno.test("setProps works on a detached template", () => {
   node.setProps({ text: "new", bold: true });
   if (node.props.text !== "new") throw new Error(`text = ${node.props.text}`);
   if (node.props.bold !== true) throw new Error(`bold = ${node.props.bold}`);
+});
+
+// ---------------------------------------------------------------------------
+// Props incremental sync (setProp / incremental setProps)
+// ---------------------------------------------------------------------------
+
+/** The fake native handle backing an attached `Node`, or `null` when the
+ * node is detached. */
+function fakeHandleOf(node: Node): FakeNodeHandle | null {
+  return node.attached ? (node.handle as unknown as FakeNodeHandle) : null;
+}
+
+Deno.test("setProp on a detached template records the prop for materialization", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const child = Text({ text: "old" });
+    child.setProp("text", "new");
+    child.setProp("bold", true);
+    if (child.props.text !== "new" || child.props.bold !== true) {
+      throw new Error("detached setProp must record into node.props");
+    }
+    if (createdNodes.length !== 0) {
+      throw new Error("a detached setProp must not materialize a handle");
+    }
+    renderer.root.addChild(child);
+    // Materialization passes the recorded props to the native create_node.
+    const created = createdNodes.find((c) => c.type === "text");
+    if (created === undefined) {
+      throw new Error("attaching the child must create a native handle");
+    }
+    if (created.props?.text !== "new" || created.props?.bold !== true) {
+      throw new Error(
+        `materialized props must carry the setProp writes, got ${JSON.stringify(created.props)}`,
+      );
+    }
+  });
+});
+
+Deno.test("setProp on an attached node routes through the native single-key path", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const child = Text({ text: "a" });
+    renderer.root.addChild(child);
+    const handle = fakeHandleOf(child);
+    if (handle === null) throw new Error("attached child must have a native handle");
+    child.setProp("fg", "#ff0000");
+    if (
+      handle.propWrites.length !== 1 ||
+      handle.propWrites[0]![0] !== "fg" ||
+      handle.propWrites[0]![1] !== "#ff0000"
+    ) {
+      throw new Error(`expected one set_prop("fg", ...), got ${JSON.stringify(handle.propWrites)}`);
+    }
+    if (handle.fullWrites !== 0) throw new Error("setProp must not call the full set_props");
+    if (child.props.fg !== "#ff0000") {
+      throw new Error("node.props must mirror the single-key write");
+    }
+  });
+});
+
+Deno.test("setProp with an equal value performs no native call", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const child = Text({ text: "a" });
+    renderer.root.addChild(child);
+    const handle = fakeHandleOf(child);
+    if (handle === null) throw new Error("attached child must have a native handle");
+    child.setProp("text", "a"); // equal → skipped at the TS mirror
+    const equalWrites = handle.propWrites.slice();
+    if (equalWrites.length !== 0) {
+      throw new Error(
+        `an equal setProp must not cross into the native layer, got ${JSON.stringify(equalWrites)}`,
+      );
+    }
+    child.setProp("text", "b"); // changed → exactly one native write
+    const writes = handle.propWrites.slice();
+    if (writes.length !== 1 || writes[0] === undefined || writes[0][1] !== "b") {
+      throw new Error(
+        `expected one set_prop("text", "b"), got ${JSON.stringify(writes)}`,
+      );
+    }
+    if (child.props.text !== "b") throw new Error("node.props must reflect the change");
+  });
+});
+
+Deno.test("setProps on an attached node sends only changed keys through set_prop", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const child = Text({ text: "a", bold: true });
+    renderer.root.addChild(child);
+    const handle = fakeHandleOf(child);
+    if (handle === null) throw new Error("attached child must have a native handle");
+    child.setProps({ text: "b", bold: true });
+    if (
+      handle.propWrites.length !== 1 ||
+      handle.propWrites[0]![0] !== "text" ||
+      handle.propWrites[0]![1] !== "b"
+    ) {
+      throw new Error(
+        `only the changed key may go through set_prop, got ${JSON.stringify(handle.propWrites)}`,
+      );
+    }
+    if (handle.fullWrites !== 0) {
+      throw new Error("no removals → no full-map set_props");
+    }
+    if (child.props.text !== "b" || child.props.bold !== true) {
+      throw new Error("node.props must mirror the update");
+    }
+  });
+});
+
+Deno.test("setProps with equal props performs no native call", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const child = Text({ text: "a", bold: true });
+    renderer.root.addChild(child);
+    const handle = fakeHandleOf(child);
+    if (handle === null) throw new Error("attached child must have a native handle");
+    child.setProps({ text: "a", bold: true }); // fully equal → nothing to write
+    if (handle.propWrites.length !== 0 || handle.fullWrites !== 0) {
+      throw new Error(
+        `an equal setProps must not touch the native layer ` +
+          `(propWrites=${JSON.stringify(handle.propWrites)}, fullWrites=${handle.fullWrites})`,
+      );
+    }
+    if (child.props.text !== "a" || child.props.bold !== true) {
+      throw new Error("node.props must stay intact");
+    }
+  });
+});
+
+Deno.test("setProps with a removed key falls back to the full-map path", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const child = Text({ text: "a", bold: true });
+    renderer.root.addChild(child);
+    const handle = fakeHandleOf(child);
+    if (handle === null) throw new Error("attached child must have a native handle");
+    child.setProps({ text: "a" }); // bold removed
+    if (handle.fullWrites !== 1) {
+      throw new Error(`a removal needs the full-map replace, got fullWrites=${handle.fullWrites}`);
+    }
+    if (handle.propWrites.length !== 0) {
+      throw new Error(`the removal path must not use set_prop, got ${JSON.stringify(handle.propWrites)}`);
+    }
+    if ("bold" in child.props) throw new Error("removed key must leave node.props");
+  });
+});
+
+Deno.test("setProps strips undefined values like the binding drops them", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const child = Text({ text: "a", bold: true });
+    renderer.root.addChild(child);
+    const handle = fakeHandleOf(child);
+    if (handle === null) throw new Error("attached child must have a native handle");
+    // `undefined` has no scene representation: it must be treated as absent,
+    // so this is a removal (bold → undefined) → full-map fallback, and the
+    // mirror must not retain the phantom key. Built via a Record because
+    // `exactOptionalPropertyTypes` rejects `bold: undefined` in literals.
+    const next: Record<string, unknown> = { text: "a" };
+    next.bold = undefined;
+    child.setProps(next as NodeProps);
+    if (handle.fullWrites !== 1) throw new Error("undefined values must count as removals");
+    if ("bold" in child.props) throw new Error("undefined-valued keys must be stripped");
+    if (child.props.text !== "a") throw new Error("remaining props must be intact");
+  });
 });
 
 Deno.test("StreamingText builds a streaming_text node", () => {
@@ -3724,6 +3903,7 @@ class FakeScrollNodeHandle {
     return child;
   }
   set_props(_props: unknown): void {}
+  set_prop(_key: string, _value: unknown): void {}
   append_span(text: string, _style?: unknown): void {
     this.streamText += text;
   }
