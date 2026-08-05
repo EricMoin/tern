@@ -2,7 +2,6 @@
   "name": "tern-node",
   "version": "0.1.0",
   "description": "tern napi binding: Deno/Node.js -> tern-core bridge (native addon)",
-  "private": true,
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -10,6 +9,10 @@
   },
   "main": "index.js",
   "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ],
   "scripts": {
     "build": "napi build --platform --release && node fix-dts.mjs",
     "build:debug": "napi build --platform && node fix-dts.mjs",
