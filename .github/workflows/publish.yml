@@ -58,9 +58,11 @@ jobs:
           done
 
       # Gate 2 — the native addon must build and load on the current
-      # platform before anything is published. npm install (not npm ci):
-      # the tern-node-<platform> optional dependencies are not yet on the
-      # registry, so the lockfile cannot pin them; npm install tolerates
+      # platform before anything is published. npm run build now resolves
+      # to the RELEASE profile (the package.json default), so this gate
+      # builds exactly the artifact that would ship. npm install (not npm
+      # ci): the tern-node-<platform> optional dependencies are not yet on
+      # the registry, so the lockfile cannot pin them; npm install tolerates
       # their absence as optional.
       - name: Gate 2 — build tern-node addon + load-check
         working-directory: src/bindings/tern-node

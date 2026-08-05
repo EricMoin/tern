@@ -167,8 +167,10 @@ jobs:
       - name: Install JS dependencies
         run: npm ci
 
-      # Build the tern-node napi addon (full script chain: napi build
-      # --platform && node fix-dts.mjs) so the demos can load it.
+      # Build the tern-node napi addon in DEBUG (npm run build:debug).
+      # Compile speed matters for this correctness-only smoke and the
+      # runtime profile is irrelevant to PTY correctness (demos exit 0
+      # iff the scene rendered AND 'q' quits).
       # npm install (not npm ci): the tern-node-<platform> optional
       # dependencies declared for the release strategy are not yet on the
       # registry, so the lockfile cannot pin them; npm install tolerates
@@ -177,7 +179,7 @@ jobs:
         working-directory: src/bindings/tern-node
         run: |
           npm install
-          npm run build
+          npm run build:debug
 
       - name: PTY smoke (script harness)
         run: bash packages/examples/run-smoke.sh
@@ -189,6 +191,8 @@ jobs:
     # publish.yml wires the per-platform binaries via optionalDependencies
     # as tern-node-<platform> packages. Cross-compiled rows skip the native
     # load-check because the binary arch differs from the runner arch.
+    # `npm run build` now resolves to the RELEASE profile — these binaries
+    # are the release artifacts consumed by publish.yml.
     name: napi addon — ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
     needs: changes
