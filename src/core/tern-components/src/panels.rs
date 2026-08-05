@@ -377,8 +377,8 @@ mod tests {
             Panel::new("one", body("body-a")).collapsed(),
             Panel::new("two", body("body-b")),
         ]);
-        let buffer =
-            crate::compositor::Compositor::new().paint(panels, tern_core::Size::new(20, 5));
+        let mut compositor = crate::compositor::Compositor::new();
+        let buffer = compositor.paint(panels, tern_core::Size::new(20, 5));
         let rows: Vec<String> = (0..5)
             .map(|y| (0..20).map(|x| buffer.cell(x, y).unwrap().ch).collect())
             .collect();
@@ -400,8 +400,8 @@ mod tests {
             Panel::new("first", body("1")),
             Panel::new("second", body("2")),
         ]);
-        let buffer =
-            crate::compositor::Compositor::new().paint(panels, tern_core::Size::new(20, 5));
+        let mut compositor = crate::compositor::Compositor::new();
+        let buffer = compositor.paint(panels, tern_core::Size::new(20, 5));
         let rows: Vec<String> = (0..5)
             .map(|y| (0..20).map(|x| buffer.cell(x, y).unwrap().ch).collect())
             .collect();

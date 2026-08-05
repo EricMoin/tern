@@ -386,7 +386,8 @@ mod tests {
             .segment(seg("cde", SegmentAlign::Left, 1))
             .segment(seg("fg", SegmentAlign::Right, 2))
             .segment(seg("hijk", SegmentAlign::Right, 3));
-        let buffer = crate::compositor::Compositor::new().paint(bar, tern_core::Size::new(12, 1));
+        let mut compositor = crate::compositor::Compositor::new();
+        let buffer = compositor.paint(bar, tern_core::Size::new(12, 1));
         let row: String = (0..12).map(|x| buffer.cell(x, 0).unwrap().ch).collect();
 
         assert!(row.starts_with("cde"), "row = {row:?}");
@@ -400,7 +401,8 @@ mod tests {
         let bar = StatusBar::new(Style::new())
             .left("L", Style::new())
             .right("R", Style::new());
-        let buffer = crate::compositor::Compositor::new().paint(bar, tern_core::Size::new(20, 1));
+        let mut compositor = crate::compositor::Compositor::new();
+        let buffer = compositor.paint(bar, tern_core::Size::new(20, 1));
         assert_eq!(buffer.cell(0, 0).unwrap().ch, 'L');
         assert_eq!(buffer.cell(19, 0).unwrap().ch, 'R');
     }

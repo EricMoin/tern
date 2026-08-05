@@ -785,8 +785,8 @@ mod tests {
         // A root Input fills the viewport with its 1-cell padding frame; the
         // text leaf lands at (1,1), and the caret (display col 2) paints the
         // reversed block caret over the cell at (3,1).
-        let buffer = crate::compositor::Compositor::new()
-            .paint(Input::with_value("ab"), tern_core::Size::new(6, 3));
+        let mut compositor = crate::compositor::Compositor::new();
+        let buffer = compositor.paint(Input::with_value("ab"), tern_core::Size::new(6, 3));
         assert_eq!(buffer.cell(1, 1).unwrap().ch, 'a');
         assert_eq!(buffer.cell(2, 1).unwrap().ch, 'b');
         let caret = buffer.cell(3, 1).unwrap();
@@ -809,8 +809,8 @@ mod tests {
 
     #[test]
     fn paint_renders_dimmed_placeholder_with_caret_at_head() {
-        let buffer = crate::compositor::Compositor::new()
-            .paint(Input::new().placeholder("ask"), tern_core::Size::new(6, 3));
+        let mut compositor = crate::compositor::Compositor::new();
+        let buffer = compositor.paint(Input::new().placeholder("ask"), tern_core::Size::new(6, 3));
         let c = buffer.cell(1, 1).unwrap();
         assert_eq!(c.ch, 'a');
         assert!(c.style.modifiers.contains(Modifiers::DIM));
@@ -824,7 +824,8 @@ mod tests {
 
     #[test]
     fn paint_with_hidden_caret_paints_no_block() {
-        let buffer = crate::compositor::Compositor::new().paint(
+        let mut compositor = crate::compositor::Compositor::new();
+        let buffer = compositor.paint(
             Input::with_value("ab").hide_caret(),
             tern_core::Size::new(6, 3),
         );
@@ -842,7 +843,8 @@ mod tests {
         // stays visible: "llo" paints with the caret after the last 'o'.
         let mut input = Input::with_value("hello");
         input.move_end();
-        let buffer = crate::compositor::Compositor::new().paint(input, tern_core::Size::new(6, 3));
+        let mut compositor = crate::compositor::Compositor::new();
+        let buffer = compositor.paint(input, tern_core::Size::new(6, 3));
         assert_eq!(buffer.cell(1, 1).unwrap().ch, 'l');
         assert_eq!(buffer.cell(3, 1).unwrap().ch, 'o');
         let caret = buffer.cell(4, 1).unwrap();
