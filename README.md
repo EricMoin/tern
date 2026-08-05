@@ -54,24 +54,63 @@ Rust; the JS side only describes the scene.
       └──────────────────────────────────────────────► JS renderer
 ```
 
-## Installation
+## Using tern as a library
 
-The `@tern/*` packages aren't on npm yet (publishing runs through
-`.github/workflows/publish.yml`). Until then, build from source:
+tern ships as four npm packages:
+
+| Package | What it is |
+|---------|------------|
+| `tern-node` | The native addon (Rust core, napi binding). Main package plus 5 per-platform sub-packages via `optionalDependencies`. |
+| `@tern/core` | TypeScript bindings over the addon: renderer, scene nodes, element factories, focus, theme, frame snapshots. Depends on `tern-node`. |
+| `@tern/react` | react-reconciler custom renderer — host components, hooks, `ThemeProvider`. Peers: `react` `^19.2.0`, `react-reconciler` `^0.33.0`. |
+| `@tern/solid` | SolidJS universal custom renderer — element factories, subscriptions, `setTheme`. Depends on `solid-js`. |
+
+### Installation
 
 ```sh
-npm install                                    # repo root — JS deps
-npm run build --prefix src/bindings/tern-node  # release default: napi build --platform --release && node fix-dts.mjs
+# React renderer
+npm install @tern/core @tern/react react react-reconciler
+
+# Solid renderer
+npm install @tern/core @tern/solid solid-js
 ```
 
-Prerequisites: stable Rust 1.94 (pinned in `rust-toolchain.toml`), Deno 2.x
-(primary runtime for check/test), and Node.js ≥ 20 (for the napi build).
+All packages are ESM-only (`"type": "module"`, `dist/index.js` +
+`dist/index.d.ts`) and require Node.js `>= 20`.
 
-## Quick start — @tern/react
+> **Not on npm yet.** Everything ships at version `0.1.0`; publishing is
+> automated and only happens when a `v*` tag is pushed (see
+> [Release](#release)). Until then, consume the packages from the monorepo:
+
+```sh
+git clone https://github.com/EricMoin/tern
+cd tern
+npm install                    # repo root — installs and links the workspaces
+cd src/bindings/tern-node
+npm install                    # addon deps (use npm install, not npm ci — see below)
+npm run build                  # napi build --platform --release && node fix-dts.mjs
+cd ../..
+npm run build -w @tern/core    # tsc build + fix-dts (core first)
+npm run build -w @tern/react   # depends on @tern/core
+npm run build -w @tern/solid   # depends on @tern/core
+```
+
+The root workspace install symlinks `@tern/core`, `@tern/react`,
+`@tern/solid` and `tern-node` into `node_modules`, so the packages are
+importable by name from anywhere in the checkout. The bundled demos run
+Deno-first straight off the TypeScript sources (via the `deno.json` import
+map); a Node consumer imports the built `dist`, hence the build steps above.
+Alternatively, `npm pack -w @tern/core` (etc.) produces installable tarballs —
+note that `@tern/core` depends on `tern-node`, which is itself unpublished,
+so a standalone tarball install outside the workspace also needs `tern-node`
+(and its per-platform packages) resolvable; the workspace is the practical
+pre-release route.
+
+### Quick start — @tern/react
 
 ```tsx
 // app.tsx — run with: deno run --allow-all app.tsx
-// (requires the native addon built, see "Installation" above)
+// (requires the native addon built and the @tern/* dist built — see Installation)
 import { createElement } from "react";
 import { createRenderer } from "@tern/core";
 import { Box, Text, render, useApp, useInput } from "@tern/react";
@@ -96,21 +135,23 @@ render(createElement(App), renderer);
 // scheduler, so give them a beat before the event loop starts.
 await new Promise((resolve) => setTimeout(resolve, 100));
 
-// Pull-based event loop: poll_events feeds the on* handlers. 'q' destroys
-// the renderer via exit(); Ctrl+C (exitOnCtrlC) does too.
-while (!renderer.destroyed) {
-  renderer.pollEvents(50);
+// Push-based events: startEventStream() delivers every key / resize /
+// focus / mouse / paste event to renderer.events. exit() (on 'q') and
+// Ctrl+C (exitOnCtrlC) destroy the renderer, closing the stream.
+renderer.startEventStream();
+for await (const event of renderer.events) {
+  if (renderer.destroyed) break;
 }
 ```
 
 The scene is a plain React tree of host components. Bare string children are
 rejected — text lives in an explicit `<Text text="..." />` element.
 
-## Quick start — @tern/solid
+### Quick start — @tern/solid
 
 ```ts
 // app.ts — run with: deno run --allow-all app.ts
-// (requires the native addon built, see "Installation" above)
+// (requires the native addon built and the @tern/* dist built — see Installation)
 import { createRenderer } from "@tern/core";
 import { Box, Text, render, subscribeInput } from "@tern/solid";
 
@@ -133,12 +174,72 @@ subscribeInput(renderer, (event) => {
   if (event.name === "char" && event.char === "q") quit = true;
 });
 
-while (!quit && !renderer.destroyed) {
-  renderer.pollEvents(50);
+renderer.startEventStream();
+for await (const event of renderer.events) {
+  if (quit || renderer.destroyed) break;
 }
 dispose?.();
 renderer.destroy();
 ```
+
+### What runs where
+
+- **Node.js `>= 20`** — ESM only; all packages are `"type": "module"` and
+  export an `import` condition. TypeScript/JSX sources need your own
+  transpilation step (the demos run Deno-first, straight from source).
+- **Deno 2.x** — supported; Node-API addons load with `--allow-ffi`, and the
+  demos run with `deno run --allow-all`. `deno.json` import-maps
+  `@tern/core` to the source for in-repo runs.
+- **Terminal/PTY required** — constructing a renderer enters raw mode and
+  the alternate screen immediately (crossterm). The scene renders only into
+  a real terminal; non-interactive shells cannot paint it. For headless
+  assertions, use `renderer.snapshotFrame(width, height)` and `framesEqual`
+  instead.
+
+### Supported platforms
+
+The native addon follows the napi-rs distribution model: the `tern-node`
+root package declares per-platform packages in `optionalDependencies`, and
+the generated loader picks the one matching the running system. The release
+matrix builds these five targets:
+
+| Platform | Rust target triple | npm package |
+|----------|--------------------|-------------|
+| Linux x64 (glibc) | `x86_64-unknown-linux-gnu` | `tern-node-linux-x64-gnu` |
+| Linux arm64 (glibc) | `aarch64-unknown-linux-gnu` | `tern-node-linux-arm64-gnu` |
+| macOS x64 (Intel) | `x86_64-apple-darwin` | `tern-node-darwin-x64` |
+| macOS arm64 (Apple Silicon) | `aarch64-apple-darwin` | `tern-node-darwin-arm64` |
+| Windows x64 (MSVC) | `x86_64-pc-windows-msvc` | `tern-node-win32-x64-msvc` |
+
+When the platform package is missing, the loader falls back to a locally
+built `tern-node.<platform>-<arch>.node`. Systems outside the matrix (musl
+Linux, Windows arm64, ...) are not covered — build the addon locally.
+
+### Troubleshooting
+
+- **`ERR_DLOPEN_FAILED` / "Cannot find native binding"** — the addon could
+  not be loaded for this platform: the per-platform package is missing
+  (unsupported target), `node_modules` is stale, or the addon was never
+  built. Build it locally:
+
+  ```sh
+  cd src/bindings/tern-node && npm install && npm run build
+  ```
+
+  If `node_modules` is stale, follow the loader's own hint: remove
+  `package-lock.json` and `node_modules`, then `npm install` (see
+  https://github.com/npm/cli/issues/4828).
+
+- **Raw-mode / PTY requirement** — `createRenderer()` enters raw mode and
+  the alternate screen immediately; a scene never renders into piped output
+  or a CI log. Run inside a real terminal. To render inline without the
+  alternate screen, construct with `{ useAltScreen: false }`. For buffer
+  assertions without a terminal, use `snapshotFrame` / `framesEqual`.
+
+- **`npm ci` fails in `src/bindings/tern-node`** — the `tern-node-<platform>`
+  optional dependencies are not on the registry yet, so the lockfile cannot
+  pin them and `npm ci`'s sync check fails. Use `npm install` there
+  (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Widgets
 
@@ -185,6 +286,18 @@ deno run --allow-all packages/examples/kitchen-sink-react.ts
 deno run --allow-all packages/examples/kitchen-sink-solid.ts
 ```
 
+Or through the `@tern/examples` workspace scripts:
+
+```sh
+npm run demo:react -w @tern/examples
+npm run demo:solid -w @tern/examples
+npm run demo:kitchen-react -w @tern/examples
+npm run demo:kitchen-solid -w @tern/examples
+```
+
+Each demo renders a scene, asserts it against the scene tree, and quits on
+`q`.
+
 ## Packages
 
 | Package | What it is |
@@ -192,7 +305,7 @@ deno run --allow-all packages/examples/kitchen-sink-solid.ts
 | [`@tern/core`](packages/core/README.md) | TypeScript bindings over the napi addon: renderer, scene nodes, element factories, focus, theme, frame snapshots |
 | [`@tern/react`](packages/react/README.md) | react-reconciler custom renderer — host components, hooks, `ThemeProvider` |
 | [`@tern/solid`](packages/solid/README.md) | SolidJS universal custom renderer — factories, subscriptions, `setTheme` |
-| [`@tern/examples`](packages/examples/README.md) | Runnable demos with a PTY smoke harness |
+| `@tern/examples` | Runnable demos (`react-demo.ts`, `solid-demo.ts`, kitchen-sink scenes) with a PTY smoke harness (`run-smoke.sh`) |
 
 ## Documentation
 
@@ -205,12 +318,54 @@ deno run --allow-all packages/examples/kitchen-sink-solid.ts
 
 ## Development
 
+Prerequisites for building from source: stable Rust 1.94 (pinned in
+`rust-toolchain.toml`), Deno 2.x (the primary runtime for check/test and
+demos), and Node.js `>= 20` (for the napi build and the JS toolchain).
+
+Build the native addon and the JS packages:
+
 ```sh
-cargo build --workspace && cargo test --workspace   # Rust: all green required
+npm install                                  # repo root — JS deps (npm workspaces)
+cd src/bindings/tern-node
+npm install                                  # addon deps (npm install, not npm ci — see CONTRIBUTING.md)
+npm run build                                # napi build --platform --release && node fix-dts.mjs
+cd ../..
+npm run build -w @tern/core                   # tsc build + fix-dts (core first)
+npm run build -w @tern/react                  # depends on @tern/core
+npm run build -w @tern/solid                  # depends on @tern/core
+```
+
+`npm run build:debug` in `src/bindings/tern-node` is the fast local dev
+build (debug profile); the default build is the release profile.
+
+Check / test / smoke:
+
+```sh
 npm run check                                       # deno check across packages
 npm test                                            # deno test across packages
+cargo build --workspace && cargo test --workspace   # Rust gates — all green required
 bash packages/examples/run-smoke.sh                 # PTY smoke: 4 demos, quit on 'q', exit 0
 ```
+
+## Release
+
+Publishing is fully automated — nothing is published on ordinary pushes or
+by hand. Pushing a `v*` tag (e.g. `v0.1.0`) — or running
+`.github/workflows/release.yml` manually — triggers the release:
+
+1. **Build** — the napi-rs matrix compiles the `tern-node` addon for all
+   five targets in `napi.targets` (natively on each host runner, or via
+   `napi-cross` for Linux arm64), load-checks the native rows, and uploads
+   each binary as a workflow artifact.
+2. **Release** — collects the binaries into the per-platform packages
+   (`napi create-npm-dirs` + `napi artifacts`), publishes `tern-node` (its
+   `prepublishOnly` publishes the `tern-node-<platform>` packages first),
+   then builds and publishes `@tern/core` → `@tern/react` → `@tern/solid`
+   in dependency order.
+
+The workflow requires the `NPM_TOKEN` secret — an npm automation token with
+publish rights on the `@tern/*` and `tern-node*` names — and declares
+`id-token: write` for npm provenance.
 
 ```
 tern/

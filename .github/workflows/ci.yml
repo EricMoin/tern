@@ -105,15 +105,27 @@ jobs:
           # yet, so the job-scoped key is used until lockfiles are added.
           cache: true
 
+      # npm install (not npm ci): the root workspace now includes
+      # src/bindings/tern-node, whose tern-node-<platform> optional
+      # dependencies are not yet on the registry, so the lockfile cannot pin
+      # them and npm ci's sync check would fail (CONTRIBUTING.md, "Building
+      # the native addon").
       - name: Install JS dependencies
-        run: npm ci
+        run: npm install
+
+      # Emit dist/ for each published package (core first — react/solid
+      # resolve @tern/core types from its dist via the workspace symlink).
+      # The tsc type-check step below runs against src with noEmit, so the
+      # build must run first to produce the dist the dev checks resolve.
+      - name: Build JS packages (tsc emit)
+        run: npm run build -w @tern/core && npm run build -w @tern/react && npm run build -w @tern/solid
 
       - name: Lint (deno lint)
         run: deno lint
 
       # Typescript is a devDependency of each workspace package, so `npx tsc`
-      # resolves the locally-installed compiler after `npm ci`. Each package's
-      # tsconfig extends tsconfig.base.json at the repo root.
+      # resolves the locally-installed compiler after `npm install`. Each
+      # package's tsconfig extends tsconfig.base.json at the repo root.
       - name: Type check (tsc)
         run: npx tsc -p packages/core && npx tsc -p packages/react && npx tsc -p packages/solid && npx tsc -p packages/examples
 
@@ -153,7 +165,7 @@ jobs:
           node-version: 20
           cache: npm
           # Hash every package-lock.json in the repo so both the root
-          # `npm ci` and the tern-node addon `npm install` below share one
+          # `npm install` and the tern-node addon `npm install` below share one
           # npm cache keyed on all lockfiles.
           cache-dependency-path: "**/package-lock.json"
 
@@ -164,8 +176,13 @@ jobs:
           # the tern core modules on every run).
           cache: true
 
+      # npm install (not npm ci): the root workspace includes
+      # src/bindings/tern-node, whose tern-node-<platform> optional
+      # dependencies are not yet on the registry, so the lockfile cannot pin
+      # them and npm ci's sync check would fail (CONTRIBUTING.md, "Building
+      # the native addon").
       - name: Install JS dependencies
-        run: npm ci
+        run: npm install
 
       # Build the tern-node napi addon in DEBUG (npm run build:debug).
       # Compile speed matters for this correctness-only smoke and the

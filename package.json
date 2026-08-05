@@ -5,7 +5,8 @@
   "description": "tern — a Rust-native TUI engine with React/Solid renderers (JS workspace)",
   "type": "module",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "src/bindings/tern-node"
   ],
   "scripts": {
     "check": "deno check packages/core/src/index.ts packages/react/src/index.ts packages/solid/src/index.ts packages/examples/src/index.ts",

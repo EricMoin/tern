@@ -4,5 +4,8 @@
     "./packages/react",
     "./packages/solid",
     "./packages/examples"
-  ]
+  ],
+  "imports": {
+    "@tern/core": "./packages/core/src/index.ts"
+  }
 }

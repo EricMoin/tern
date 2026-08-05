@@ -21,7 +21,7 @@ import type {
   HighlightSpanJs,
   NodeHandle as NativeNodeHandle,
   TuiRenderer as NativeTuiRenderer,
-} from "../../../src/bindings/tern-node/index.d.ts";
+} from "tern-node";
 
 export type {
   ContentSize,
@@ -30,7 +30,7 @@ export type {
   NodeHandle,
   TuiRenderer,
   TuiRendererOptions,
-} from "../../../src/bindings/tern-node/index.d.ts";
+} from "tern-node";
 
 /** The runtime surface of the loaded napi addon. */
 export interface TernAddon {
@@ -67,6 +67,10 @@ export function loadAddon(): TernAddon {
   const require = createRequire(import.meta.url);
   const errors: string[] = [];
   const candidates = [
+    // Package-name resolution first: `packages/core` declares `tern-node` as
+    // a dependency, so `createRequire` walks up to the workspace symlink at
+    // the repo root (`node_modules/tern-node` -> `src/bindings/tern-node`).
+    "tern-node",
     ADDON_PATH,
     `../../../src/bindings/tern-node/tern-node.${process.platform}-${process.arch}.node`,
   ];
