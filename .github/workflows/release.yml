@@ -1,0 +1,198 @@
+# Release workflow — tag-triggered (vX.Y.Z) or manual dispatch.
+#
+# Replaces the superseded publish.yml, which fired on v* tags and published
+# the raw src/**/*.ts of the JS packages while the native addon release (the
+# tern-node-<platform> optionalDependency wiring) was still a documented next
+# step. This workflow follows the napi-rs v3 release template
+# (https://napi.rs/docs/deep-dive/release):
+#
+#   Phase 1 (build) — build the tern-node napi addon for every target in
+#     napi.targets on its native host (or via napi-cross for the Linux arm64
+#     row), load-check the rows whose runner arch matches the target, and
+#     upload each binary as a workflow artifact.
+#   Phase 2 (release) — collect the artifacts into the per-platform npm
+#     packages (napi create-npm-dirs + napi artifacts), publish the tern-node
+#     root package (prepublishOnly runs `napi prepublish -t npm`, publishing
+#     the tern-node-<platform> packages first), then build and publish the
+#     three JS packages (@tern/core, @tern/react, @tern/solid) in dependency
+#     order (core first; react/solid depend on it).
+#
+# Dormant until a v* tag is pushed (or a manual dispatch) — never runs on
+# ordinary pushes, so it cannot double-publish with any other workflow.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    # Build the native addon for every target in napi.targets (tern-node
+    # package.json). Each row uploads its <platform>-<arch>.node binary;
+    # cross-compiled rows skip the native load-check because the binary
+    # arch differs from the runner arch. `npm run build` resolves to the
+    # RELEASE profile — these binaries are the release artifacts consumed
+    # by the release job below.
+    name: Build tern-node — ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            build: npm run build
+            load_check: true
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            build: npm run build -- --target aarch64-unknown-linux-gnu --use-napi-cross
+            load_check: false
+          - host: macos-latest
+            target: x86_64-apple-darwin
+            build: npm run build -- --target x86_64-apple-darwin
+            load_check: false
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: npm run build
+            load_check: true
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: npm run build
+            load_check: true
+    steps:
+      - uses: actions/checkout@v7
+
+      # napi build compiles via cargo, so the pinned Rust toolchain is
+      # required; rustflags is cleared to match a local build. The target
+      # triple is registered via rustup for the cross-compiled rows.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+          targets: ${{ matrix.settings.target }}
+          # Cargo caching is handled by Swatinem/rust-cache below; disabling
+          # the built-in cache (default on) avoids two overlapping cache
+          # entries for the same cargo registry and target dirs.
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: src/bindings/tern-node/package-lock.json
+
+      - name: Install addon dependencies
+        working-directory: src/bindings/tern-node
+        run: npm install
+
+      - name: Build addon (${{ matrix.settings.target }})
+        working-directory: src/bindings/tern-node
+        run: ${{ matrix.settings.build }}
+
+      # Native load check on rows where the runner arch matches the target.
+      - name: Load check (native)
+        working-directory: src/bindings/tern-node
+        if: ${{ matrix.settings.load_check }}
+        run: node load-check.mjs
+
+      - name: Upload addon binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: tern-node-${{ matrix.settings.target }}
+          path: src/bindings/tern-node/tern-node.*.node
+          if-no-files-found: error
+
+  release:
+    # Collect the per-platform binaries, publish the native addon
+    # (platform packages via `napi prepublish -t npm`, then the root
+    # tern-node package), then build and publish the JS packages in
+    # dependency order. contents: write for GitHub release assets,
+    # id-token: write for npm provenance (napi-rs release convention).
+    name: Release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: "**/package-lock.json"
+
+      # tern-node is not a root workspace member, and its prepublishOnly
+      # (`napi prepublish -t npm`) resolves the pinned @napi-rs/cli from
+      # its own node_modules/.bin, so the addon package needs its own
+      # `npm install` before the napi steps. The tern-node-<platform>
+      # optional dependencies are not on the registry yet; npm install
+      # tolerates their absence as optional.
+      - name: Install addon dependencies
+        working-directory: src/bindings/tern-node
+        run: npm install
+
+      # Download every build-job artifact. download-artifact nests one
+      # directory per artifact under this path; `napi artifacts` searches
+      # the ./artifacts dir recursively, so the layout is picked up as-is.
+      - name: Download addon artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: src/bindings/tern-node/artifacts
+
+      # npm run <script> runs the plain napi CLI commands via the package
+      # scripts (create-npm-dirs / artifacts), resolving the pinned
+      # @napi-rs/cli from the package's own node_modules/.bin.
+      - name: Create npm platform dirs (napi create-npm-dirs)
+        working-directory: src/bindings/tern-node
+        run: npm run create-npm-dirs
+
+      - name: Collect artifacts (napi artifacts)
+        working-directory: src/bindings/tern-node
+        run: npm run artifacts
+
+      # Publishes the tern-node-<platform> packages via the prepublishOnly
+      # hook (`napi prepublish -t npm`), then the tern-node root package.
+      - name: Publish tern-node
+        working-directory: src/bindings/tern-node
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Root install must come after tern-node is published: @tern/core
+      # depends on tern-node@0.1.0, which resolves from the registry only
+      # once the addon root package exists.
+      - name: Install JS workspace dependencies
+        run: npm install
+
+      # The workspace build scripts run `deno task build` (per-package
+      # deno.json), so deno must be on PATH for the release build step.
+      - uses: denoland/setup-deno@v2
+        with:
+          cache: true
+
+      # Build in dependency order — core first, then react and solid.
+      - name: Build JS packages (@tern/core, @tern/react, @tern/solid)
+        run: npm run build -w @tern/core && npm run build -w @tern/react && npm run build -w @tern/solid
+
+      # Publish in dependency order — core first, then react and solid.
+      - name: Publish @tern/core
+        run: npm publish --access public -w @tern/core
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @tern/react
+        run: npm publish --access public -w @tern/react
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @tern/solid
+        run: npm publish --access public -w @tern/solid
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -90,7 +90,7 @@ export type {
   TernEventJs,
   TuiRenderer,
   TuiRendererOptions,
-} from "../../../src/bindings/tern-node/index.d.ts";
+} from "tern-node";
 
 export const name = "@tern/core";
 export const version = "0.1.0";
@@ -105,7 +105,7 @@ import type {
   TernEventJs,
   TuiRenderer as NativeTuiRenderer,
   TuiRendererOptions,
-} from "../../../src/bindings/tern-node/index.d.ts";
+} from "tern-node";
 import { loadAddon } from "./addon.ts";
 
 /**
