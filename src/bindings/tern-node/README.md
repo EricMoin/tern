@@ -11,8 +11,9 @@ The binding is a Rust `cdylib` compiled by [napi-rs](https://napi.rs) v3
 
 ```sh
 cd src/bindings/tern-node
-npm install                # fetches @napi-rs/cli
-npx napi build --platform  # runs cargo build + emits index.js, index.d.ts, <platform>.node
+npm install              # fetches @napi-rs/cli
+npm run build            # release profile (default): napi build --platform --release && node fix-dts.mjs
+npm run build:debug      # debug profile, fast local iteration: napi build --platform && node fix-dts.mjs
 ```
 
 This produces, in this directory:
@@ -40,6 +41,7 @@ class NodeHandle {
   add_child(child: NodeHandle): NodeHandle;
   remove(): boolean;
   set_props(props: Record<string, unknown>): void;
+  set_prop(key: string, value: unknown): void; // single-key (style keys merge)
 }
 ```
 

@@ -18,7 +18,7 @@ theme usage. For the rendering pipeline see
 
 ```sh
 npm install                  # repo root — installs JS deps
-npm run build --prefix src/bindings/tern-node   # napi build --platform && node fix-dts.mjs
+npm run build --prefix src/bindings/tern-node   # release default: napi build --platform --release && node fix-dts.mjs
 ```
 
 ### Run the bundled demos

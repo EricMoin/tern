@@ -61,7 +61,7 @@ The `@tern/*` packages aren't on npm yet (publishing runs through
 
 ```sh
 npm install                                    # repo root — JS deps
-npm run build --prefix src/bindings/tern-node  # napi build --platform && node fix-dts.mjs
+npm run build --prefix src/bindings/tern-node  # release default: napi build --platform --release && node fix-dts.mjs
 ```
 
 Prerequisites: stable Rust 1.94 (pinned in `rust-toolchain.toml`), Deno 2.x

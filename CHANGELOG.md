@@ -185,6 +185,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sequence per cell (an internal frontend property; the diff flush stays a
   no-op for an unchanged frame).
 
+### Performance
+
+- **Scene-epoch no-op render fast path:** `TuiRenderer::render()` returns
+  `Ok(())` with zero terminal writes when the scene's mutation epoch, the
+  viewport, and the cached terminal size are all unchanged since the last
+  paint. The scene-level `epoch` (a u64 bumped by every successful mutation,
+  unchanged by reads and failed mutations) is compared under the same lock
+  that painted the frame, so JS re-renders every animation tick but only real
+  changes pay for I/O. The `RenderBackend` trait abstraction lets the fast
+  path be proven zero-write under test.
+- **Diff row-skip fast path:** `Buffer::diff` / `diff_from` first compare each
+  row as a whole `&[Cell]` slice — identical rows (or rows blank in regions
+  the previous frame does not cover) skip entirely, and the per-cell scan only
+  runs on rows that actually changed (multi-width aware).
+- **Empty-diff flush suppression:** an empty `CellUpdate` diff short-circuits
+  the flush — when the caret parks where the previous flush left it, nothing
+  is queued or flushed (zero bytes written); when only the park position
+  moved, just the `MoveTo` is emitted.
+- **Terminal size caching:** the renderer caches the probed terminal size
+  (`cached_size`), so the hot render path skips the per-frame `size()` ioctl;
+  a resize event invalidates the cache (`invalidate_size_on_resize`), forcing
+  a re-probe and repaint at the new viewport. `hit_test` shares the cache.
+- **Coalesced frame scheduling (`Renderer.requestFrame`):** new
+  `requestFrame(callback?)` API schedules a native render on the next
+  macrotask (`setTimeout` 0, `queueMicrotask` fallback); several calls within
+  one tick collapse into a single native `render()` (pending-frame flag
+  dedupe), and an explicit `render()` paints immediately and supersedes a
+  pending frame. Returns a cancel function that aborts a still-pending frame
+  and drops its queued callbacks.
+- **Single paint per commit (`@tern/react`):** the reconciler's redundant
+  pre-commit paint is gone — `prepareForCommit` no longer renders, and
+  `resetAfterCommit` (`renderer.render()`) is the one paint per commit.
+- **Escape-sequence run batching** (the flush-side half of the round): the
+  run-merging flush is described in the Added section above.
+- **Props incremental sync:** a new native single-key `NodeHandle.set_prop`
+  path replaces the per-update full JSON serialization + whole-map replace.
+  `@tern/core`'s `Node.setProps` diffs the incoming map against the current
+  props and pushes only the changed keys through `set_prop` (removals fall
+  back to the full-map replace); `Node.setProp` is the direct single-key
+  surface. Equal-value writes — at the TS mirror, the binding, and the scene
+  — are skipped entirely: no replace, no scene-epoch bump, no layout dirtying,
+  so the renderer's no-op fast path still applies to re-renders that change
+  nothing.
+- **Incremental layout:** `TaffyLayoutEngine` (tern-layout) is now stateful —
+  it owns the taffy tree, caches it across frames, and reconciles it against
+  the current scene instead of rebuilding it. Each cached node keeps a
+  scene-input snapshot; the reconcile walk calls taffy's `mark_dirty` only on
+  nodes whose inputs changed, so taffy re-lays-out just the dirty subtrees. A
+  cold cache or fresh scene takes a full rebuild (the correctness baseline
+  every incremental result is tested against); a frame changing more than
+  half the tree falls back conservatively to a full rebuild. Instrumented
+  (`full_rebuilds` / `last_reconciled_node_count`) so tests can prove a
+  one-cell mutation reconciles one subtree.
+- **Dirty-region repaint:** the compositor no longer paints the whole scene
+  per frame. It retains the last buffer, last rects, and per-node paint
+  signatures; a changed frame computes the dirty union over the changed
+  nodes' OLD ∪ NEW bounds, blanks it in the retained buffer, repaints only
+  the nodes intersecting the union into a blank scratch frame, and copies the
+  union back (`copy_rect`) — cell-for-cell identical to a full repaint (the
+  consistency tests enforce this). An unchanged scene returns the retained
+  buffer as-is (a compositor-level no-op twin of the renderer's epoch fast
+  path); a full repaint happens only on a cold cache, viewport change, fresh
+  scene, or a dirty region covering >half the viewport. Instrumented
+  (`last_paint_mode` / `last_repainted_node_count`) so tests can prove a
+  one-cell mutation takes the dirty path and a resize the full path.
+- **Pushed dirty set (change detection):** the per-frame whole-tree
+  paint-signature walk is gone. `Scene` records the id of every node a
+  mutation touches, and `Compositor::paint_dirty` drains that set
+  (`Scene::take_dirty`) and collects/compares paint signatures only for the
+  pushed ids (`collect_paint_sigs_for`) — O(mutated) instead of O(nodes) per
+  frame. The all-node old-vs-new rect comparison stays as the repaint
+  region's correctness backbone, a raw `node_mut` borrow (unintrospecatable
+  by the scene) sets a force-full-scan flag that falls back to the whole-tree
+  walk, and a full paint consumes the set to keep it consistent — the pushed
+  set only narrows signature work, never gates the repaint decision. Measured
+  on the synthetic bench: single-cell frames −24.7% (TS) / −24.0% (Rust) p50
+  vs round 2 (≈ −50% cumulatively), no-change frames still ~0, requestFrame
+  burst still coalesces at ratio ~1.0 (`tools/bench/BASELINE.md` → "Round 3
+  after").
+
 ## [0.1.0] - 2026-08-02
 
 Initial release of tern: a Rust-native TUI renderer driven by React and SolidJS

@@ -56,8 +56,10 @@ Deno resolution):
 ```sh
 cd src/bindings/tern-node
 npm install
-npm run build        # napi build --platform && node fix-dts.mjs
+npm run build        # release default: napi build --platform --release && node fix-dts.mjs
 ```
+
+`npm run build:debug` is the fast local dev build (debug profile); `npm run build:release` is an explicit alias for the now-default release build.
 
 Use `npm install` (not `npm ci`) here: the `tern-node-<platform>` optional
 dependencies declared for the release strategy are not yet on the registry,
