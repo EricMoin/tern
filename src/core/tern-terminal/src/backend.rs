@@ -11,10 +11,17 @@
 //! (`\x1b[0m`) plus the run's exact style applied once, and the run's
 //! characters in a single `Print` call. Style state can never leak from one
 //! run to the next, and a run is closed by any style change or column gap.
+//! Within one flush, a run whose style equals the previously queued run's
+//! skips the redundant SGR reset/re-apply — the terminal's style state is
+//! already that style — and emits only its `MoveTo` and `Print`.
 //!
-//! Frame flush also carries the caret: [`flush_diff_with_cursor_to`] moves
-//! the terminal cursor to the frame's [`Cursor`] position and shows or hides
-//! it per its visibility, so the hardware caret tracks the model.
+//! An empty diff short-circuits the flush: when a frame paints nothing and
+//! the caret would be parked where the previous flush left it, nothing is
+//! queued or flushed; when only the park position moved, just the `MoveTo`
+//! is emitted (see [`flush_diff_to`]). The caret-aware frame flush carries
+//! the caret: [`flush_diff_with_cursor_to`] moves the terminal cursor to the
+//! frame's [`Cursor`] position and shows or hides it per its visibility, so
+//! the hardware caret tracks the model.
 
 use std::io::{self, Write};
 use std::sync::OnceLock;
@@ -39,10 +46,18 @@ use tern_core::style::{Modifiers, Style};
 
 /// The terminal backend.
 ///
-/// Stateless and cheap to copy: crossterm keeps the terminal state globally,
-/// so the backend just funnels method calls at it.
+/// Cheap to copy: crossterm keeps the terminal state globally, so the backend
+/// just funnels method calls at it. The single piece of frame-flush state is
+/// the last park position written by [`flush_diff`], which lets an empty diff
+/// that would park the caret in the same place skip the flush entirely (see
+/// [`flush_diff_to`]).
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Backend;
+pub struct Backend {
+    /// The park position written by the most recent non-skipped
+    /// [`flush_diff`] flush; `None` before the first flush. Drives the
+    /// empty-diff fast path in [`flush_diff_to`].
+    last_flush_pos: Option<(u16, u16)>,
+}
 
 /// The terminal's color capabilities, detected once at first use (see
 /// [`capabilities`]).
@@ -96,9 +111,11 @@ fn detect_capabilities() -> BackendCapabilities {
 }
 
 impl Backend {
-    /// A fresh backend.
+    /// A fresh backend, with no park position recorded yet.
     pub const fn new() -> Self {
-        Self
+        Self {
+            last_flush_pos: None,
+        }
     }
 
     /// Enter raw mode: disable line buffering and echo so the app receives
@@ -193,12 +210,13 @@ impl Backend {
     /// Flush a diff of [`CellUpdate`]s to stdout, then park the cursor at
     /// `cursor_pos` (column, row).
     ///
-    /// See [`flush_diff_to`] for the queueing semantics. This legacy variant
+    /// See [`flush_diff_to`] for the queueing semantics; its empty-diff fast
+    /// path is what makes consecutive no-op frames cheap. This legacy variant
     /// parks the caret without touching its visibility; the caret-aware frame
     /// flush is [`flush_diff_with_cursor`](Backend::flush_diff_with_cursor).
-    pub fn flush_diff(&self, updates: &[CellUpdate], cursor_pos: (u16, u16)) -> io::Result<()> {
+    pub fn flush_diff(&mut self, updates: &[CellUpdate], cursor_pos: (u16, u16)) -> io::Result<()> {
         let mut out = io::stdout();
-        flush_diff_to(&mut out, updates, cursor_pos)
+        flush_diff_to(&mut out, updates, cursor_pos, &mut self.last_flush_pos)
     }
 
     /// Flush a diff of [`CellUpdate`]s to stdout, then position the terminal
@@ -320,20 +338,49 @@ fn sq_dist(r1: u8, g1: u8, b1: u8, r2: u8, g2: u8, b2: u8) -> u32 {
 /// Updates are batched into runs (see [`queue_cells`]): for each run the
 /// cursor is moved to the run's first cell, the style is fully reset and
 /// re-applied once (fg color, bg color, modifier attributes), and the run's
-/// characters are printed in a single call. Masked continuation cells (NUL
-/// content) print as spaces to clear their column; zero-width combining
-/// marks print raw. The whole batch is queued and flushed once at the end.
+/// characters are printed in a single call — except that a run whose style
+/// equals the previously queued run's skips the redundant reset/re-apply,
+/// since the terminal's style state is already that style. Masked
+/// continuation cells (NUL content) print as spaces to clear their column;
+/// zero-width combining marks print raw. The whole batch is queued and
+/// flushed once at the end.
+///
+/// An empty diff short-circuits the flush. `last_flush_pos` records the park
+/// position written by the most recent non-skipped flush (starting `None`).
+/// When `updates` is empty and `last_flush_pos` already holds `cursor_pos`,
+/// nothing is queued and [`flush`](Write::flush) is not called — the frame
+/// is a no-op. When `updates` is empty but the park position differs (or was
+/// never recorded), only the `MoveTo` is queued and flushed, and
+/// `last_flush_pos` is updated. When `updates` is non-empty, the run-batched
+/// output below is emitted exactly as before and `last_flush_pos` is updated.
 pub fn flush_diff_to<W: Write>(
     w: &mut W,
     updates: &[CellUpdate],
     cursor_pos: (u16, u16),
+    last_flush_pos: &mut Option<(u16, u16)>,
 ) -> io::Result<()> {
+    if updates.is_empty() {
+        // No cells changed this frame. If the caret is already parked where
+        // the frame wants it, there is nothing to do — not even a flush. If
+        // only the park position moved (or was never recorded), emit the
+        // move alone: the style state is already clean from the previous
+        // flush and nothing is printed, so no style commands are needed.
+        if *last_flush_pos == Some(cursor_pos) {
+            return Ok(());
+        }
+        w.queue(MoveTo(cursor_pos.0, cursor_pos.1))?;
+        w.flush()?;
+        *last_flush_pos = Some(cursor_pos);
+        return Ok(());
+    }
     queue_cells(w, updates)?;
     w.queue(MoveTo(cursor_pos.0, cursor_pos.1))?;
     // Leave the terminal's style state clean for whatever prints next.
     w.queue(ResetColor)?;
     w.queue(SetAttribute(Attribute::Reset))?;
-    w.flush()
+    w.flush()?;
+    *last_flush_pos = Some(cursor_pos);
+    Ok(())
 }
 
 /// Flush a diff of [`CellUpdate`]s to any `Write` target, then position the
@@ -382,9 +429,18 @@ fn queue_cursor<W: Write>(w: &mut W, cursor: Cursor) -> io::Result<()> {
 /// Each run emits one [`MoveTo`] to its first cell, one SGR style application
 /// for the shared style, and all of the run's characters in one [`Print`]
 /// call (see [`Run`] for the exact batching rules). A style change or a
-/// non-adjacent cell starts a new run.
+/// non-adjacent cell starts a new run. The style of the most recently queued
+/// run is tracked across the batch: a run whose style equals it skips the
+/// SGR block entirely, because nothing between two runs (only `MoveTo` and
+/// `Print`) alters the terminal's style state. The first run of a flush
+/// always applies its full style block.
 fn queue_cells<W: Write>(w: &mut W, updates: &[CellUpdate]) -> io::Result<()> {
     let mut iter = updates.iter().peekable();
+    // The style fully applied by the most recently queued run, `None` before
+    // the first run of the flush so that run always emits its full style
+    // block. A run whose style equals this one skips the redundant SGR
+    // reset/re-apply (see [`Run::queue`]).
+    let mut last_style: Option<Style> = None;
     while let Some(first) = iter.next() {
         let mut run = Run::start(first);
         while let Some(next) = iter.peek() {
@@ -395,15 +451,16 @@ fn queue_cells<W: Write>(w: &mut W, updates: &[CellUpdate]) -> io::Result<()> {
                 break;
             }
         }
-        run.queue(w)?;
+        run.queue(w, &mut last_style)?;
     }
     Ok(())
 }
 
 /// A batched run of consecutive same-style [`CellUpdate`]s on one row: one
 /// [`MoveTo`] to the run's first cell, one SGR style application for the
-/// shared style, and every member's character printed in a single [`Print`]
-/// call.
+/// shared style (skipped when the previously queued run applied the same
+/// style — see [`Run::queue`]), and every member's character printed in a
+/// single [`Print`] call.
 ///
 /// Members occupy adjacent columns (`x` increases by 1 per member) and share
 /// one style. A run closes when the style, the row, or the column adjacency
@@ -458,14 +515,25 @@ impl Run {
 
     /// Queue the run's ANSI commands: one [`MoveTo`] to the first member,
     /// one SGR style application, then all characters in one [`Print`] call.
-    fn queue<W: Write>(&self, w: &mut W) -> io::Result<()> {
+    ///
+    /// `last_style` tracks the style fully applied by the most recently
+    /// queued run in this flush (initially `None`). When this run's style
+    /// equals it, the SGR block is skipped — only `MoveTo` and `Print` have
+    /// been emitted since, and neither alters the terminal's style state —
+    /// so the run's characters are queued directly. Otherwise (including the
+    /// first run of a flush) the full reset + style block is queued and
+    /// `last_style` is updated.
+    fn queue<W: Write>(&self, w: &mut W, last_style: &mut Option<Style>) -> io::Result<()> {
         w.queue(MoveTo(self.x, self.y))?;
-        // SGR 0 resets colors and attributes; then the run's exact style is
-        // applied once, so nothing leaks between runs.
-        w.queue(SetAttribute(Attribute::Reset))?;
-        queue_color(w, self.style.fg, true)?;
-        queue_color(w, self.style.bg, false)?;
-        queue_modifiers(w, self.style.modifiers)?;
+        if *last_style != Some(self.style) {
+            // SGR 0 resets colors and attributes; then the run's exact style
+            // is applied once, so nothing leaks between runs.
+            w.queue(SetAttribute(Attribute::Reset))?;
+            queue_color(w, self.style.fg, true)?;
+            queue_color(w, self.style.bg, false)?;
+            queue_modifiers(w, self.style.modifiers)?;
+            *last_style = Some(self.style);
+        }
         w.queue(Print(self.text.as_str()))?;
         Ok(())
     }
@@ -574,9 +642,13 @@ mod tests {
     use tern_core::style::Style;
 
     /// Run the diff flusher against an in-memory buffer and return the bytes.
+    /// Each call starts with an unknown prior park position, so the empty-diff
+    /// fast path never suppresses a single-shot flush.
     fn flush(updates: &[CellUpdate], cursor_pos: (u16, u16)) -> Vec<u8> {
         let mut out = Vec::new();
-        flush_diff_to(&mut out, updates, cursor_pos).expect("flush should succeed");
+        let mut last_flush_pos = None;
+        flush_diff_to(&mut out, updates, cursor_pos, &mut last_flush_pos)
+            .expect("flush should succeed");
         out
     }
 
@@ -716,7 +788,9 @@ mod tests {
 
     #[test]
     fn flush_diff_splits_runs_on_gap_and_style_change() {
-        // A non-adjacent column breaks the run even with the same style.
+        // A non-adjacent column breaks the run even with the same style: the
+        // second run still gets its own MoveTo, but its style equals the
+        // first run's, so the redundant SGR block is skipped.
         let gap = flush(
             &[
                 update(0, 0, 'a', Style::new(), 1, false),
@@ -726,11 +800,13 @@ mod tests {
         );
         let s = String::from_utf8(gap).unwrap();
         assert!(s.contains("\x1b[1;1H\x1b[0ma"), "got: {s:?}");
-        assert!(s.contains("\x1b[1;3H\x1b[0mb"), "got: {s:?}"); // own MoveTo
+        assert!(s.contains("\x1b[1;3Hb"), "got: {s:?}"); // own MoveTo, no SGR
+        assert!(!s.contains("\x1b[1;3H\x1b[0m"), "got: {s:?}");
 
         // A wide lead closes its run so the following masked continuation
         // cannot land on the wrong column: コ advances two columns, so the
-        // mask at (2,0) must be its own run with its own MoveTo.
+        // mask at (2,0) must be its own run with its own MoveTo. The mask
+        // run shares the lead's style, so it skips the SGR block too.
         let wide = flush(
             &[
                 update(0, 0, 'コ', Style::new(), 2, false), // wide lead
@@ -742,7 +818,158 @@ mod tests {
         let s = String::from_utf8(wide).unwrap();
         assert!(s.contains("\x1b[1;1H\x1b[0mコ"), "got: {s:?}"); // lead run
                                                                  // Mask and 'x' share one run at the mask's column: " x".
-        assert!(s.contains("\x1b[1;2H\x1b[0m x"), "got: {s:?}");
+        assert!(s.contains("\x1b[1;2H x"), "got: {s:?}");
+        assert!(!s.contains("\x1b[1;2H\x1b[0m"), "got: {s:?}");
+    }
+
+    #[test]
+    fn flush_diff_skips_sgr_between_same_style_runs() {
+        // Two runs separated by a column gap but sharing one style: the
+        // first run applies the full SGR block (reset + fg), the second
+        // emits only its MoveTo and characters — the terminal's style state
+        // is already correct. Exactly one reset+style sequence is emitted.
+        let fg1 = Style::new().fg(TernColor::Indexed(1));
+        let out = flush(
+            &[
+                update(0, 0, 'a', fg1, 1, false),
+                update(2, 0, 'b', fg1, 1, false),
+            ],
+            (0, 0),
+        );
+        let s = String::from_utf8(out).unwrap();
+        // One SGR reset for the first run plus the two trailing resets; the
+        // second run contributes no SGR at all.
+        assert_eq!(s.matches("\x1b[0m").count(), 3, "got: {s:?}");
+        // The style is applied exactly once, in the first run's block.
+        assert_eq!(s.matches("\x1b[38;5;1m").count(), 1, "got: {s:?}");
+        assert_eq!(
+            s, "\x1b[1;1H\x1b[0m\x1b[38;5;1ma\x1b[1;3Hb\x1b[1;1H\x1b[0m\x1b[0m",
+            "got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn flush_diff_reapplies_sgr_on_style_change_between_runs() {
+        // fg1 -> fg2 -> fg1 across three gapped runs: the middle run differs
+        // from the first, so it emits its own full block; the third run's
+        // style equals the FIRST's, but the terminal state after the middle
+        // run is fg2, so the third must re-apply its full block too — the
+        // merge tracks the most recently applied style, not any seen style.
+        let fg1 = Style::new().fg(TernColor::Indexed(1));
+        let fg2 = Style::new().fg(TernColor::Indexed(2));
+        let out = flush(
+            &[
+                update(0, 0, 'a', fg1, 1, false),
+                update(2, 0, 'b', fg2, 1, false),
+                update(4, 0, 'c', fg1, 1, false),
+            ],
+            (0, 0),
+        );
+        let s = String::from_utf8(out).unwrap();
+        // Each run emits its own SGR reset (3) plus the two trailing resets.
+        assert_eq!(s.matches("\x1b[0m").count(), 5, "got: {s:?}");
+        // fg1 is re-applied for the third run (terminal state is fg2 after
+        // the middle run); fg2 is applied once.
+        assert_eq!(s.matches("\x1b[38;5;1m").count(), 2, "got: {s:?}");
+        assert_eq!(s.matches("\x1b[38;5;2m").count(), 1, "got: {s:?}");
+        assert_eq!(
+            s,
+            "\x1b[1;1H\x1b[0m\x1b[38;5;1ma\x1b[1;3H\x1b[0m\x1b[38;5;2mb\x1b[1;5H\x1b[0m\x1b[38;5;1mc\x1b[1;1H\x1b[0m\x1b[0m",
+            "got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn empty_diff_with_same_park_writes_nothing() {
+        let mut out = Vec::new();
+        let mut last_flush_pos = None;
+        // Seed the recorded park position with a real frame at (2, 3).
+        flush_diff_to(
+            &mut out,
+            &[update(0, 0, 'x', Style::new(), 1, false)],
+            (2, 3),
+            &mut last_flush_pos,
+        )
+        .expect("flush should succeed");
+        assert!(!out.is_empty(), "seed flush should write cells");
+        out.clear();
+
+        // An empty diff parked at the recorded position: zero bytes written
+        // and no flush — the frame is a complete no-op.
+        flush_diff_to(&mut out, &[], (2, 3), &mut last_flush_pos).expect("flush should succeed");
+        assert!(out.is_empty(), "got: {:?}", out);
+    }
+
+    #[test]
+    fn empty_diff_with_moved_park_emits_only_move_to() {
+        let mut out = Vec::new();
+        let mut last_flush_pos = None;
+        flush_diff_to(
+            &mut out,
+            &[update(0, 0, 'x', Style::new(), 1, false)],
+            (0, 0),
+            &mut last_flush_pos,
+        )
+        .expect("flush should succeed");
+        out.clear();
+
+        // The park moved from (0, 0) to (5, 4): only the MoveTo (1-based row
+        // 5, column 6) is queued — no cells, no style commands.
+        flush_diff_to(&mut out, &[], (5, 4), &mut last_flush_pos).expect("flush should succeed");
+        assert_eq!(
+            String::from_utf8(out.clone()).unwrap(),
+            "\x1b[5;6H",
+            "got: {:?}",
+            out
+        );
+
+        // The new position is recorded, so the next empty frame parked at
+        // the same spot is suppressed again.
+        out.clear();
+        flush_diff_to(&mut out, &[], (5, 4), &mut last_flush_pos).expect("flush should succeed");
+        assert!(out.is_empty(), "got: {:?}", out);
+    }
+
+    #[test]
+    fn empty_diff_with_unknown_park_emits_move_to() {
+        // Before any flush the recorded park is unknown (`None`), so even an
+        // empty first frame must move the caret: (3, 1) -> row 4, column 2.
+        let mut out = Vec::new();
+        let mut last_flush_pos = None;
+        flush_diff_to(&mut out, &[], (3, 1), &mut last_flush_pos).expect("flush should succeed");
+        assert_eq!(
+            String::from_utf8(out.clone()).unwrap(),
+            "\x1b[2;4H",
+            "got: {:?}",
+            out
+        );
+        assert_eq!(last_flush_pos, Some((3, 1)));
+    }
+
+    #[test]
+    fn non_empty_diff_output_is_unchanged_and_records_park() {
+        // The run-batched output must be byte-identical to the pre-suppression
+        // behavior (mirrors `flush_diff_batches_adjacent_same_style_cells`),
+        // and the park position is recorded for the next frame.
+        let mut out = Vec::new();
+        let mut last_flush_pos = None;
+        flush_diff_to(
+            &mut out,
+            &[
+                update(0, 0, 'a', Style::new(), 1, false),
+                update(1, 0, 'b', Style::new(), 1, false),
+            ],
+            (0, 0),
+            &mut last_flush_pos,
+        )
+        .expect("flush should succeed");
+        assert_eq!(
+            String::from_utf8(out.clone()).unwrap(),
+            "\x1b[1;1H\x1b[0mab\x1b[1;1H\x1b[0m\x1b[0m",
+            "got: {:?}",
+            out
+        );
+        assert_eq!(last_flush_pos, Some((0, 0)));
     }
 
     /// Flush the caret state against an in-memory buffer and return the bytes.
