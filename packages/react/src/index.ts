@@ -48,6 +48,11 @@
  *   `useResize(handler)` subscribes to terminal resize events, re-invoking
  *   `renderer.render()` after each so the compositor re-lays out at the new
  *   terminal size.
+ *   `useWheelScroll(viewRef)` maps wheel events onto a scrollable view's
+ *   offsets; `useSelection()` wires mouse-drag text selection onto the
+ *   renderer's native selection overlay (the core
+ *   `startSelection` / `dragSelection` / `endSelection` / `copySelection`
+ *   helpers — double-click word select, copy-on-release).
  *
  * See `./reconciler.ts` for the HostConfig mapping table.
  */
@@ -65,11 +70,14 @@ import {
   type RefObject,
 } from "react";
 import {
+  copySelection,
   defaultTheme,
   dragPanels,
+  dragSelection,
   editKey,
   editTextareaKey,
   endPanelDrag,
+  endSelection,
   focusAt,
   focusManager,
   mergeTheme,
@@ -78,6 +86,7 @@ import {
   resolveTheme,
   selectKey,
   setStreamAutoScroll,
+  startSelection,
   startPanelDrag,
   syncStreamTail,
   tabsKey,
@@ -1254,6 +1263,49 @@ export function useWheelScroll(viewRef: RefObject<Node | null>): void {
 }
 
 /**
+ * Wire mouse-drag text selection for the renderer (roadmap Phase 5). The
+ * core selection module is a per-renderer state machine over the native
+ * selection overlay:
+ *
+ * - a `down_left` press anchors a selection session at the pressed cell
+ *   ({@link startSelection}) — a second press on a nearby cell within
+ *   `SELECTION_DOUBLE_CLICK_MS` ms is treated as a double-click and selects
+ *   the word under the pointer instead;
+ * - each `drag_left` moves the active endpoint to the dragged cell,
+ *   extending the selection rect ({@link dragSelection});
+ * - any `up_*` release copies the selected text to the clipboard and ends
+ *   the session ({@link copySelection} before {@link endSelection} —
+ *   copy-on-release: the overlay is clear-on-release, so the text must be
+ *   read while the gesture is still active; with no active session the copy
+ *   is an empty write, a harmless no-op).
+ *
+ * The native overlay paints at the next `render()`, so every applied step
+ * re-renders the scene (a `down_left` that starts a session, a `drag_left`
+ * that extends it, an `up_*` that ends it); non-mouse events fall through
+ * untouched. The subscription is torn down when the component unmounts.
+ * Hosts that want a copy *key* can route the core {@link selectionKey}
+ * (ctrl+shift+c) through `useInput`.
+ */
+export function useSelection(): void {
+  const { renderer } = useApp();
+
+  useEffect(() => {
+    return renderer.onMouse((event) => {
+      if (event.kind === "down_left") {
+        if (startSelection(renderer, event) !== null) renderer.render();
+      } else if (event.kind === "drag_left") {
+        if (dragSelection(renderer, event) !== null) renderer.render();
+      } else if (event.kind.startsWith("up_")) {
+        // Copy-on-release before the clear: `endSelection` clears the
+        // overlay, so the text must be read while the gesture is active.
+        copySelection(renderer);
+        if (endSelection(renderer, event) !== null) renderer.render();
+      }
+    });
+  }, [renderer]);
+}
+
+/**
  * Wire click-to-focus for the current tree: every `down_left` press on a
  * painted cell focuses the topmost registered focusable node under the
  * cursor (the core `focusAt` helper — `Renderer.hit_test` gates the press to
@@ -1310,6 +1362,7 @@ export type {
   ResizeHandler,
   SelectOption,
   SelectState,
+  SelectionRange,
   Span,
   StatusBarSegment,
   TabSpec,
@@ -1329,11 +1382,14 @@ export {
   activateTab,
   closeTab,
   closeModal,
+  copySelection,
   defaultTheme,
   dragPanels,
+  dragSelection,
   editKey,
   editTextareaKey,
   endPanelDrag,
+  endSelection,
   focusAt,
   focusManager,
   followTail,
@@ -1350,8 +1406,12 @@ export {
   scrollToBottom,
   scrollTop,
   selectKey,
+  selectWordAt,
+  SELECTION_DOUBLE_CLICK_MS,
+  selectionKey,
   setProgress,
   startPanelDrag,
+  startSelection,
   STREAM_AFFORDANCE_CHAR,
   syncStreamTail,
   tableKey,
