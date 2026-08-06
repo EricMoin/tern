@@ -63,6 +63,11 @@
  * and `subscribeFocusTraversal` wires a renderer's Tab / Shift+Tab keys to
  * the focus manager's `next()` / `prev()` traversal, skipping an exclude list
  * (the Solid-flavored `useFocusTraversal` equivalent).
+ * `subscribeWheelScroll` maps wheel events onto a scrollable view's offsets,
+ * and `subscribeSelection` wires mouse-drag text selection onto the
+ * renderer's native selection overlay (the core `startSelection` /
+ * `dragSelection` / `endSelection` / `copySelection` helpers — double-click
+ * word select, copy-on-release).
  * `startSpinner` drives a spinner node's frame ticks with a focus-aware
  * timer — pausing while the terminal is unfocused, resuming on regain (the
  * `@tern/react` `<Spinner>` effect equivalent, roadmap Phase 2).
@@ -89,13 +94,17 @@ import {
   Tabs as TernTabs,
   Text as TernText,
   Textarea as TernTextarea,
+  copySelection,
   defaultTheme,
   dragPanels,
+  dragSelection,
   editTextareaKey,
   endPanelDrag,
+  endSelection,
   focusAt,
   focusManager,
   startPanelDrag,
+  startSelection,
   type FocusManager,
   mergeTheme,
   pasteIntoTextarea,
@@ -163,6 +172,7 @@ export type {
   SelectOption,
   SelectProps,
   SelectState,
+  SelectionRange,
   Span,
   SpinnerProps,
   StatusBarProps,
@@ -188,11 +198,14 @@ export {
   closeModal,
   closeTab,
   collapsePanel,
+  copySelection,
   defaultTheme,
   dragPanels,
+  dragSelection,
   editKey,
   editTextareaKey,
   endPanelDrag,
+  endSelection,
   expandPanel,
   focusAt,
   followTail,
@@ -211,8 +224,12 @@ export {
   scrollToBottom,
   scrollTop,
   selectKey,
+  selectWordAt,
+  SELECTION_DOUBLE_CLICK_MS,
+  selectionKey,
   setProgress,
   startPanelDrag,
+  startSelection,
   STREAM_AFFORDANCE_CHAR,
   syncStreamTail,
   tableKey,
@@ -1199,6 +1216,43 @@ export function subscribePanelDrag(
 export function subscribeWheelScroll(renderer: Renderer, view: Node): () => void {
   return renderer.onMouse((event) => {
     if (wheelScroll(view, event)) renderer.render();
+  });
+}
+
+/**
+ * Subscribe a renderer's mouse events to text selection — the Solid-flavored
+ * `useSelection` equivalent (the Solid counterpart of `subscribePanelDrag` /
+ * `subscribeWheelScroll`; Solid has no React-style context, so the renderer
+ * is an explicit argument).
+ *
+ * The core selection module is a per-renderer state machine over the native
+ * selection overlay: a `down_left` press anchors a session at the pressed
+ * cell (`startSelection` — a second press on a nearby cell within
+ * `SELECTION_DOUBLE_CLICK_MS` ms is a double-click and selects the word
+ * under the pointer), each `drag_left` extends the selection to the dragged
+ * cell (`dragSelection`), and any `up_*` release copies the selected text
+ * to the clipboard and ends the session (`copySelection` before
+ * `endSelection` — copy-on-release: the overlay is clear-on-release, so the
+ * text must be read while the gesture is still active). The native overlay
+ * paints at the next `render()`, so every applied step re-invokes
+ * `renderer.render()`; non-mouse events fall through untouched. Hosts that
+ * want a copy *key* can route the core `selectionKey` (ctrl+shift+c)
+ * through `subscribeInput`.
+ *
+ * Returns a disposer that unsubscribes.
+ */
+export function subscribeSelection(renderer: Renderer): () => void {
+  return renderer.onMouse((event) => {
+    if (event.kind === "down_left") {
+      if (startSelection(renderer, event) !== null) renderer.render();
+    } else if (event.kind === "drag_left") {
+      if (dragSelection(renderer, event) !== null) renderer.render();
+    } else if (event.kind.startsWith("up_")) {
+      // Copy-on-release before the clear: `endSelection` clears the
+      // overlay, so the text must be read while the gesture is active.
+      copySelection(renderer);
+      if (endSelection(renderer, event) !== null) renderer.render();
+    }
   });
 }
 

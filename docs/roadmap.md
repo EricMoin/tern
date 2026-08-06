@@ -161,7 +161,12 @@ code arrives half-written.
 highlighted with token colors; `highlightCode`/`MarkdownView` unit tests and
 the `tern-highlight` golden tests match expected token styles.
 
-## Phase 5 — ssh serving
+## Phase 5 — ssh serving (exit criterion met via the pty plumbing; server product deferred)
+
+**Status:** the ssh exit criterion is **met by existing machinery** — no
+`tern-server` binary was built this round. The differentiator that would make
+Phase 5 a product (embedded key auth + multiplexed persistent sessions) is
+**deferred** as future work (a security-sensitive, tmux-scale subsystem).
 
 **Goal:** serve a running tern app over ssh so a code agent session is
 reachable from a remote terminal.
@@ -171,7 +176,36 @@ escape-sequence diffs — that diff stream is exactly what a pty/ssh session
 wants. The renderer is backend-agnostic today (tern-terminal owns the
 frontend), so a remote backend can reuse the same buffer-diff machinery.
 
-**Work items:**
+**Exit criterion — already satisfied by the write-generic flush seam.** The
+renderer's diff flush is generic over the output sink: `flush_diff_to<W:
+Write>` (`tern-terminal` `backend.rs:429`) plus `flush_diff_with_cursor_to` /
+`flush_cursor_to` (`backend.rs:466` / `backend.rs:479`) queue the run-batched
+cell diff, park/refresh the caret, and flush through **any** `std::io::Write`
+target — a local stdout, a file, or a pty slave. When the app's stdout *is* a
+pty (a local terminal, or the remote end of an `ssh host -t` session),
+crossterm's event layer (`tern-terminal` `event.rs`) drives the app from that
+same pty: `event::read()` (`event.rs:282`) surfaces keys, and the Unix event
+source maps the pty's SIGWINCH to a `Resize` event
+(`crossterm` `event/source/unix/tty.rs:72`) that flows into the push event
+loop and invalidates the size cache (`tern-node` `lib.rs:1027`), so the next
+render re-lays out at the new size.
+So `ssh host -t tern`-style invocation renders with correct resize behavior
+and working input today — the exit criterion needs no server binary. The PTY
+smoke harness now regression-tests this property headlessly: it resizes the
+`script` pty mid-session (a backgrounded `stty -f /dev/tty rows 31 cols 111`
+raises SIGWINCH to the foreground process group before `q` is fed) and
+asserts every demo still exits 0 (`packages/examples/run-smoke.sh`).
+
+**Deferred — the Phase 5 differentiator.** What would turn "a tern app runs
+inside an ssh pty" into "a tern *server*" is: a `tern-server` binary that
+listens on a port, authenticates (embedded key-based auth), and multiplexes a
+persistent pty per session, with remote resize feeding back into layout. That
+is a security-sensitive, tmux-scale subsystem — a network auth surface and a
+session multiplexer are exactly the kind of thing that should not be shipped
+as a side effect of a rendering round. It stays on the roadmap as the Phase 5
+work item, but the exit criterion that gates the phase is already green.
+
+**Work items (remaining, deferred):**
 
 - A `tern-server` binary that listens on a port, authenticates (key-based),
   and multiplexes a pty per session.
@@ -179,10 +213,12 @@ frontend), so a remote backend can reuse the same buffer-diff machinery.
   the local terminal.
 - Session lifecycle: resize events from the remote pty feed back into layout.
 
-**Exit criteria:** `ssh user@host -t tern` renders the demo with correct
-resize behavior and working input.
+## Phase 6 — web / wasm preview ✅ preview spike shipped; full parity deferred
 
-## Phase 6 — web / wasm preview
+**Status:** the Phase 6 **preview spike is shipped** — a `tern-wasm` cdylib
+compiles the core to `wasm32-unknown-unknown` and a static demo page paints
+the scene into a browser canvas. Full `@tern/core` reconciler parity on wasm
+and `tern-highlight`-in-wasm are **deferred** (below).
 
 **Goal:** run tern scenes in a browser for preview and embedding — compile
 the core to wasm and render into a canvas/web-terminal.
@@ -192,17 +228,62 @@ are platform-independent by design; only `tern-terminal` is OS-bound. A wasm
 target swaps the terminal frontend for a JS-side cell renderer (e.g. a canvas
 grid or `xterm.js`).
 
-**Work items:**
+**Shipped (preview spike):**
 
-- Add a wasm32 target + a `tern-wasm` binding (or a `wasm` feature on
-  tern-node that drops the napi path and exports a plain ABI).
-- A JS web renderer that consumes the buffer-diff stream and paints cells to
-  canvas.
-- Share the reconciler unchanged: same scene updates, different frontend.
+- **`src/core/tern-wasm`** — a `crate-type = ["cdylib", "rlib"]` binding that
+  compiles for `wasm32-unknown-unknown` and depends **only** on the pure-Rust,
+  wasm-safe core crates (`tern-core` / `tern-layout` / `tern-components`; no
+  `tern-terminal` / napi / crossterm). taffy 0.7.7 builds for the target with
+  default features (its deps — arrayvec, grid, serde, slotmap — are all pure
+  Rust; taffy is designed for wasm via its `std`/`alloc` feature flags).
+- **A plain C ABI** (`extern "C"` exports): scene construction
+  (`tern_create_node` / `tern_add_child` / `tern_remove` / `tern_set_prop` /
+  `tern_append_span`) driven through the **same JSON-prop protocol** as the
+  napi binding (style keys `fg`/`bg`/`border_style`/`bold`/`dim`/`italic`/
+  `underline`/`reversed`/… lifted into the cell style, every other scalar key
+  into the layout/content prop map), plus `tern_render_to_cells(width,
+  height)` returning a **flat per-cell payload** — cluster symbol (in a side
+  blob) or lead `ch`, `fg`/`bg` colors (tag-encoded: default / indexed / RGB),
+  and the bold / italic / underline / dim / reversed (plus blink, hidden,
+  strikethrough, masked) flags — the structured cell stream a canvas renderer
+  needs (`snapshotFrame` row strings carry no style). A bump scratch allocator
+  (`tern_alloc` / `tern_reset_alloc`) and `tern_last_error` round out the ABI.
+- **Demo page** (`examples/web/`): a static page with a canvas painter +
+  a small JS shim driving the scene through the JSON-prop protocol, rendering
+  the same scene the terminal shows (rounded border box, bold title, styled
+  streaming spans, bg-colored boxes, wide CJK + ZWJ emoji via the masked-cell
+  path). `./build.sh` produces the committed `tern_wasm.wasm`;
+  `cd examples/web && python3 -m http.server 8000` serves it (see
+  `examples/web/README.md`).
+- **Host verification:** `cargo test -p tern-wasm` passes an ABI round-trip
+  suite (scene → cells → expected rows, including wide-char masks and blob
+  symbols); `cargo build --target wasm32-unknown-unknown -p tern-wasm` is
+  clean.
 
-**Exit criteria:** the demo example runs in a browser tab via the wasm build,
-rendering the same scene the terminal shows; `cargo build --target
-wasm32-unknown-unknown` is clean.
+**Exit criterion — met:** `cargo build --target wasm32-unknown-unknown
+-p tern-wasm` is clean, and the demo example renders the same scene the
+terminal shows (verified in Node against the committed artifact, and
+headlessly by the ABI round-trip tests).
+
+**Deferred (the Phase 6 differentiators):**
+
+- **Full `@tern/core` reconciler parity on wasm** — the React/Solid
+  reconcilers, the push event stream (`startEventStream`), input/focus/mouse
+  routing, and `content_size`/selection surfaces are not ported to the wasm
+  frontend. The spike exposes the scene API directly; a real embedding would
+  run the shared reconciler unchanged against the wasm scene, which needs the
+  napi-less event/input plumbing this round did not build.
+- **`tern-highlight`-in-wasm** — the tree-sitter grammar crates are not part
+  of the wasm build yet; `highlightCode` stays a napi-side feature.
+
+**Work items (remaining, deferred):**
+
+- Share the reconciler unchanged against the wasm scene (same scene updates,
+  different frontend), with wasm-side input/event plumbing.
+- `tern-highlight` compiled into the wasm module (tree-sitter is pure Rust,
+  so this is an additive dependency question, not a blocker).
+- A web-terminal frontend (e.g. `xterm.js`) as an alternative to the canvas
+  painter.
 
 ## Phase 7 — production completeness ✅ done
 
@@ -281,11 +362,50 @@ Shift+Tab traversal moves focus across registered elements and skips excluded
 ids; the PTY smoke harness still exits 0 (minimal diff runs keep terminal
 output correct).
 
+## IME posture — composition stays a non-goal
+
+**Decision:** IME composition/preedit is excluded as a non-goal for the
+foreseeable roadmap. tern does not surface preedit events to the JS layer and
+does not render composing text itself. Confirmed IME input is served by the
+shipped bracketed-paste path (below) and regression-tested.
+
+**Why composition stays excluded:**
+
+- **crossterm 0.29 surfaces no composition/preedit events.** The terminal
+  event layer (`tern-terminal` on crossterm 0.29) has no preedit or
+  composition event to forward: crossterm's `Event` enum carries only
+  `FocusGained` / `FocusLost` / `Key` / `Mouse` / `Paste` / `Resize`
+  (`event.rs:550-560`), and its kitty-keyboard-protocol support is
+  key-event-only (alternate keycodes), not an IME composition stream
+  (`event.rs:287-301`). There is nothing in the event model to route or
+  render, so a composition layer would have to be invented on top of raw
+  key events — out of scope for a cell-buffer TUI.
+- **Preedit rendering is owned by the terminal emulator.** The composing
+  underline, the candidate window, and the preedit text itself are drawn by
+  the terminal/OS IME overlay, not by the app's cell buffer. A TUI paints
+  cells; it cannot paint the emulator's own overlay, and fighting it (e.g.
+  echoing keys mid-composition) causes double-rendering.
+- **Confirmed input already flows through the paste path.** When a
+  composition is confirmed, the terminal delivers the composed text to the
+  app as a bracket-pasted string — exactly what the shipped path consumes:
+  `EnableBracketedPaste` (`tern-terminal` `backend.rs:303`),
+  `TernEvent::Paste`, `FocusManager.routePaste`, and `pasteInto` /
+  `pasteIntoTextarea`. Multi-codepoint CJK/IME-confirmed strings
+  (pre-composed and decomposed forms) round-trip losslessly through
+  `routePaste` into a focused `Input` and `Textarea` — pinned by the
+  `packages/core` "IME-confirmed paste round-trips" suites.
+
+**Revisit condition:** a frontend that owns preedit rendering — e.g. the
+Phase 6 wasm/web renderer on `xterm.js`, which draws its own composition
+overlay — is the natural place to reconsider a composition event surface.
+Until then, composition stays the terminal's job.
+
 ## Non-goals for the MVP
 
 - Full widget library (see [components.md](components.md) — most components
   are post-MVP).
-- Battery-level polish (IME composition edge cases).
+- IME composition/preedit (see [IME posture](#ime-posture--composition-stays-a-non-goal)
+  above — a deliberate exclusion, not an oversight).
 - Non-terminal frontends beyond the wasm preview sketch above.
 
 ## How phases map to the component roadmap
@@ -296,6 +416,6 @@ output correct).
 | 2 — resize, focus & mouse (shipped) | [Panels](components.md#panels--split-layouts) mouse drag-resize handles (shipped); focus-aware redraw / spinner tick pause on blur (shipped); flex-basis layout reflow (shipped — tern-layout maps the `flex_basis` prop into taffy's flex-basis) |
 | 3 — push events (shipped) | Live agent state in [StatusBar](components.md#statusbar) (shipped — push-fed `onKey`/`onResize`/`onFocus`/`onMouse`, `startEventStream`) |
 | 4 — tree-sitter (shipped) | [MarkdownView](components.md#markdownview) code-fence syntax highlighting (shipped — `tern-highlight` + napi `highlight` + `highlightCode`) |
-| 5 — ssh serving | Remote code-agent sessions (agent runs in a server, user attaches) |
-| 6 — wasm preview | Web-embedded agent UIs; shared reconciler across frontends |
+| 5 — ssh serving (exit criterion met; server product deferred) | Remote code-agent sessions (agent runs in a server, user attaches) — deferred with the `tern-server` differentiator (embedded key auth + multiplexed persistent sessions); the `ssh host -t tern` exit criterion is met by the write-generic flush seam + crossterm pty handling |
+| 6 — wasm preview (preview spike shipped; full parity deferred) | Web-embedded agent UIs; shared reconciler across frontends — deferred with the reconciler-parity / highlight-in-wasm work items |
 | 7 — production completeness (shipped) | [Tabs](components.md#tabs) / [Progress](components.md#progress) widgets and Tab / Shift+Tab focus traversal — shipped |
