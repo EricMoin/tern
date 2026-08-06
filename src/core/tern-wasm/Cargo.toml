@@ -1,0 +1,22 @@
+[package]
+name = "tern-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tern wasm: C-ABI preview binding compiling the core scene renderer to wasm32-unknown-unknown"
+
+[lib]
+# cdylib is what the wasm build produces (the .wasm artifact with the exported
+# C ABI); rlib additionally lets the host `cargo test -p tern-wasm` harness
+# link the same code for the ABI round-trip test.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tern-core = { path = "../tern-core" }
+tern-layout = { path = "../tern-layout" }
+tern-components = { path = "../tern-components" }
+# The JSON-prop protocol (the same props objects the napi binding accepts,
+# see src/bindings/tern-node) crosses the C ABI as JSON strings; serde_json is
+# pure Rust and wasm-safe.
+serde_json = "1"

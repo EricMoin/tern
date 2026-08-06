@@ -17,6 +17,7 @@ import {
   FocusManager,
   MODAL_Z_INDEX,
   STREAM_AFFORDANCE_CHAR,
+  SELECTION_DOUBLE_CLICK_MS,
   closeModal,
   createRenderer,
   focusManager,
@@ -25,11 +26,13 @@ import {
   openModal,
   scrollTo,
   scrollToBottom,
+  setSelectionClockForTesting,
   useFocus as coreUseFocus,
   type KeyEvent,
   type Node,
   type Renderer,
   type ResizeHandler,
+  type SelectionRange,
   type Span,
   type TernEventJs,
 } from "@tern/core";
@@ -73,6 +76,7 @@ import {
   usePanelMouseDrag,
   usePaste,
   useResize,
+  useSelection,
   useTheme,
   useWheelScroll,
   version,
@@ -165,6 +169,7 @@ Deno.test("public API surface is exported", () => {
     useFocusManager,
     useFocusTraversal,
     useResize,
+    useSelection,
     createRoot,
     render,
     useApp,
@@ -1379,6 +1384,19 @@ let dragFakeHitPath: bigint[] = [7n];
 /** Render calls recorded by the drag-test fake renderer's `render()`. */
 const dragFakeRenders: number[] = [];
 
+/** The frame the drag-test fake paints on render — the stand-in for the
+ * native retained buffer that `selection_text` / `selection_word_range`
+ * read (the same "hello world" frame the core selection tests paint). */
+const selectionFakeRows = ["hello world", "second line"];
+
+/** The selection overlay state of the drag-test fake (mirrors the real
+ * per-renderer native selection: the inclusive cell rect, or `null` when
+ * no selection is set). */
+let dragFakeSelection: { col1: number; row1: number; col2: number; row2: number } | null = null;
+
+/** The last text the drag-test fake pushed to the clipboard (OSC 52). */
+let lastSelectionClipboard: string | null = null;
+
 /** Dispatch a mouse event to the renderer's push stream callback. */
 function dispatchMouseEvent(kind: string, column: number, row: number): void {
   dispatchEvent({
@@ -1456,6 +1474,12 @@ const streamFakeAddon = {
  * `dispatchEvent`). */
 class DragFakeTuiRenderer {
   destroyed = false;
+  /** The selection overlay: the inclusive cell rect, or `null` when no
+   * selection is set (mirrors the real per-renderer native selection). */
+  selection: { col1: number; row1: number; col2: number; row2: number } | null = null;
+  /** The rows of the last painted frame — the fake's stand-in for the
+   * native retained buffer `selection_text` / `selection_word_range` read. */
+  lastRows: string[] | null = null;
   constructor(_options: unknown) {}
   root(): unknown {
     return new FakeStreamNodeHandle("box");
@@ -1470,6 +1494,50 @@ class DragFakeTuiRenderer {
   }
   render(): void {
     dragFakeRenders.push(1);
+    this.lastRows = [...selectionFakeRows];
+  }
+  set_selection(col1: number, row1: number, col2: number, row2: number): void {
+    this.selection = { col1, row1, col2, row2 };
+    dragFakeSelection = this.selection;
+  }
+  clear_selection(): void {
+    this.selection = null;
+    dragFakeSelection = null;
+  }
+  set_clipboard(text: string): void {
+    lastSelectionClipboard = text;
+  }
+  /** The text of the current selection, extracted from the last painted
+   * rows (mirrors the core fake: row-major, rows joined with `'\n'`). */
+  selection_text(): string {
+    if (this.selection === null || this.lastRows === null) return "";
+    const { col1, row1, col2, row2 } = this.selection;
+    const x0 = Math.min(col1, col2);
+    const y0 = Math.min(row1, row2);
+    const x1 = Math.max(col1, col2);
+    const y1 = Math.max(row1, row2);
+    const lines: string[] = [];
+    for (let y = y0; y <= y1; y++) {
+      const row = this.lastRows[y] ?? "";
+      let line = "";
+      for (let x = x0; x <= x1; x++) line += row[x] ?? " ";
+      lines.push(line);
+    }
+    return lines.join("\n");
+  }
+  /** The inclusive cell range of the contiguous non-space run containing
+   * (`col`, `row`) in the last painted rows, or `null` when the cell is a
+   * space (or out of bounds, or nothing painted yet). */
+  selection_word_range(col: number, row: number): SelectionRange | null {
+    if (this.lastRows === null) return null;
+    const rowStr = this.lastRows[row];
+    if (rowStr === undefined || col >= rowStr.length) return null;
+    if (rowStr[col] === " ") return null;
+    let left = col;
+    while (left > 0 && rowStr[left - 1] !== " ") left--;
+    let right = col;
+    while (right + 1 < rowStr.length && rowStr[right + 1] !== " ") right++;
+    return { col1: left, row1: row, col2: right, row2: row };
   }
   destroy(): void {
     this.destroyed = true;
@@ -3025,5 +3093,139 @@ Deno.test("useClickToFocus focuses the topmost registered node on a down_left an
     fakeDragSizes.clear();
     focusManager.blur();
     focusManager.unregister("probe");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Mouse selection (useSelection)
+//
+// The hook subscribes to the renderer's mouse events over the selection-aware
+// drag-test fake (`set_selection` / `clear_selection` / `selection_text` /
+// `selection_word_range` / `set_clipboard` record into the module-level
+// `dragFakeSelection` / `lastSelectionClipboard`, and `render()` paints the
+// `selectionFakeRows` frame the text/word reads draw from): a `down_left`
+// anchors the selection and re-renders (paints the overlay), a `drag_left`
+// extends it, and an `up_*` release copies the selected text
+// (copy-on-release) before clearing the overlay; a double-click (a second
+// press on a nearby cell within SELECTION_DOUBLE_CLICK_MS ms) selects the
+// word under the pointer instead; non-mouse events fall through; the
+// subscription is torn down on unmount.
+// ---------------------------------------------------------------------------
+
+/** A `useSelection` probe: wires the selection state machine onto the
+ * renderer from the tree context. */
+function SelectionProbe(): ReturnType<typeof createElement> {
+  useSelection();
+  return createElement(Box);
+}
+
+/** Assert the drag-test fake's selection overlay equals `expected` (or is
+ * `null` when the selection must be cleared). */
+function assertDragSelection(
+  actual: { col1: number; row1: number; col2: number; row2: number } | null,
+  expected: { col1: number; row1: number; col2: number; row2: number } | null,
+): void {
+  if (expected === null) {
+    if (actual !== null) throw new Error(`selection = ${JSON.stringify(actual)}, expected null`);
+    return;
+  }
+  if (actual === null) throw new Error(`selection = null, expected ${JSON.stringify(expected)}`);
+  if (actual.col1 !== expected.col1 || actual.row1 !== expected.row1 ||
+      actual.col2 !== expected.col2 || actual.row2 !== expected.row2) {
+    throw new Error(`selection = ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`);
+  }
+}
+
+Deno.test("useSelection wires the core selection state machine (down/drag/up, copy-on-release, double-click word select)", async () => {
+  setAddonForTesting(dragFakeAddon);
+  try {
+    const renderer = createRenderer();
+    renderer.startEventStream();
+    const ternRoot = createRoot(renderer);
+
+    await act(() => {
+      ternRoot.render(createElement(SelectionProbe));
+    });
+    await act(() => {}); // flush the mount effect (mouse subscription)
+
+    // The reconciler's commit phases call renderer.render(); reset the spy so
+    // the assertions below count only the selection wiring's re-renders.
+    dragFakeRenders.length = 0;
+    if (SELECTION_DOUBLE_CLICK_MS !== 500) {
+      throw new Error(`SELECTION_DOUBLE_CLICK_MS = ${SELECTION_DOUBLE_CLICK_MS}`);
+    }
+
+    const emit = (kind: string, column: number, row: number): void => {
+      dispatchMouseEvent(kind, column, row);
+    };
+    const sel = (): { col1: number; row1: number; col2: number; row2: number } | null => dragFakeSelection;
+    // Read through a function: TS control-flow narrowing would otherwise pin
+    // the values to the literals of the first assertions.
+    const clipboard = (): string | null => lastSelectionClipboard;
+    const renderCount = (): number => dragFakeRenders.length;
+
+    // A down_left anchors a 1-cell selection and re-renders (paints the
+    // overlay at the next frame).
+    emit("down_left", 6, 0);
+    assertDragSelection(sel(), { col1: 6, row1: 0, col2: 6, row2: 0 });
+    if (renderCount() !== 1) throw new Error(`a down must re-render (renders = ${renderCount()})`);
+
+    // A drag_left extends the selection to the dragged cell.
+    emit("drag_left", 10, 0);
+    assertDragSelection(sel(), { col1: 6, row1: 0, col2: 10, row2: 0 });
+    if (renderCount() !== 2) throw new Error(`a drag must re-render (renders = ${renderCount()})`);
+
+    // An up_* release copies the selected text (copy-on-release) and clears
+    // the overlay (clear-on-release) — the transient highlight leaves no
+    // reversed cells after the gesture.
+    emit("up_left", 10, 0);
+    if (clipboard() !== "world") throw new Error(`copy-on-release = ${JSON.stringify(clipboard())}`);
+    assertDragSelection(sel(), null);
+    if (renderCount() !== 3) throw new Error(`an up must re-render (renders = ${renderCount()})`);
+
+    // A non-mouse event falls through: no selection, no re-render.
+    const rendersBefore = renderCount();
+    dispatchEvent({ type: "key", key: { name: "char", char: "q", ctrl: false, alt: false, shift: false } });
+    assertDragSelection(sel(), null);
+    if (renderCount() !== rendersBefore) throw new Error("a key event must not re-render");
+
+    // A double-click (a second press on a nearby cell within the window)
+    // selects the word under the pointer instead of a 1-cell selection.
+    setSelectionClockForTesting(() => 1000);
+    emit("down_left", 6, 0); // 'w' of "world"
+    emit("up_left", 6, 0);
+    setSelectionClockForTesting(() => 1400); // +400 ms, inside the window
+    emit("down_left", 6, 0);
+    assertDragSelection(sel(), { col1: 6, row1: 0, col2: 10, row2: 0 });
+    emit("up_left", 6, 0);
+
+    // A press two cells away is not a double-click even inside the window.
+    setSelectionClockForTesting(() => 2000);
+    emit("down_left", 6, 0);
+    emit("up_left", 6, 0);
+    setSelectionClockForTesting(() => 2300); // +300 ms, but 2 cells away
+    emit("down_left", 8, 0);
+    assertDragSelection(sel(), { col1: 8, row1: 0, col2: 8, row2: 0 });
+    emit("up_left", 8, 0);
+
+    // Unmount tears the subscription down: events no longer route.
+    await act(() => {
+      ternRoot.unmount();
+    });
+    const rendersAfterUnmount = renderCount();
+    emit("down_left", 1, 0);
+    assertDragSelection(sel(), null);
+    if (renderCount() !== rendersAfterUnmount) {
+      throw new Error(`a disposed subscription must not select (renders = ${renderCount()})`);
+    }
+  } finally {
+    setAddonForTesting(null);
+    streamCallback = null;
+    dragFakeHitPath = [7n];
+    dragFakeRenders.length = 0;
+    dragFakeSelection = null;
+    lastSelectionClipboard = null;
+    fakeDragSizes.clear();
+    setSelectionClockForTesting(() => Date.now());
   }
 });

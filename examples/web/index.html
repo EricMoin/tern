@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>tern wasm preview</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #101014;
+      color: #d7d7d7;
+      font: 13px/1.5 system-ui, sans-serif;
+    }
+    h1 { font-size: 16px; margin: 0 0 4px; }
+    p.sub { margin: 0 0 16px; color: #8a8a93; }
+    #stage {
+      border: 1px solid #2c2c34;
+      border-radius: 6px;
+      display: inline-block;
+      padding: 4px;
+      background: #151515;
+      image-rendering: pixelated;
+    }
+    canvas { display: block; border-radius: 4px; }
+    #status { margin-top: 12px; color: #6f6f78; font: 12px monospace; }
+  </style>
+</head>
+<body>
+  <h1>tern — wasm preview (Phase 6 spike)</h1>
+  <p class="sub">
+    tern-core / tern-layout / tern-components compiled to
+    <code>wasm32-unknown-unknown</code>, driven through the same JSON-prop
+    protocol as the napi binding, painted onto a canvas.
+  </p>
+  <div id="stage"><canvas id="screen" width="0" height="0"></canvas></div>
+  <div id="status">loading wasm…</div>
+
+  <script type="module">
+    import { loadTern } from "./shim.js";
+    import { TernCanvasPainter } from "./painter.js";
+    import { buildDemo, startTyping } from "./demo.js";
+
+    const status = document.getElementById("status");
+    const canvas = document.getElementById("screen");
+    const painter = new TernCanvasPainter(canvas);
+
+    let tern;
+    try {
+      tern = await loadTern("./tern_wasm.wasm");
+    } catch (err) {
+      status.textContent = `failed to load ./tern_wasm.wasm — run ./build.sh first and serve over http: ${err}`;
+      throw err;
+    }
+
+    // Fit the viewport to the window (a ~8x14 aspect terminal window).
+    function viewport() {
+      const cols = Math.max(20, Math.min(120, Math.floor((window.innerWidth - 90) / 11)));
+      const rows = Math.max(8, Math.min(40, Math.floor((window.innerHeight - 190) / 20)));
+      return { width: cols, height: rows };
+    }
+
+    let scene = null;
+
+    function render() {
+      const { width, height } = viewport();
+      const frame = tern.renderToCells(width, height);
+      painter.paint(frame);
+      status.textContent =
+        `rendered ${width}x${height} cells in wasm (${frame.count} cells, ` +
+        `${frame.blob.length} symbol bytes) — resize the window to re-layout`;
+    }
+
+    function rebuild() {
+      tern.reset();
+      const root = tern.root();
+      scene = buildDemo(tern, root);
+      render();
+    }
+
+    rebuild();
+    startTyping(scene, () => render());
+
+    window.addEventListener("resize", () => {
+      render();
+    });
+
+    // Rebuild the scene on demand (useful for inspecting the protocol).
+    window.__ternRebuild = rebuild;
+  </script>
+</body>
+</html>
