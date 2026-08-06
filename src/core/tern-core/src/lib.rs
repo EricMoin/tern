@@ -14,8 +14,9 @@
 //! * [`LayoutEngine`] — the trait implemented by tern-layout
 //!
 //! This crate performs no terminal I/O and depends only on `unicode-width`
-//! (for character display widths). See `docs/architecture.md` for where this
-//! crate sits in the render pipeline (stage 3: scene tree).
+//! (for character display widths) and `unicode-segmentation` (for grapheme
+//! cluster boundaries). See `docs/architecture.md` for where this crate sits
+//! in the render pipeline (stage 3: scene tree).
 
 #![forbid(unsafe_code)]
 
@@ -29,7 +30,7 @@ pub mod scene;
 pub mod style;
 
 pub use buffer::{diff, Buffer, Region};
-pub use cell::{char_width, Cell, CellUpdate};
+pub use cell::{char_width, cluster_width, clusters, Cell, CellUpdate, Cluster};
 pub use color::Color;
 pub use cursor::Cursor;
 pub use layout::LayoutEngine;

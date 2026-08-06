@@ -35,6 +35,7 @@ import {
   SCROLLBAR_THUMB_CHAR,
   SCROLLBAR_TRACK_CHAR,
   SELECT_FILTER_PLACEHOLDER,
+  SELECTION_DOUBLE_CLICK_MS,
   STREAM_AFFORDANCE_CHAR,
   ScrollView,
   Select,
@@ -55,12 +56,15 @@ import {
   closeTab,
   collapsePanel,
   closeModal,
+  copySelection,
   createRenderer,
   defaultTheme,
   dragPanels,
+  dragSelection,
   editKey,
   editTextareaKey,
   endPanelDrag,
+  endSelection,
   expandPanel,
   followTail,
   focusAt,
@@ -79,7 +83,11 @@ import {
   scrollToBottom,
   scrollTop,
   selectKey,
+  selectWordAt,
+  selectionKey,
+  setSelectionClockForTesting,
   startPanelDrag,
+  startSelection,
   syncStreamTail,
   tableKey,
   tabsKey,
@@ -110,6 +118,7 @@ import type {
   MouseEventJs,
   NodeHandle,
   Renderer,
+  SelectionRange,
   Span,
   TernEventJs,
   TuiRenderer,
@@ -134,6 +143,9 @@ let fakeHitPath: bigint[] = [7n, 3n];
 /** The last title passed to the fake `set_title`, or `null`. */
 let lastSetTitle: string | null = null;
 
+/** The last text passed to the fake `set_clipboard`, or `null`. */
+let lastClipboard: string | null = null;
+
 /** The last options passed to the fake `TuiRenderer` constructor, or `null`. */
 let lastRendererOptions: unknown = null;
 
@@ -151,6 +163,10 @@ let lastSnapshotSize: [number | undefined, number | undefined] | null = null;
 /** The last `FakeTuiRenderer` constructed (via the fake addon), or `null`.
  * Tests read its `renderCalls` to assert native render counts. */
 let lastFakeRenderer: FakeTuiRenderer | null = null;
+
+/** The fake's fixed terminal size — what a native render paints at (mirrors
+ * the real backend's 80x24 probe used by the native counting tests). */
+const FAKE_TERMINAL_SIZE = { width: 80, height: 24 };
 
 /**
  * A fake native `NodeHandle` standing in for the real addon's scene handle.
@@ -203,6 +219,19 @@ class FakeTuiRenderer {
   /** The number of native `render()` invocations (the frame-coalescing
    * tests assert on this). */
   renderCalls = 0;
+  /** The viewport the last render/snapshotFrame painted at — the fake's
+   * fixed terminal size until a snapshot overrides it. Mirrors the real
+   * native `size` getter (last painted viewport; the current terminal size
+   * before any paint). */
+  size = { ...FAKE_TERMINAL_SIZE };
+  /** The renderer's selection overlay: the inclusive cell rect
+   * `{ col1, row1, col2, row2 }` in viewport coordinates, or `null` when
+   * no selection is set. Mirrors the real per-renderer selection state. */
+  selection: { col1: number; row1: number; col2: number; row2: number } | null = null;
+  /** The rows of the last painted frame (a `render` or `render_to_buffer`
+   * snapshot), the fake's stand-in for the native retained buffer that
+   * `selection_text` / `selection_word_range` read. */
+  lastRows: string[] | null = null;
   /** The scene root handle, reused across `root()` calls so the scene the
    * `Renderer` builds is captured for `render_to_buffer`. */
   private rootHandle = new FakeNodeHandle("root", {});
@@ -222,10 +251,25 @@ class FakeTuiRenderer {
   }
   render(): void {
     this.renderCalls++;
+    // A render paints at the current terminal size — the fake's fixed one —
+    // so the last painted viewport resets to it (mirrors the real renderer
+    // probing the terminal on each paint).
+    this.size = { ...FAKE_TERMINAL_SIZE };
+    // Record the frame a render paints, so `selection_text` reads the last
+    // painted frame (the real renderer retains the painted buffer).
+    this.lastRows = paintSceneRows(this.rootHandle, this.size.width, this.size.height);
   }
   render_to_buffer(width?: number, height?: number): string[] {
     lastSnapshotSize = [width, height];
-    return paintSceneRows(this.rootHandle, width, height);
+    // The viewport actually painted at — the explicit dims, or the current
+    // size (the native shared-viewport default) — becomes the last painted
+    // viewport, so `renderer.size` reports what the last snapshot painted.
+    const w = width ?? this.size.width;
+    const h = height ?? this.size.height;
+    this.size = { width: w, height: h };
+    const rows = paintSceneRows(this.rootHandle, w, h);
+    this.lastRows = rows;
+    return rows;
   }
   destroy(): void {
     this.destroyed = true;
@@ -233,6 +277,50 @@ class FakeTuiRenderer {
   capabilities = { truecolor: true, colors: 16_777_216 };
   set_title(title: string): void {
     lastSetTitle = title;
+  }
+  set_clipboard(text: string): void {
+    lastClipboard = text;
+  }
+  set_selection(col1: number, row1: number, col2: number, row2: number): void {
+    this.selection = { col1, row1, col2, row2 };
+  }
+  clear_selection(): void {
+    this.selection = null;
+  }
+  /** The text of the current selection, extracted from the last painted
+   * rows: row-major, each display column contributing its cell text (a
+   * wide glyph's continuation column is already a space in the fake's
+   * rows, mirroring how the real `buffer_rows` renders masked cells), rows
+   * joined with `'\n'`. Empty when no selection or no paint yet. */
+  selection_text(): string {
+    if (this.selection === null || this.lastRows === null) return "";
+    const { col1, row1, col2, row2 } = this.selection;
+    const x0 = Math.min(col1, col2);
+    const y0 = Math.min(row1, row2);
+    const x1 = Math.max(col1, col2);
+    const y1 = Math.max(row1, row2);
+    const lines: string[] = [];
+    for (let y = y0; y <= y1; y++) {
+      const row = this.lastRows[y] ?? "";
+      let line = "";
+      for (let x = x0; x <= x1; x++) line += row[x] ?? " ";
+      lines.push(line);
+    }
+    return lines.join("\n");
+  }
+  /** The inclusive cell range of the contiguous non-space run containing
+   * (`col`, `row`) in the last painted rows, or `null` when the cell is a
+   * space (or out of bounds, or nothing painted yet). */
+  selection_word_range(col: number, row: number): SelectionRange | null {
+    if (this.lastRows === null) return null;
+    const rowStr = this.lastRows[row];
+    if (rowStr === undefined || col >= rowStr.length) return null;
+    if (rowStr[col] === " ") return null;
+    let left = col;
+    while (left > 0 && rowStr[left - 1] !== " ") left--;
+    let right = col;
+    while (right + 1 < rowStr.length && rowStr[right + 1] !== " ") right++;
+    return { col1: left, row1: row, col2: right, row2: row };
   }
 }
 
@@ -251,12 +339,22 @@ const fakeAddon = {
  * `render_to_buffer`.
  *
  * The fake cannot run the real compositor, so this is a minimal painter for
- * the canonical golden scene: a box child of the root, laid out at the
- * origin of the viewport and sized to its text content plus `padding`, with
- * `border_style` glyphs drawn at the rect edges — exactly the geometry the
- * real compositor produces for the same scene (see the `paint_scene_rows`
- * Rust unit test in src/bindings/tern-node/src/lib.rs). Every row is padded
- * with spaces to the viewport width; glyphs and text are single-width.
+ * the canonical golden scenes: a box child of the root (or a borderless leaf
+ * such as a bare text / textarea / input), laid out at the origin of the
+ * viewport and sized to its text content plus `padding`, with `border_style`
+ * glyphs drawn at the rect edges — exactly the geometry the real compositor
+ * produces for the same scene (see the `paint_scene_rows` Rust unit test in
+ * src/bindings/tern-node/src/lib.rs). Every row is padded with spaces to the
+ * viewport width.
+ *
+ * The inner text is painted grapheme cluster by grapheme cluster (the same
+ * UAX #29 extended-cluster split the core editing layer and the Rust
+ * compositor use): a cluster occupies `clusterWidth` columns as one logical
+ * glyph — its full text at the lead column, a masked-continuation space on
+ * the trailing columns of a 2-column cluster — so a ZWJ family emoji never
+ * degrades into per-code-unit fragments. A caret-carrying leaf paints its
+ * caret cell as the underlying character (the real compositor reverses the
+ * cell's style, which `buffer_rows` renders as the same symbol).
  */
 function paintSceneRows(
   root: FakeNodeHandle,
@@ -280,7 +378,9 @@ function paintSceneRows(
         const textChild = child.children[0];
         const text = typeof textChild?.props.text === "string" ? textChild.props.text : "";
         const pad = typeof child.props.padding === "number" ? child.props.padding : 0;
-        const bw = text.length + 2 * pad;
+        const runs = fakeClusterRuns(text);
+        const innerWidth = runs.reduce((sum, run) => sum + run.width, 0);
+        const bw = innerWidth + 2 * pad;
         const bh = 1 + 2 * pad;
         if (x < bw && y < bh) {
           const g = glyphs[String(child.props.border_style ?? "none")];
@@ -288,7 +388,14 @@ function paintSceneRows(
           if (g !== undefined) {
             if (y === 0) c = x === 0 ? g[0] : x === bw - 1 ? g[1] : g[4];
             else if (y === bh - 1) c = x === 0 ? g[2] : x === bw - 1 ? g[3] : g[4];
-            else c = x === 0 || x === bw - 1 ? g[5] : text[x - pad] ?? " ";
+            else c = x === 0 || x === bw - 1 ? g[5] : " ";
+          }
+          if (g !== undefined && y === pad && x >= pad && x < pad + innerWidth) {
+            c = clusterTextAt(runs, x - pad);
+          } else if (g === undefined && y === 0 && x < innerWidth) {
+            // A borderless leaf (bare text / textarea / input) paints its
+            // first text child's clusters from the origin.
+            c = clusterTextAt(runs, x);
           }
           if (c !== " ") ch = c;
         }
@@ -298,6 +405,85 @@ function paintSceneRows(
     rows.push(row);
   }
   return rows;
+}
+
+/** The display width of one character in terminal columns — the fake
+ * painter's mirror of the core `charWidth` (combining marks 0, wide CJK /
+ * emoji 2, else 1). */
+function fakeCharWidth(ch: string): number {
+  const code = ch.codePointAt(0) ?? 0;
+  if (code === 0) return 0;
+  if (
+    (code >= 0x0300 && code <= 0x036f) || // combining diacritical marks
+    (code >= 0x1ab0 && code <= 0x1aff) || // combining diacritical marks ext.
+    (code >= 0x1dc0 && code <= 0x1dff) || // combining diacritical marks suppl.
+    (code >= 0x20d0 && code <= 0x20ff) || // combining marks for symbols
+    (code >= 0xfe00 && code <= 0xfe0f) || // variation selectors
+    (code >= 0xfe20 && code <= 0xfe2f) || // combining half marks
+    (code >= 0x200b && code <= 0x200f) || // zero-width space / joiners
+    code === 0xfeff // zero-width no-break space (BOM)
+  ) {
+    return 0;
+  }
+  if (
+    (code >= 0x1100 && code <= 0x115f) || // Hangul Jamo init. consonants
+    (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) || // CJK … Yi
+    (code >= 0xac00 && code <= 0xd7a3) || // Hangul syllables
+    (code >= 0xf900 && code <= 0xfaff) || // CJK compatibility ideographs
+    (code >= 0xfe30 && code <= 0xfe4f) || // CJK compatibility forms
+    (code >= 0xff00 && code <= 0xff60) || // fullwidth forms
+    (code >= 0xffe0 && code <= 0xffe6) || // fullwidth signs
+    (code >= 0x1f300 && code <= 0x1faff) // emoji (surrogate pairs, wide)
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+/** The display width of one grapheme cluster in terminal columns — the fake
+ * painter's mirror of the core `clusterWidth` (the sum of member `charWidth`s
+ * clamped to 2). */
+function fakeClusterWidth(cluster: string): number {
+  let width = 0;
+  for (const ch of cluster) width += fakeCharWidth(ch);
+  return Math.min(2, width);
+}
+
+/** The extended grapheme clusters of `text` with their display widths — the
+ * fake painter's cluster splitter (Intl.Segmenter with the code-point
+ * fallback, mirroring the core layer's documented fallback). */
+function fakeClusterRuns(text: string): Array<{ width: number; text: string }> {
+  const runs: Array<{ width: number; text: string }> = [];
+  const segmenter =
+    typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
+      ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+      : null;
+  if (segmenter !== null) {
+    for (const seg of segmenter.segment(text)) {
+      runs.push({ width: fakeClusterWidth(seg.segment), text: seg.segment });
+    }
+    return runs;
+  }
+  for (const ch of text) {
+    runs.push({ width: fakeCharWidth(ch), text: ch });
+  }
+  return runs;
+}
+
+/** The cluster text painting at display column `col` of `runs`: the cluster's
+ * full text at its lead column, a masked-continuation space on a 2-column
+ * cluster's trailing column (mirrors `buffer_rows`), or `" "` past the last
+ * cluster. */
+function clusterTextAt(
+  runs: Array<{ width: number; text: string }>,
+  col: number,
+): string {
+  let acc = 0;
+  for (const run of runs) {
+    if (col < acc + run.width) return col === acc ? run.text : " ";
+    acc += run.width;
+  }
+  return " ";
 }
 
 /**
@@ -313,6 +499,7 @@ function withFakeAddon<T>(fn: () => T): T {
   createdNodes.length = 0;
   fakeContentSizes.clear();
   lastSetTitle = null;
+  lastClipboard = null;
   lastRendererOptions = null;
   lastSnapshotSize = null;
   lastFakeRenderer = null;
@@ -908,6 +1095,166 @@ Deno.test("renderer setTitle routes to the native addon", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Renderer size + clipboard (fake native addon)
+// ---------------------------------------------------------------------------
+
+Deno.test("renderer size reports the last render or snapshotFrame viewport", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    // Before any paint the native side surfaces the current terminal size —
+    // the fake's fixed 80x24 (the real getter probes through its cached-size
+    // machinery on first access).
+    let size = renderer.size;
+    if (size.width !== 80 || size.height !== 24) {
+      throw new Error(`size before any paint = ${JSON.stringify(size)}`);
+    }
+    // A render paints at the current terminal size: still the fake's 80x24,
+    // so `size` reports the viewport the last render used.
+    renderer.render();
+    size = renderer.size;
+    if (size.width !== 80 || size.height !== 24) {
+      throw new Error(`size after render = ${JSON.stringify(size)}`);
+    }
+    // The most recent snapshotFrame's viewport wins over the render.
+    renderer.snapshotFrame(6, 3);
+    size = renderer.size;
+    if (size.width !== 6 || size.height !== 3) {
+      throw new Error(`size after snapshotFrame(6, 3) = ${JSON.stringify(size)}`);
+    }
+    // A render at the current terminal size supersedes the snapshot again.
+    renderer.render();
+    size = renderer.size;
+    if (size.width !== 80 || size.height !== 24) {
+      throw new Error(`size after post-snapshot render = ${JSON.stringify(size)}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("renderer setClipboard routes the text and implies the exact OSC 52 escape bytes", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.setClipboard("foo");
+    if (lastClipboard !== "foo") {
+      throw new Error(`set_clipboard called with ${JSON.stringify(lastClipboard)}`);
+    }
+    // The JS-level bytes assertion: for the text just handed to the native
+    // layer, the escape it must emit is exactly ESC ] 52 ; c ; <base64> BEL,
+    // where the payload is the text's UTF-8 bytes base64-encoded per RFC 4648
+    // (btoa is the platform's RFC 4648 encoder). The native byte-level
+    // emission itself is asserted byte-exact by tern-terminal's
+    // `set_clipboard_to` unit tests.
+    const expected = `\x1b]52;c;${btoa("foo")}\x07`;
+    if (expected !== "\x1b]52;c;Zm9v\x07") {
+      throw new Error(`expected escape bytes = ${JSON.stringify(expected)}`);
+    }
+    renderer.destroy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Selection overlay (fake native addon — set/clear/extract/word-range)
+// ---------------------------------------------------------------------------
+
+Deno.test("renderer setSelection and clearSelection route to the native addon", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const native = lastFakeRenderer;
+    if (native === null) throw new Error("fake renderer not constructed");
+    renderer.setSelection(1, 0, 3, 2);
+    if (native.selection === null) throw new Error("selection not set on native");
+    if (
+      native.selection.col1 !== 1 || native.selection.row1 !== 0 ||
+      native.selection.col2 !== 3 || native.selection.row2 !== 2
+    ) {
+      throw new Error(`native selection = ${JSON.stringify(native.selection)}`);
+    }
+    renderer.clearSelection();
+    if (native.selection !== null) {
+      throw new Error("clearSelection must clear the native selection");
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("renderer selectionText extracts the selected region from the last painted frame", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    // A borderless box around a bare text leaf paints the text from the
+    // origin (the fake painter's canonical single-row scene), so a snapshot
+    // at 11x1 yields the row "hello world".
+    renderer.root.addChild(Box({}, Text({ text: "hello world" })));
+    renderer.snapshotFrame(11, 1);
+    // No selection set: empty.
+    if (renderer.selectionText() !== "") {
+      throw new Error(`selectionText without a selection = ${JSON.stringify(renderer.selectionText())}`);
+    }
+    renderer.setSelection(6, 0, 10, 0); // "world"
+    if (renderer.selectionText() !== "world") {
+      throw new Error(`selectionText = ${JSON.stringify(renderer.selectionText())}`);
+    }
+    // Reversed endpoints normalize to the same rect.
+    renderer.setSelection(10, 0, 6, 0);
+    if (renderer.selectionText() !== "world") {
+      throw new Error(`reversed selectionText = ${JSON.stringify(renderer.selectionText())}`);
+    }
+    // A sub-run.
+    renderer.setSelection(0, 0, 4, 0);
+    if (renderer.selectionText() !== "hello") {
+      throw new Error(`sub-run selectionText = ${JSON.stringify(renderer.selectionText())}`);
+    }
+    // Clearing the selection empties the extraction.
+    renderer.clearSelection();
+    if (renderer.selectionText() !== "") {
+      throw new Error(`selectionText after clear = ${JSON.stringify(renderer.selectionText())}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("renderer selectionText reads the frame the last snapshot or render painted", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Box({}, Text({ text: "hello" })));
+    renderer.snapshotFrame(5, 1);
+    renderer.setSelection(0, 0, 4, 0);
+    if (renderer.selectionText() !== "hello") {
+      throw new Error(`snapshot selectionText = ${JSON.stringify(renderer.selectionText())}`);
+    }
+    // A render repaints at the terminal size (the fake's 80x24): the wider
+    // frame keeps the text at the origin, so the same selection extracts the
+    // same run from the freshly painted frame.
+    renderer.render();
+    if (renderer.selectionText() !== "hello") {
+      throw new Error(`post-render selectionText = ${JSON.stringify(renderer.selectionText())}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("renderer selectionWordRange returns the word run or null at whitespace", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Box({}, Text({ text: "hello world" })));
+    renderer.snapshotFrame(11, 1);
+    const range = renderer.selectionWordRange(7, 0);
+    if (range === null) throw new Error("word range at 'world' must not be null");
+    if (range.col1 !== 6 || range.row1 !== 0 || range.col2 !== 10 || range.row2 !== 0) {
+      throw new Error(`word range = ${JSON.stringify(range)}`);
+    }
+    // The boundary between the words is whitespace: null.
+    if (renderer.selectionWordRange(5, 0) !== null) {
+      throw new Error("whitespace cell must yield null");
+    }
+    // Out of bounds: null.
+    if (renderer.selectionWordRange(50, 0) !== null) {
+      throw new Error("out-of-bounds column must yield null");
+    }
+    renderer.destroy();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Event dispatch (fake native addon — push delivery)
 // ---------------------------------------------------------------------------
 
@@ -1251,6 +1598,33 @@ Deno.test("framesEqual compares row counts and row strings", () => {
   }
 });
 
+Deno.test("snapshotFrame golden keeps a ZWJ family emoji intact on the caret line", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    // A single-line textarea "a👨‍👩‍👧‍👦b" with the caret at display column
+    // 1 — the grapheme-cluster boundary between 'a' and the family emoji.
+    // The caret rides the first (only) display row, which is the caret line.
+    renderer.root.addChild(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }));
+    const frame = renderer.snapshotFrame(6, 1);
+    // The caret line paints the full cluster as ONE 2-column glyph — 'a' at
+    // column 0, the emoji at column 1 with its continuation cell masked to a
+    // space (the `buffer_rows` convention), 'b' at column 3 — padded to the
+    // 6-column viewport. A per-code-unit painter would fragment the emoji
+    // into surrogate halves.
+    const expected = [`a${FAMILY_EMOJI} b  `];
+    if (!framesEqual(frame, expected)) {
+      throw new Error(`unexpected caret-line rows: ${JSON.stringify(frame)}`);
+    }
+    // The caret leaf carries the caret at the cluster boundary (display
+    // column 1) — the caret sits on the same line as the intact emoji.
+    const leaf = renderer.root.children[0]?.children[0];
+    if (leaf?.props.caret !== 1 || leaf?.props.text !== `a${FAMILY_EMOJI}b`) {
+      throw new Error(`caret leaf = ${JSON.stringify(leaf?.props)}`);
+    }
+    renderer.destroy();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Frame coalescing (fake native addon — render-call counting)
 // ---------------------------------------------------------------------------
@@ -1419,6 +1793,63 @@ Deno.test("editKey is multi-width aware for the caret column", () => {
   if (bs.value !== "" || bs.caret !== 0) throw new Error(`backspace wide = ${bs.value}/${bs.caret}`);
 });
 
+/** The ZWJ family emoji — ONE extended grapheme cluster of 11 code units
+ * rendered in 2 terminal columns (tern-core's cluster-width convention). */
+const FAMILY_EMOJI = "👨\u200D👩\u200D👧\u200D👦";
+
+Deno.test("editKey steps the cursor over a ZWJ family emoji one cluster at a time", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  // "a👨‍👩‍👧‍👦b" is 3 grapheme clusters: 'a' (1 col), the family emoji
+  // (2 cols, one cluster), 'b' (1 col) — display columns 0, 1–2, 3.
+  const mk = (caret: number) => Input({ value: `a${FAMILY_EMOJI}b`, caret });
+  // Right steps 0 → 1 → 3 → 4: over 'a', over the whole cluster, over 'b'.
+  const r1 = editKey(mk(0), { name: "right", ...base });
+  if (r1.caret !== 1) throw new Error(`right over a = ${r1.caret}`);
+  const r2 = editKey(mk(1), { name: "right", ...base });
+  if (r2.caret !== 3) throw new Error(`right over the emoji = ${r2.caret}`);
+  const r3 = editKey(mk(3), { name: "right", ...base });
+  if (r3.caret !== 4) throw new Error(`right over b = ${r3.caret}`);
+  // Left steps 4 → 3 → 1 → 0 — never a mid-cluster column.
+  const l1 = editKey(mk(4), { name: "left", ...base });
+  if (l1.caret !== 3) throw new Error(`left over b = ${l1.caret}`);
+  const l2 = editKey(mk(3), { name: "left", ...base });
+  if (l2.caret !== 1) throw new Error(`left over the emoji = ${l2.caret}`);
+  const l3 = editKey(mk(1), { name: "left", ...base });
+  if (l3.caret !== 0) throw new Error(`left over a = ${l3.caret}`);
+  // Movement never mutates the value.
+  const moved = editKey(mk(3), { name: "left", ...base });
+  if (moved.value !== `a${FAMILY_EMOJI}b`) throw new Error(`value mutated = ${moved.value}`);
+  // home/end land on the boundaries (end = the 4-column display width).
+  const end = editKey(mk(0), { name: "end", ...base });
+  if (end.caret !== 4) throw new Error(`end caret = ${end.caret}`);
+  const home = editKey(mk(4), { name: "home", ...base });
+  if (home.caret !== 0) throw new Error(`home caret = ${home.caret}`);
+});
+
+Deno.test("editKey backspace removes a ZWJ family emoji as one cluster", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  // Backspace from the end removes 'b', then the whole 11-code-unit emoji
+  // cluster (stepping two display columns), then 'a' — never a fragment.
+  const step1 = editKey(Input({ value: `a${FAMILY_EMOJI}b`, caret: 4 }), {
+    name: "backspace",
+    ...base,
+  });
+  if (step1.value !== `a${FAMILY_EMOJI}` || step1.caret !== 3) {
+    throw new Error(`backspace b = ${JSON.stringify(step1)}`);
+  }
+  const step2 = editKey(Input({ value: `a${FAMILY_EMOJI}`, caret: 3 }), {
+    name: "backspace",
+    ...base,
+  });
+  if (step2.value !== "a" || step2.caret !== 1) {
+    throw new Error(`backspace emoji = ${JSON.stringify(step2)}`);
+  }
+  const step3 = editKey(Input({ value: "a", caret: 1 }), { name: "backspace", ...base });
+  if (step3.value !== "" || step3.caret !== 0) {
+    throw new Error(`backspace a = ${JSON.stringify(step3)}`);
+  }
+});
+
 Deno.test("pasteInto inserts text at the caret and advances the caret", () => {
   const input = Input({ value: "ab", caret: 1 });
   const next = pasteInto(input, "XY");
@@ -1465,6 +1896,404 @@ Deno.test("pasteInto is multi-width aware at the caret", () => {
   if (snap.value !== "xコa") throw new Error(`snap value = ${snap.value}`);
   if (snap.caret !== 2) throw new Error(`snap caret = ${snap.caret}`);
 });
+
+Deno.test("pasteInto before a ZWJ cluster inserts at the cluster boundary", () => {
+  // Caret at display column 1 = the boundary between 'a' and the family
+  // emoji (the emoji's lead column): the paste lands there and the caret
+  // advances by the pasted text's cluster width.
+  const atBoundary = pasteInto(Input({ value: `a${FAMILY_EMOJI}b`, caret: 1 }), "X");
+  if (atBoundary.value !== `aX${FAMILY_EMOJI}b`) throw new Error(`value = ${atBoundary.value}`);
+  if (atBoundary.caret !== 2) throw new Error(`caret = ${atBoundary.caret}`);
+  // A caret column inside the emoji's display span (col 2 — its
+  // continuation) snaps back to the cluster's start: the paste lands before
+  // the cluster, never mid-cluster.
+  const snapped = pasteInto(Input({ value: `a${FAMILY_EMOJI}b`, caret: 2 }), "X");
+  if (snapped.value !== `aX${FAMILY_EMOJI}b`) throw new Error(`snap value = ${snapped.value}`);
+  if (snapped.caret !== 3) throw new Error(`snap caret = ${snapped.caret}`);
+  // Pasting the ZWJ cluster advances the caret by its 2-column width.
+  const wide = pasteInto(Input({ value: "ab", caret: 1 }), FAMILY_EMOJI);
+  if (wide.value !== `a${FAMILY_EMOJI}b`) throw new Error(`wide value = ${wide.value}`);
+  if (wide.caret !== 3) throw new Error(`wide caret = ${wide.caret}`);
+});
+
+// ---------------------------------------------------------------------------
+// Grapheme-editing invariant fuzz (round 4, subtask 6)
+// ---------------------------------------------------------------------------
+//
+// The hand-written grapheme tests above pin individual moves. These suites
+// replace the curation with **seeded randomized invariant checks**: a random
+// value is built from a grapheme-rich content pool (ASCII, wide CJK, ZWJ
+// family emoji, flags, base+combining clusters — the same classes the Rust
+// parity fuzz paints), a random boundary caret is chosen, and a random
+// sequence of edits (char insert / backspace / left / right / home / end /
+// paste) is applied. After **every** edit the following invariants are
+// asserted against an independent oracle (Intl.Segmenter + a local mirror of
+// the documented width convention, cell.rs:11 — NOT the implementation under
+// test):
+//
+// 1. the cursor always rests on a grapheme-cluster boundary of the current
+//    value (the caret is a display column, so "boundary" means the prefix
+//    sum of cluster widths — never a column inside a wide cluster's span);
+// 2. cluster-width sums are exact: `end` lands on the value's total display
+//    width, and `right`/`left` advance by exactly the adjacent cluster's
+//    width (so repeated rights walk 0 → totalWidth through every boundary);
+// 3. paste round-trips: pasting a text at a boundary splices it at that
+//    boundary, advances the caret by the pasted text's total width, and
+//    backspacing exactly the pasted text's cluster count restores the
+//    original value and caret.
+//
+// The content pool keeps every fragment a **complete, self-contained
+// grapheme cluster** (never a lone ZWJ or lone combining mark), so a splice
+// never re-segments across the boundary and the round-trip count is exact.
+// Cross-boundary merges (e.g. pasting a combining mark after a base) are the
+// domain of the hand-written tests above, which pin them deterministically.
+//
+// Determinism and CI bounds mirror the Rust suite: one SplitMix64 PRNG with
+// a fixed default seed; `TERN_EDIT_SEED` overrides it for CI rotation;
+// `TERN_EDIT_ROUNDS` overrides the iteration budget. Defaults are small
+// enough that the whole suite runs in a few hundred milliseconds.
+
+/** The family emoji / flags / combining clusters from the Rust fuzz pool —
+ * each entry is one complete extended grapheme cluster. */
+const EDIT_FRAGMENTS = [
+  "a", "b", "c", "x", "Hello", "word", "123", "text", "line", "42",
+  "コ", "日", "世", "界", "中", "漢字", "ワイド",
+  "👨\u200D👩\u200D👧\u200D👦", // ZWJ family — one cluster, 2 cols
+  "🇷🇺", // flag — one cluster, 2 cols
+  "e\u{301}", // base + combining acute — one cluster, 1 col
+  "a\u{301}",
+  "🚀", "🍣",
+  "z", "multi", "word",
+];
+
+/** Single-cluster characters used for char-insert ops. */
+const EDIT_CHARS = ["a", "b", "x", "1", "コ", "日", "世", "🚀", "🍣", "e\u{301}"];
+
+/** The fixed default seed; `TERN_EDIT_SEED` overrides it (CI rotation). */
+const EDIT_DEFAULT_SEED = 0xed17_5eed_c0de_1ce;
+/** The default iteration budget; `TERN_EDIT_ROUNDS` overrides it. */
+const EDIT_DEFAULT_ROUNDS = 240;
+
+/** SplitMix64 — the same PRNG the Rust parity fuzz uses, so a given seed
+ * reproduces the exact same edit sequences on every platform. */
+class EditRng {
+  #state: bigint;
+  constructor(seed: bigint) {
+    this.#state = seed & 0xffff_ffff_ffff_ffffn;
+  }
+  #next(): bigint {
+    this.#state = (this.#state + 0x9e37_79b9_7f4a_7c15n) & 0xffff_ffff_ffff_ffffn;
+    let z = this.#state;
+    z = ((z ^ (z >> 30n)) * 0xbf58_476d_1ce4_e5b9n) & 0xffff_ffff_ffff_ffffn;
+    z = ((z ^ (z >> 27n)) * 0x94d0_49bb_1331_11ebn) & 0xffff_ffff_ffff_ffffn;
+    return z ^ (z >> 31n);
+  }
+  /** A uniform draw in `0..n` (n > 0). */
+  below(n: number): number {
+    return Number(this.#next() % BigInt(n));
+  }
+  /** A draw that succeeds with `pct` percent probability. */
+  chance(pct: number): boolean {
+    return this.#next() % 100n < BigInt(pct);
+  }
+  /** A random element of an array. */
+  pick<T>(items: readonly T[]): T {
+    return items[this.below(items.length)] as T;
+  }
+}
+
+/** Read the seed: `TERN_EDIT_SEED` (decimal or 0x-hex), else the fixed
+ * default. Deno may deny env access on hardened hosts — that falls back to
+ * the default seed too, keeping the suite green without --allow-env. */
+function editSeed(): bigint {
+  try {
+    const raw = Deno.env.get("TERN_EDIT_SEED");
+    if (raw !== undefined && raw !== "") {
+      return BigInt(raw);
+    }
+  } catch {
+    // env denied — use the fixed default seed.
+  }
+  return BigInt(EDIT_DEFAULT_SEED);
+}
+
+/** Read the iteration budget: `TERN_EDIT_ROUNDS`, else the default. */
+function editRounds(): number {
+  try {
+    const raw = Deno.env.get("TERN_EDIT_ROUNDS");
+    if (raw !== undefined && raw !== "") {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+  } catch {
+    // env denied — use the default budget.
+  }
+  return EDIT_DEFAULT_ROUNDS;
+}
+
+/** Mirror of tern-core's `char_width` (cell.rs:11): 0 for NUL and
+ * combining/zero-width marks, 2 for wide, 1 otherwise — an independent
+ * copy so drift in the implementation is caught, not mirrored. */
+function editCharWidth(ch: string): number {
+  const code = ch.codePointAt(0) ?? 0;
+  if (code === 0) return 0;
+  if (
+    (code >= 0x0300 && code <= 0x036f) ||
+    (code >= 0x1ab0 && code <= 0x1aff) ||
+    (code >= 0x1dc0 && code <= 0x1dff) ||
+    (code >= 0x20d0 && code <= 0x20ff) ||
+    (code >= 0xfe00 && code <= 0xfe0f) ||
+    (code >= 0xfe20 && code <= 0xfe2f) ||
+    (code >= 0x200b && code <= 0x200f) ||
+    code === 0xfeff
+  ) {
+    return 0;
+  }
+  if (
+    (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe30 && code <= 0xfe4f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6) ||
+    (code >= 0x1f300 && code <= 0x1faff)
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+/** The extended grapheme clusters of `value` (UAX #29) as an independent
+ * oracle: `{ start, len, width, text }` per cluster. */
+function editClusters(value: string): {
+  start: number;
+  len: number;
+  width: number;
+  text: string;
+}[] {
+  const runs: { start: number; len: number; width: number; text: string }[] = [];
+  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  let start = 0;
+  for (const seg of segmenter.segment(value)) {
+    const text = seg.segment;
+    let width = 0;
+    for (const ch of text) width += editCharWidth(ch);
+    runs.push({ start, len: text.length, width: Math.min(2, width), text });
+    start += text.length;
+  }
+  return runs;
+}
+
+/** The total display width of `value` (the sum of its cluster widths). */
+function editTotalWidth(value: string): number {
+  let w = 0;
+  for (const run of editClusters(value)) w += run.width;
+  return w;
+}
+
+/** Every display column that is a grapheme-cluster boundary of `value`,
+ * including 0 and the total width. The cursor must always sit on one of
+ * these. */
+function editBoundaryColumns(value: string): number[] {
+  const columns = [0];
+  let col = 0;
+  for (const run of editClusters(value)) {
+    col += run.width;
+    columns.push(col);
+  }
+  return columns;
+}
+
+/** Build a random value from the cluster-complete fragment pool. */
+function editRandomValue(rng: EditRng): string {
+  const count = rng.below(5);
+  let value = "";
+  for (let i = 0; i < count; i++) value += rng.pick(EDIT_FRAGMENTS);
+  return value;
+}
+
+/** The invariant core shared by every edit fuzz suite: assert the cursor
+ * rests on a cluster boundary of `value` and stays within the painted
+ * width. `label` names the failing edit for the error message. */
+function assertEditCursorInvariant(value: string, caret: number, label: string): void {
+  const columns = editBoundaryColumns(value);
+  if (!columns.includes(caret)) {
+    throw new Error(
+      `${label}: cursor ${caret} is not a grapheme-cluster boundary of ` +
+        `${JSON.stringify(value)} (boundaries: [${columns.join(", ")}])`,
+    );
+  }
+  if (caret < 0 || caret > editTotalWidth(value)) {
+    throw new Error(`${label}: cursor ${caret} outside the painted width of ${JSON.stringify(value)}`);
+  }
+}
+
+Deno.test("grapheme invariant fuzz: cursor always on a cluster boundary", () => {
+  const rng = new EditRng(editSeed());
+  const rounds = editRounds();
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  for (let round = 0; round < rounds; round++) {
+    const value = editRandomValue(rng);
+    const columns = editBoundaryColumns(value);
+    const input = Input({ value, caret: rng.pick(columns) });
+    const steps = 1 + rng.below(8);
+    for (let step = 0; step < steps; step++) {
+      const key = rng.below(6);
+      let next;
+      if (key === 0) {
+        next = editKey(input, { name: "char", char: rng.pick(EDIT_CHARS), ...base });
+      } else if (key === 1) {
+        next = editKey(input, { name: "backspace", ...base });
+      } else if (key === 2) {
+        next = editKey(input, { name: "left", ...base });
+      } else if (key === 3) {
+        next = editKey(input, { name: "right", ...base });
+      } else if (key === 4) {
+        next = editKey(input, { name: "home", ...base });
+      } else {
+        next = editKey(input, { name: "end", ...base });
+      }
+      assertEditCursorInvariant(
+        next.value,
+        next.caret,
+        `round ${round} step ${step} (${editKeyEventName(key)})`,
+      );
+      // The node's own props must mirror the returned state.
+      const props = input.props;
+      if (props.value !== next.value || props.caret !== next.caret) {
+        throw new Error(
+          `round ${round} step ${step}: node props ${JSON.stringify(props)} diverge from ` +
+            `returned ${JSON.stringify(next)}`,
+        );
+      }
+    }
+  }
+});
+
+/** Map an op code to its key name for diagnostics. */
+function editKeyEventName(code: number): string {
+  return ["char", "backspace", "left", "right", "home", "end"][code] ?? "?";
+}
+
+Deno.test("grapheme invariant fuzz: cluster-width sums are exact", () => {
+  const rng = new EditRng(editSeed());
+  const rounds = editRounds();
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  for (let round = 0; round < rounds; round++) {
+    const value = editRandomValue(rng);
+    const clusters = editClusters(value);
+    const total = editTotalWidth(value);
+
+    // `end` lands on the value's total display width — the sum of every
+    // cluster's width.
+    const end = editKey(Input({ value, caret: 0 }), { name: "end", ...base });
+    if (end.caret !== total) {
+      throw new Error(
+        `round ${round}: end caret ${end.caret} != total width ${total} of ${JSON.stringify(value)}`,
+      );
+    }
+
+    // `right` from 0 walks through every boundary: each step advances by
+    // exactly the adjacent cluster's width, ending on the total width.
+    const walk = Input({ value, caret: 0 });
+    for (const cluster of clusters) {
+      const before = walk.props.caret as number;
+      const right = editKey(walk, { name: "right", ...base });
+      if (right.caret - before !== cluster.width) {
+        throw new Error(
+          `round ${round}: right advanced ${right.caret - before} columns, expected ` +
+            `${cluster.width} (cluster ${JSON.stringify(cluster.text)} of ${JSON.stringify(value)})`,
+        );
+      }
+    }
+    if (walk.props.caret !== total) {
+      throw new Error(
+        `round ${round}: right-walk ended at ${walk.props.caret}, expected ${total}`,
+      );
+    }
+
+    // `left` from the end walks back in reverse, again by exact cluster
+    // widths.
+    const back = Input({ value, caret: total });
+    for (let i = clusters.length - 1; i >= 0; i--) {
+      const cluster = clusters[i]!;
+      const before = back.props.caret as number;
+      const left = editKey(back, { name: "left", ...base });
+      if (before - left.caret !== cluster.width) {
+        throw new Error(
+          `round ${round}: left retreated ${before - left.caret} columns, expected ` +
+            `${cluster.width} (cluster ${JSON.stringify(cluster.text)})`,
+        );
+      }
+    }
+    if (back.props.caret !== 0) {
+      throw new Error(`round ${round}: left-walk ended at ${back.props.caret}, expected 0`);
+    }
+  }
+});
+
+Deno.test("grapheme invariant fuzz: paste round-trips at a cluster boundary", () => {
+  const rng = new EditRng(editSeed());
+  const rounds = editRounds();
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  for (let round = 0; round < rounds; round++) {
+    const value = editRandomValue(rng);
+    const columns = editBoundaryColumns(value);
+    const caret = rng.pick(columns);
+    const text = editRandomValue(rng) || "x";
+    const input = Input({ value, caret });
+
+    // The paste splices at the cluster boundary the caret column points to.
+    const next = pasteInto(input, text);
+    const index = boundaryIndexAt(value, caret);
+    const expectedSplice = value.slice(0, index) + text + value.slice(index);
+    if (next.value !== expectedSplice) {
+      throw new Error(
+        `round ${round}: paste of ${JSON.stringify(text)} at caret ${caret} produced ` +
+          `${JSON.stringify(next.value)}, expected splice ${JSON.stringify(expectedSplice)} ` +
+          `(value ${JSON.stringify(value)})`,
+      );
+    }
+
+    // The caret advances by the pasted text's total display width and stays
+    // on a cluster boundary of the new value.
+    const pastedWidth = editTotalWidth(text);
+    if (next.caret !== caret + pastedWidth) {
+      throw new Error(
+        `round ${round}: paste caret ${next.caret} != ${caret} + ${pastedWidth}`,
+      );
+    }
+    assertEditCursorInvariant(next.value, next.caret, `round ${round} after paste`);
+
+    // Round-trip: backspacing exactly the pasted text's cluster count
+    // restores the original value and caret.
+    const clusterCount = editClusters(text).length;
+    const replay = Input({ value: next.value, caret: next.caret });
+    for (let i = 0; i < clusterCount; i++) {
+      editKey(replay, { name: "backspace", ...base });
+    }
+    const props = replay.props;
+    if (props.value !== value || props.caret !== caret) {
+      throw new Error(
+        `round ${round}: paste round-trip restored ${JSON.stringify(props.value)}@${props.caret}, ` +
+          `expected ${JSON.stringify(value)}@${caret}`,
+      );
+    }
+  }
+});
+
+/** The code-unit index of the cluster boundary at `column` display columns
+ * (the inverse of `indexToColumn`, over the boundary set): the splice
+ * point `pasteInto` uses. `column` must be a boundary column of `value`. */
+function boundaryIndexAt(value: string, column: number): number {
+  let col = 0;
+  for (const run of editClusters(value)) {
+    if (col === column) return run.start;
+    col += run.width;
+  }
+  return value.length;
+}
 
 // ---------------------------------------------------------------------------
 // Roadmap elements: Textarea
@@ -1696,6 +2525,97 @@ Deno.test("pasteIntoTextarea is multi-width aware for wide pastes", () => {
   const mid = pasteIntoTextarea(Textarea({ lines: ["コa"], row: 0, col: 1 }), "文");
   if (mid.lines[0] !== "コ文a" || mid.col !== 2) {
     throw new Error(`mid wide = ${mid.lines[0]}/${mid.col}`);
+  }
+});
+
+Deno.test("editTextareaKey steps left/right over a ZWJ family emoji one cluster at a time", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  // The line is 'a' + emoji + 'b'; col is a code-unit index. Cluster starts:
+  // 'a' at 0, the 11-code-unit emoji at 1, 'b' at 12.
+  const right1 = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 0 }), {
+    name: "right",
+    ...base,
+  });
+  if (right1.col !== 1) throw new Error(`right over a = ${right1.col}`);
+  const right2 = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }), {
+    name: "right",
+    ...base,
+  });
+  if (right2.col !== 12) throw new Error(`right over the emoji = ${right2.col}`);
+  const right3 = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 12 }), {
+    name: "right",
+    ...base,
+  });
+  if (right3.col !== 13) throw new Error(`right over b = ${right3.col}`);
+  const left1 = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 13 }), {
+    name: "left",
+    ...base,
+  });
+  if (left1.col !== 12) throw new Error(`left over b = ${left1.col}`);
+  const left2 = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 12 }), {
+    name: "left",
+    ...base,
+  });
+  if (left2.col !== 1) throw new Error(`left over the emoji = ${left2.col}`);
+  const left3 = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }), {
+    name: "left",
+    ...base,
+  });
+  if (left3.col !== 0) throw new Error(`left over a = ${left3.col}`);
+});
+
+Deno.test("editTextareaKey backspace and delete remove a ZWJ family emoji whole", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  // Backspace before 'b' removes 'b'; backspace before the emoji removes the
+  // whole 11-code-unit cluster, never a fragment.
+  const bsB = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 13 }), {
+    name: "backspace",
+    ...base,
+  });
+  if (bsB.lines[0] !== `a${FAMILY_EMOJI}` || bsB.col !== 12) {
+    throw new Error(`backspace b = ${JSON.stringify(bsB)}`);
+  }
+  const bsFam = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 12 }), {
+    name: "backspace",
+    ...base,
+  });
+  if (bsFam.lines[0] !== "ab" || bsFam.col !== 1) {
+    throw new Error(`backspace emoji = ${JSON.stringify(bsFam)}`);
+  }
+  // Delete at the cluster boundary removes the whole cluster; the cursor
+  // stays at the boundary (the following char's start).
+  const del = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }), {
+    name: "delete",
+    ...base,
+  });
+  if (del.lines[0] !== "ab" || del.col !== 1) {
+    throw new Error(`delete emoji = ${JSON.stringify(del)}`);
+  }
+  // A mid-cluster cursor (from caller props) snaps to the boundary after its
+  // cluster — where its caret visually paints — so backspace removes the
+  // whole cluster.
+  const snapped = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 5 }), {
+    name: "backspace",
+    ...base,
+  });
+  if (snapped.lines[0] !== "ab" || snapped.col !== 1) {
+    throw new Error(`snapped backspace = ${JSON.stringify(snapped)}`);
+  }
+});
+
+Deno.test("pasteIntoTextarea before a ZWJ cluster inserts at the cluster boundary", () => {
+  // col 1 is the boundary between 'a' and the emoji: the paste lands there.
+  const atBoundary = pasteIntoTextarea(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }), "X");
+  if (atBoundary.lines[0] !== `aX${FAMILY_EMOJI}b`) throw new Error(`value = ${atBoundary.lines[0]}`);
+  if (atBoundary.row !== 0 || atBoundary.col !== 2) {
+    throw new Error(`row/col = ${atBoundary.row}/${atBoundary.col}`);
+  }
+  // A mid-cluster cursor snaps to the boundary after its cluster — the paste
+  // lands after the emoji, before 'b', never inside the cluster.
+  const snapped = pasteIntoTextarea(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 5 }), "X");
+  if (snapped.lines[0] !== `a${FAMILY_EMOJI}Xb`) throw new Error(`snap value = ${snapped.lines[0]}`);
+  if (snapped.row !== 0 || snapped.col !== 13) {
+    throw new Error(`snap row/col = ${snapped.row}/${snapped.col}`);
   }
 });
 
@@ -3415,6 +4335,148 @@ Deno.test("useFocus with an onPaste handler registers paste routing", () => {
   if (manager.routePaste("hi") !== false) throw new Error("disposed handle must not route");
 });
 
+// ---------------------------------------------------------------------------
+// IME-confirmed paste round-trips (round 5, subtask 4)
+// ---------------------------------------------------------------------------
+//
+// crossterm 0.29 surfaces no composition/preedit events (see docs/roadmap.md
+// "IME posture"), so an IME's confirmed composition reaches an Input/Textarea
+// through the shipped bracketed-paste path: `EnableBracketedPaste` in the
+// backend, `TernEvent::Paste`, `FocusManager.routePaste`, and
+// `pasteInto` / `pasteIntoTextarea`. These suites pin that path: every
+// multi-codepoint CJK/IME-confirmed string — pre-composed (NFC) and
+// decomposed (NFD) forms alike — round-trips **losslessly** into a focused
+// Input and a focused Textarea, and the insert is cluster-safe (a caret
+// inside a wide glyph or mid-cluster snaps to the cluster boundary, never
+// splitting a grapheme).
+
+Deno.test("routePaste round-trips IME-confirmed CJK into a focused Input (plain and pre-composed)", () => {
+  // A pre-composed (NFC) IME-confirmed string: CJK ideographs, each a single
+  // 2-column grapheme cluster. The paste lands verbatim at the caret and the
+  // caret advances by the total display width (8 for 你好世界).
+  const manager = new FocusManager();
+  const input = Input({ value: "ab", caret: 1 });
+  useFocus("in", input, () => {}, manager, (text) => pasteInto(input, text)).focus();
+  if (manager.routePaste("你好世界") !== true) throw new Error("a focused input must consume the paste");
+  if (input.props.value !== "a你好世界b") {
+    throw new Error(`value = ${JSON.stringify(input.props.value)}, expected "a你好世界b"`);
+  }
+  if (input.children[0]?.props.text !== "a你好世界b") {
+    throw new Error(`leaf text = ${JSON.stringify(input.children[0]?.props.text)}`);
+  }
+  if (input.props.caret !== 9 || input.children[0]?.props.caret !== 9) {
+    throw new Error(`caret = ${input.props.caret}/${input.children[0]?.props.caret}, expected 9`);
+  }
+
+  // A second composition confirms in a row and accumulates losslessly (an
+  // IME emits one paste per confirmed composition). The value/caret are read
+  // through functions so TS does not narrow their types to the literal of the
+  // previous comparison (see the pasteCount pattern above).
+  const readValue = () => input.props.value;
+  const readCaret = () => input.props.caret;
+  if (manager.routePaste("こんにちは") !== true) throw new Error("a second paste must be consumed");
+  if (readValue() !== "a你好世界こんにちはb") {
+    throw new Error(`accumulated value = ${JSON.stringify(readValue())}`);
+  }
+  if (readCaret() !== 19) throw new Error(`accumulated caret = ${readCaret()}, expected 19`);
+
+  // A decomposed (NFD) form: Hangul jamo — decomposed 한글 is two LVT
+  // grapheme clusters (4 display columns) — must round-trip verbatim.
+  const jamoManager = new FocusManager();
+  const jamo = Input({ value: "ab", caret: 1 });
+  useFocus("jamo", jamo, () => {}, jamoManager, (text) => pasteInto(jamo, text)).focus();
+  if (jamoManager.routePaste("한글") !== true) throw new Error("a jamo paste must be consumed");
+  if (jamo.props.value !== "a한글b") {
+    throw new Error(`jamo value = ${JSON.stringify(jamo.props.value)}`);
+  }
+  if (jamo.props.caret !== 5) throw new Error(`jamo caret = ${jamo.props.caret}, expected 5`);
+
+  // A base-plus-combining NFD sequence (é = e + U+0301) is one 1-column
+  // cluster and must survive the round-trip as the same code units.
+  const combiningManager = new FocusManager();
+  const combining = Input({ value: "ab", caret: 1 });
+  useFocus("comb", combining, () => {}, combiningManager, (text) => pasteInto(combining, text)).focus();
+  if (combiningManager.routePaste("e\u{301}") !== true) throw new Error("a combining paste must be consumed");
+  if (combining.props.value !== "ae\u{301}b") {
+    throw new Error(`combining value = ${JSON.stringify(combining.props.value)}`);
+  }
+  if (combining.props.caret !== 2) throw new Error(`combining caret = ${combining.props.caret}, expected 2`);
+
+  // Cluster-safe insert: a caret column inside a wide glyph (col 1 of the
+  // 2-column コ) snaps back to the cluster start — the paste lands before
+  // the glyph, never mid-cluster.
+  const snapManager = new FocusManager();
+  const snap = Input({ value: "コab", caret: 1 });
+  useFocus("snap", snap, () => {}, snapManager, (text) => pasteInto(snap, text)).focus();
+  if (snapManager.routePaste("世") !== true) throw new Error("a snap paste must be consumed");
+  if (snap.props.value !== "世コab") {
+    throw new Error(`snap value = ${JSON.stringify(snap.props.value)}, expected "世コab"`);
+  }
+  if (snap.props.caret !== 3) throw new Error(`snap caret = ${snap.props.caret}, expected 3`);
+});
+
+Deno.test("routePaste round-trips IME-confirmed CJK into a focused Textarea (plain and pre-composed)", () => {
+  // A pre-composed (NFC) IME-confirmed string lands at the caret column; the
+  // textarea caret column is a code-unit index, so it advances by the pasted
+  // code units (4 for 你好世界).
+  const manager = new FocusManager();
+  const ta = Textarea({ lines: ["ab", "cd"], row: 1, col: 1 });
+  useFocus("ta", ta, () => {}, manager, (text) => pasteIntoTextarea(ta, text)).focus();
+  if (manager.routePaste("你好世界") !== true) throw new Error("a focused textarea must consume the paste");
+  if ((ta.props as TextareaProps).lines?.join(",") !== "ab,c你好世界d") {
+    throw new Error(`lines = ${JSON.stringify(ta.props.lines)}`);
+  }
+  if ((ta.props as TextareaProps).row !== 1 || (ta.props as TextareaProps).col !== 5) {
+    throw new Error(`row/col = ${(ta.props as TextareaProps).row}/${(ta.props as TextareaProps).col}, expected 1/5`);
+  }
+  if (ta.children[1]?.props.text !== "c你好世界d") {
+    throw new Error(`leaf = ${JSON.stringify(ta.children[1]?.props.text)}`);
+  }
+
+  // A second composition accumulates losslessly on the same line.
+  if (manager.routePaste("안녕하세요") !== true) throw new Error("a second textarea paste must be consumed");
+  if ((ta.props as TextareaProps).lines?.join(",") !== "ab,c你好世界안녕하세요d") {
+    throw new Error(`accumulated lines = ${JSON.stringify(ta.props.lines)}`);
+  }
+  if ((ta.props as TextareaProps).col !== 10) throw new Error(`accumulated col = ${(ta.props as TextareaProps).col}`);
+
+  // A multi-line CJK paste: the pasted \n splits into new logical lines with
+  // the post-caret tail joining the last segment.
+  const multiManager = new FocusManager();
+  const multi = Textarea({ lines: ["你好"], row: 0, col: 2 });
+  useFocus("multi", multi, () => {}, multiManager, (text) => pasteIntoTextarea(multi, text)).focus();
+  if (multiManager.routePaste("世\n界") !== true) throw new Error("a multi-line paste must be consumed");
+  if ((multi.props as TextareaProps).lines?.join(",") !== "你好世,界") {
+    throw new Error(`multi lines = ${JSON.stringify(multi.props.lines)}`);
+  }
+  if ((multi.props as TextareaProps).row !== 1 || (multi.props as TextareaProps).col !== 1) {
+    throw new Error(`multi row/col = ${(multi.props as TextareaProps).row}/${(multi.props as TextareaProps).col}, expected 1/1`);
+  }
+  if (multi.children[1]?.props.text !== "界") throw new Error(`multi leaf = ${JSON.stringify(multi.children[1]?.props.text)}`);
+
+  // A decomposed (NFD) Hangul jamo paste inserts verbatim; the caret column
+  // advances by code units (3 for 한).
+  const jamoManager = new FocusManager();
+  const jamo = Textarea({ lines: ["ab"], row: 0, col: 1 });
+  useFocus("jamo", jamo, () => {}, jamoManager, (text) => pasteIntoTextarea(jamo, text)).focus();
+  if (jamoManager.routePaste("한") !== true) throw new Error("a jamo textarea paste must be consumed");
+  if ((jamo.props as TextareaProps).lines?.join(",") !== "a한b") {
+    throw new Error(`jamo lines = ${JSON.stringify(jamo.props.lines)}`);
+  }
+  if ((jamo.props as TextareaProps).col !== 4) throw new Error(`jamo col = ${(jamo.props as TextareaProps).col}, expected 4`);
+
+  // Cluster-safe insert: a mid-cluster caret column (col 3 inside the
+  // 3-code-unit 한 cluster) snaps to the cluster end before the paste.
+  const snapManager = new FocusManager();
+  const snap = Textarea({ lines: ["a한b"], row: 0, col: 3 });
+  useFocus("snap", snap, () => {}, snapManager, (text) => pasteIntoTextarea(snap, text)).focus();
+  if (snapManager.routePaste("文") !== true) throw new Error("a snap textarea paste must be consumed");
+  if ((snap.props as TextareaProps).lines?.join(",") !== "a한文b") {
+    throw new Error(`snap lines = ${JSON.stringify(snap.props.lines)}`);
+  }
+  if ((snap.props as TextareaProps).col !== 5) throw new Error(`snap col = ${(snap.props as TextareaProps).col}, expected 5`);
+});
+
 Deno.test("unregister clears the active focus and stops dispatch", () => {
   const manager = new FocusManager();
   const node = Text({ text: "x" });
@@ -4550,5 +5612,304 @@ Deno.test("focusAt defaults to the shared focusManager", () => {
     if (focusManager.activeId !== "shared") throw new Error(`active = ${focusManager.activeId}`);
     handle.dispose();
     focusManager.blur();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mouse selection (viewport-cell-scoped v1)
+//
+// The selection module drives the renderer's native selection overlay
+// (subtask 1) from mouse events: `down_left` starts a session (a double-click
+// within SELECTION_DOUBLE_CLICK_MS ms / one cell selects the word),
+// `drag_left` moves the active endpoint, any `up_*` ends the session with
+// clear-on-release. copySelection pushes the selection text to the clipboard;
+// selectionKey binds ctrl+shift+c (plain ctrl+c stays unconsumed).
+//
+// Scenes are the fake painter's canonical single-row "hello world" (11x1, or
+// 11x2 for the multi-row '\n' join) painted via `snapshotFrame` so the fake
+// `selection_text` / `selection_word_range` read real painted rows.
+// ---------------------------------------------------------------------------
+
+/** Assert the fake native renderer's selection overlay equals `expected`
+ * (or is `null` when the selection must be cleared). */
+function assertSelection(
+  expected: { col1: number; row1: number; col2: number; row2: number } | null,
+): void {
+  const native = lastFakeRenderer;
+  if (native === null) throw new Error("fake renderer not constructed");
+  const actual = native.selection;
+  if (expected === null) {
+    if (actual !== null) throw new Error(`selection = ${JSON.stringify(actual)}, expected null`);
+    return;
+  }
+  if (actual === null) throw new Error(`selection = null, expected ${JSON.stringify(expected)}`);
+  if (
+    actual.col1 !== expected.col1 || actual.row1 !== expected.row1 ||
+    actual.col2 !== expected.col2 || actual.row2 !== expected.row2
+  ) {
+    throw new Error(`selection = ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`);
+  }
+}
+
+Deno.test("selection drag state machine: down starts, drag extends, up ends", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Box({}, Text({ text: "hello world" })));
+    renderer.snapshotFrame(11, 1); // paint the frame selection_text reads
+
+    // A non-down_left event never starts a session.
+    if (startSelection(renderer, mouse("drag_left", 2, 0)) !== null) {
+      throw new Error("drag_left must not start a selection");
+    }
+
+    // down_left starts the session anchored at the pressed cell.
+    const started = startSelection(renderer, mouse("down_left", 2, 0));
+    if (started === null) throw new Error("down_left must start a selection");
+    if (started.col1 !== 2 || started.row1 !== 0 || started.col2 !== 2 || started.row2 !== 0) {
+      throw new Error(`started = ${JSON.stringify(started)}`);
+    }
+    assertSelection({ col1: 2, row1: 0, col2: 2, row2: 0 });
+
+    // drag_left moves the active endpoint, keeping the anchor fixed.
+    const r1 = dragSelection(renderer, mouse("drag_left", 5, 0));
+    if (r1 === null || r1.col1 !== 2 || r1.row1 !== 0 || r1.col2 !== 5 || r1.row2 !== 0) {
+      throw new Error(`drag 1 = ${JSON.stringify(r1)}`);
+    }
+    assertSelection({ col1: 2, row1: 0, col2: 5, row2: 0 });
+
+    // Dragging above/left of the anchor still spans the rect (the native
+    // overlay normalizes the endpoints).
+    const r2 = dragSelection(renderer, mouse("drag_left", 0, 0));
+    if (r2 === null || r2.col1 !== 2 || r2.row1 !== 0 || r2.col2 !== 0 || r2.row2 !== 0) {
+      throw new Error(`drag 2 = ${JSON.stringify(r2)}`);
+    }
+
+    // up_left ends the session and returns the last rect.
+    const ended = endSelection(renderer, mouse("up_left", 0, 0));
+    if (ended === null || ended.col1 !== 2 || ended.row1 !== 0 || ended.col2 !== 0 || ended.row2 !== 0) {
+      throw new Error(`ended = ${JSON.stringify(ended)}`);
+    }
+
+    // After the release a drag_left is inert, and end without a session is a
+    // no-op.
+    if (dragSelection(renderer, mouse("drag_left", 7, 0)) !== null) {
+      throw new Error("a drag after up_left must be a no-op");
+    }
+    if (endSelection(renderer, mouse("up_left", 7, 0)) !== null) {
+      throw new Error("end without a session must return null");
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("a double-click within 500ms and one cell selects the word; slower or farther presses do not", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Box({}, Text({ text: "hello world" })));
+    renderer.snapshotFrame(11, 1);
+    if (SELECTION_DOUBLE_CLICK_MS !== 500) {
+      throw new Error(`SELECTION_DOUBLE_CLICK_MS = ${SELECTION_DOUBLE_CLICK_MS}`);
+    }
+
+    // Two presses on the same cell within the window: word select.
+    setSelectionClockForTesting(() => 1000);
+    startSelection(renderer, mouse("down_left", 6, 0)); // 'w' of "world"
+    endSelection(renderer, mouse("up_left", 6, 0));
+    setSelectionClockForTesting(() => 1400); // +400 ms, inside the window
+    const word = startSelection(renderer, mouse("down_left", 6, 0));
+    if (word === null || word.col1 !== 6 || word.row1 !== 0 || word.col2 !== 10 || word.row2 !== 0) {
+      throw new Error(`word double-click = ${JSON.stringify(word)}`);
+    }
+    assertSelection({ col1: 6, row1: 0, col2: 10, row2: 0 });
+    endSelection(renderer, mouse("up_left", 6, 0));
+
+    // A press more than 500 ms after the previous one is a fresh selection.
+    setSelectionClockForTesting(() => 2000);
+    startSelection(renderer, mouse("down_left", 6, 0));
+    endSelection(renderer, mouse("up_left", 6, 0));
+    setSelectionClockForTesting(() => 2600); // +600 ms, outside the window
+    const late = startSelection(renderer, mouse("down_left", 6, 0));
+    if (late === null || late.col1 !== 6 || late.col2 !== 6) {
+      throw new Error(`late press = ${JSON.stringify(late)}`);
+    }
+    assertSelection({ col1: 6, row1: 0, col2: 6, row2: 0 });
+    endSelection(renderer, mouse("up_left", 6, 0));
+
+    // A press two cells away is not a double-click even inside the window.
+    setSelectionClockForTesting(() => 3000);
+    startSelection(renderer, mouse("down_left", 6, 0));
+    endSelection(renderer, mouse("up_left", 6, 0));
+    setSelectionClockForTesting(() => 3300); // +300 ms, but 2 cells away
+    const far = startSelection(renderer, mouse("down_left", 8, 0));
+    if (far === null || far.col1 !== 8 || far.col2 !== 8) {
+      throw new Error(`far press = ${JSON.stringify(far)}`);
+    }
+    assertSelection({ col1: 8, row1: 0, col2: 8, row2: 0 });
+    endSelection(renderer, mouse("up_left", 8, 0));
+
+    // A press one cell away IS a double-click (the <= 1 cell bound).
+    setSelectionClockForTesting(() => 4000);
+    startSelection(renderer, mouse("down_left", 6, 0));
+    endSelection(renderer, mouse("up_left", 6, 0));
+    setSelectionClockForTesting(() => 4200); // +200 ms, 1 cell away
+    const adjacent = startSelection(renderer, mouse("down_left", 7, 0));
+    if (adjacent === null || adjacent.col1 !== 6 || adjacent.col2 !== 10) {
+      throw new Error(`adjacent double-click = ${JSON.stringify(adjacent)}`);
+    }
+    endSelection(renderer, mouse("up_left", 7, 0));
+
+    // A double-click on whitespace falls back to the 1-cell selection.
+    setSelectionClockForTesting(() => 5000);
+    startSelection(renderer, mouse("down_left", 5, 0)); // the space
+    endSelection(renderer, mouse("up_left", 5, 0));
+    setSelectionClockForTesting(() => 5200);
+    const space = startSelection(renderer, mouse("down_left", 5, 0));
+    if (space === null || space.col1 !== 5 || space.col2 !== 5) {
+      throw new Error(`whitespace double-click = ${JSON.stringify(space)}`);
+    }
+    assertSelection({ col1: 5, row1: 0, col2: 5, row2: 0 });
+    endSelection(renderer, mouse("up_left", 5, 0));
+
+    setSelectionClockForTesting(() => Date.now());
+    renderer.destroy();
+  });
+});
+
+Deno.test("selection text round-trips: the drag-selected rect extracts the covered text", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Box({}, Text({ text: "hello world" })));
+    renderer.snapshotFrame(11, 1);
+
+    startSelection(renderer, mouse("down_left", 6, 0));
+    dragSelection(renderer, mouse("drag_left", 10, 0));
+    if (renderer.selectionText() !== "world") {
+      throw new Error(`selectionText = ${JSON.stringify(renderer.selectionText())}`);
+    }
+
+    // Dragging beyond the text clips at the frame's spaces.
+    dragSelection(renderer, mouse("drag_left", 12, 0));
+    if (renderer.selectionText() !== "world  ") {
+      throw new Error(`clipped selectionText = ${JSON.stringify(renderer.selectionText())}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("a drag onto a second row joins the selection text with a newline", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Box({}, Text({ text: "hello world" })));
+    renderer.snapshotFrame(11, 2); // row 1 is empty (spaces)
+
+    startSelection(renderer, mouse("down_left", 0, 0));
+    dragSelection(renderer, mouse("drag_left", 4, 1));
+    // Rect cols 0-4, rows 0-1: "hello" over the painted row, then a row of
+    // five spaces — rows are joined with '\n'.
+    if (renderer.selectionText() !== "hello\n     ") {
+      throw new Error(`two-row selectionText = ${JSON.stringify(renderer.selectionText())}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("copySelection pushes the selection text to the clipboard", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Box({}, Text({ text: "hello world" })));
+    renderer.snapshotFrame(11, 1);
+    // Read through a function: TS control-flow narrowing would otherwise pin
+    // `lastClipboard` to the literal of the first assertion below.
+    const clipboard = (): string | null => lastClipboard;
+
+    // No selection set: copies the empty string.
+    copySelection(renderer);
+    if (clipboard() !== "") {
+      throw new Error(`empty copy = ${JSON.stringify(clipboard())}`);
+    }
+
+    startSelection(renderer, mouse("down_left", 0, 0));
+    dragSelection(renderer, mouse("drag_left", 4, 0));
+    copySelection(renderer);
+    if (clipboard() !== "hello") {
+      throw new Error(`copy = ${JSON.stringify(clipboard())}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("endSelection clears the selection overlay on release (clear-on-release)", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Box({}, Text({ text: "hello world" })));
+    renderer.snapshotFrame(11, 1);
+
+    startSelection(renderer, mouse("down_left", 6, 0));
+    dragSelection(renderer, mouse("drag_left", 10, 0));
+    // Active during the gesture.
+    if (renderer.selectionText() !== "world") {
+      throw new Error(`active selectionText = ${JSON.stringify(renderer.selectionText())}`);
+    }
+
+    // The release ends the session AND clears the overlay: no reversed cells
+    // survive the gesture.
+    if (endSelection(renderer, mouse("up_left", 10, 0)) === null) {
+      throw new Error("up_left must end the selection");
+    }
+    if (renderer.selectionText() !== "") {
+      throw new Error(`selectionText after release = ${JSON.stringify(renderer.selectionText())}`);
+    }
+    assertSelection(null);
+    renderer.destroy();
+  });
+});
+
+Deno.test("selectionKey copies on ctrl+shift+c and leaves plain ctrl+c (exit) unconsumed", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Box({}, Text({ text: "hello world" })));
+    renderer.snapshotFrame(11, 1);
+    startSelection(renderer, mouse("down_left", 0, 0));
+    dragSelection(renderer, mouse("drag_left", 4, 0));
+
+    // ctrl+shift+c copies the active selection text.
+    if (selectionKey(renderer, { name: "char", char: "c", ctrl: true, alt: false, shift: true }) !== true) {
+      throw new Error("ctrl+shift+c must be consumed");
+    }
+    if (lastClipboard !== "hello") {
+      throw new Error(`copy = ${JSON.stringify(lastClipboard)}`);
+    }
+
+    // Plain ctrl+c is the exit convention: never consumed by the selection
+    // handler, so the exit binding still sees it.
+    if (selectionKey(renderer, { name: "char", char: "c", ctrl: true, alt: false, shift: false }) !== false) {
+      throw new Error("plain ctrl+c must not be consumed");
+    }
+    // Other keys are not consumed.
+    if (selectionKey(renderer, { name: "char", char: "v", ctrl: true, alt: false, shift: false }) !== false) {
+      throw new Error("ctrl+v must not be consumed");
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("selectWordAt applies the word range or leaves the selection untouched at whitespace", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Box({}, Text({ text: "hello world" })));
+    renderer.snapshotFrame(11, 1);
+
+    const range = selectWordAt(renderer, 7, 0);
+    if (range === null || range.col1 !== 6 || range.row1 !== 0 || range.col2 !== 10 || range.row2 !== 0) {
+      throw new Error(`word = ${JSON.stringify(range)}`);
+    }
+    assertSelection({ col1: 6, row1: 0, col2: 10, row2: 0 });
+
+    // Whitespace: null, and the selection is left untouched.
+    if (selectWordAt(renderer, 5, 0) !== null) {
+      throw new Error("whitespace must yield null");
+    }
+    assertSelection({ col1: 6, row1: 0, col2: 10, row2: 0 });
+    renderer.destroy();
   });
 });

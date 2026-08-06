@@ -1,7 +1,7 @@
 //! The compositor's 2D cell grid, plus multi-width-aware minimal diff and
 //! region-aware drawing (clip rects and scroll offsets).
 
-use crate::cell::{char_width, Cell, CellUpdate};
+use crate::cell::{char_width, clusters, Cell, CellUpdate, Cluster};
 use crate::color::Color;
 use crate::cursor::Cursor;
 use crate::rect::Rect;
@@ -90,6 +90,62 @@ impl Buffer {
         self.cells.fill(Cell::default());
     }
 
+    /// Reset only the cells inside `r` to the blank default, leaving cells
+    /// outside untouched. `r` is clipped to the buffer.
+    ///
+    /// This is the cheap-clear counterpart of [`clear`](Self::clear) for the
+    /// dirty-repaint path: a reused scratch frame only needs its dirty-union
+    /// cells blanked before repainting — clearing the whole buffer would touch
+    /// every cell for a one-cell repaint.
+    pub fn clear_rect(&mut self, r: Rect) {
+        let x0 = r.x.max(0) as u16;
+        let y0 = r.y.max(0) as u16;
+        let x1 = r.right().min(self.width as i32).max(0) as u16;
+        let y1 = r.bottom().min(self.height as i32).max(0) as u16;
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let width = self.width as usize;
+        let w = (x1 - x0) as usize;
+        for y in y0..y1 {
+            let start = y as usize * width + x0 as usize;
+            self.cells[start..start + w].fill(Cell::default());
+        }
+    }
+
+    /// Copy the cells inside `r` from `src` into `self` (both viewport-sized;
+    /// `r` is clipped to both buffers). This is how a dirty repaint lands:
+    /// the freshly painted scratch frame supplies the dirty union's cells,
+    /// and every cell outside it keeps its retained value.
+    ///
+    /// Row-major slice copies (one `clone_from_slice` per row) instead of a
+    /// per-cell bounds-checked clone — the hot path of every dirty frame.
+    pub fn copy_region(&mut self, src: &Buffer, r: Rect) {
+        let x0 = r.x.max(0) as u16;
+        let y0 = r.y.max(0) as u16;
+        let x1 = r
+            .right()
+            .min(self.width as i32)
+            .min(src.width as i32)
+            .max(0) as u16;
+        let y1 = r
+            .bottom()
+            .min(self.height as i32)
+            .min(src.height as i32)
+            .max(0) as u16;
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let dw = self.width as usize;
+        let sw = src.width as usize;
+        let w = (x1 - x0) as usize;
+        for y in y0..y1 {
+            let d = y as usize * dw + x0 as usize;
+            let s = y as usize * sw + x0 as usize;
+            self.cells[d..d + w].clone_from_slice(&src.cells[s..s + w]);
+        }
+    }
+
     /// Row-major index of (`x`, `y`), or `None` when out of bounds.
     pub fn index(&self, x: u16, y: u16) -> Option<usize> {
         if x < self.width && y < self.height {
@@ -133,6 +189,7 @@ impl Buffer {
             let i = self.index(x, y).expect("bounds checked above");
             self.cells[i] = Cell {
                 ch,
+                symbol: None,
                 style,
                 width: 2,
             };
@@ -144,30 +201,71 @@ impl Buffer {
         };
         self.cells[i] = Cell {
             ch,
+            symbol: None,
             style,
             width: w,
         };
         true
     }
 
+    /// Write a grapheme cluster starting at (`x`, `y`): the cluster occupies
+    /// [`Cluster::width`] columns as one logical glyph, so a 2-column cluster
+    /// writes its lead cell (carrying the full cluster symbol) plus a masked
+    /// continuation cell at `x + 1`. Returns `false` (writing nothing) when
+    /// the cluster does not fit, keeping the buffer's wide-char invariant
+    /// intact. A zero-width cluster (a lone combining mark) writes nothing.
+    pub fn set_cluster(&mut self, x: u16, y: u16, cluster: &Cluster<'_>, style: Style) -> bool {
+        let w = cluster.width;
+        if w == 0 {
+            return false;
+        }
+        let ch = cluster.lead();
+        let symbol = cluster.symbol();
+        if w == 2 {
+            if x + 1 >= self.width || y >= self.height {
+                return false;
+            }
+            let i = self.index(x, y).expect("bounds checked above");
+            self.cells[i] = Cell {
+                ch,
+                symbol,
+                style,
+                width: 2,
+            };
+            self.cells[i + 1] = Cell::mask(style);
+            return true;
+        }
+        let Some(i) = self.index(x, y) else {
+            return false;
+        };
+        self.cells[i] = Cell {
+            ch,
+            symbol,
+            style,
+            width: 1,
+        };
+        true
+    }
+
     /// Write a string starting at (`x`, `y`), advancing the cursor by each
-    /// character's display width. Writing stops at the right edge so no wide
-    /// character is ever truncated mid-glyph. Combining marks (width 0) are
-    /// skipped: a single-char cell cannot hold a base-plus-combining cluster.
+    /// grapheme cluster's display width. Writing stops at the right edge so
+    /// no cluster is ever truncated mid-glyph: a cluster that does not fit
+    /// whole is dropped whole. Zero-width clusters (lone combining marks) are
+    /// skipped.
     pub fn set_string(&mut self, x: u16, y: u16, text: &str, style: Style) {
         let mut cx = x;
-        for ch in text.chars() {
+        for cluster in clusters(text) {
             if cx >= self.width {
                 break;
             }
-            let w = char_width(ch);
+            let w = cluster.width;
             if w == 0 {
                 continue;
             }
             if cx + w as u16 > self.width {
                 break;
             }
-            self.set_char(cx, y, ch, style);
+            self.set_cluster(cx, y, &cluster, style);
             cx += w as u16;
         }
     }
@@ -200,6 +298,7 @@ impl Buffer {
             let i = by as usize * self.width as usize + bx as usize;
             self.cells[i] = Cell {
                 ch,
+                symbol: None,
                 style,
                 width: 2,
             };
@@ -220,21 +319,84 @@ impl Buffer {
         let i = by as usize * self.width as usize + bx as usize;
         self.cells[i] = Cell {
             ch,
+            symbol: None,
             style,
             width: w,
         };
         true
     }
 
+    /// Write one grapheme cluster at content position (`x`, `y`) through
+    /// `region`, occupying [`Cluster::width`] columns as one logical glyph.
+    ///
+    /// A 2-column cluster is written only when both of its columns land
+    /// inside the clip (and the buffer); otherwise it is dropped whole, never
+    /// split mid-cluster. The lead cell carries the cluster's full symbol; a
+    /// masked continuation cell covers the second column. Zero-width clusters
+    /// (lone combining marks) write nothing. Returns `false` when nothing was
+    /// written.
+    pub fn set_cluster_region(
+        &mut self,
+        x: i32,
+        y: i32,
+        cluster: &Cluster<'_>,
+        style: Style,
+        region: Region,
+    ) -> bool {
+        let w = cluster.width;
+        if w == 0 {
+            return false;
+        }
+        let ch = cluster.lead();
+        let symbol = cluster.symbol();
+        if w == 2 {
+            let bx = region.map_x(x);
+            let by = region.map_y(y);
+            // Both columns must land inside the clip and the buffer.
+            if bx < 0 || by < 0 || bx + 1 >= self.width as i32 || by >= self.height as i32 {
+                return false;
+            }
+            if !region.clip.contains(bx, by) || !region.clip.contains(bx + 1, by) {
+                return false;
+            }
+            let i = by as usize * self.width as usize + bx as usize;
+            self.cells[i] = Cell {
+                ch,
+                symbol,
+                style,
+                width: 2,
+            };
+            self.cells[i + 1] = Cell::mask(style);
+            return true;
+        }
+        let bx = region.map_x(x);
+        let by = region.map_y(y);
+        if bx < 0 || by < 0 || bx >= self.width as i32 || by >= self.height as i32 {
+            return false;
+        }
+        if !region.clip.contains(bx, by) {
+            return false;
+        }
+        let i = by as usize * self.width as usize + bx as usize;
+        self.cells[i] = Cell {
+            ch,
+            symbol,
+            style,
+            width: 1,
+        };
+        true
+    }
+
     /// Write a string through `region` starting at content position (`x`,
-    /// `y`), advancing the cursor by each character's display width. Writing
-    /// stops at the clip rect's right edge (in buffer coordinates) so no wide
-    /// character is ever truncated mid-glyph; combining marks (width 0) are
+    /// `y`), advancing the cursor by each grapheme cluster's display width.
+    /// Writing stops at the clip rect's right edge (in buffer coordinates) so
+    /// no cluster is ever truncated mid-glyph: a cluster that does not fit
+    /// whole is dropped whole. Zero-width clusters (lone combining marks) are
     /// skipped, as in [`set_string`](Self::set_string).
     pub fn set_string_region(&mut self, x: i32, y: i32, text: &str, style: Style, region: Region) {
         let mut cx = x;
-        for ch in text.chars() {
-            let w = char_width(ch);
+        for cluster in clusters(text) {
+            let w = cluster.width;
             if w == 0 {
                 continue;
             }
@@ -244,7 +406,7 @@ impl Buffer {
             if bx + w as i32 > region.clip.right() {
                 break;
             }
-            self.set_char_region(cx, y, ch, style, region);
+            self.set_cluster_region(cx, y, &cluster, style, region);
             cx += w as i32;
         }
     }
@@ -306,7 +468,7 @@ impl Buffer {
         for y in 0..copy_h {
             let src = y * self.width as usize;
             let dst = y * width as usize;
-            cells[dst..dst + copy_w].copy_from_slice(&self.cells[src..src + copy_w]);
+            cells[dst..dst + copy_w].clone_from_slice(&self.cells[src..src + copy_w]);
         }
         // Drop wide characters whose masked neighbor no longer fits.
         for y in 0..copy_h {
@@ -327,6 +489,44 @@ impl Buffer {
     /// See the free [`diff`] function for semantics.
     pub fn diff_from(&self, prev: &Buffer) -> Vec<CellUpdate> {
         diff(prev, self)
+    }
+
+    /// Extract the text content of `rect` as a string, row-major: each row
+    /// contributes its cells' full cluster symbols ([`Cell::symbol_str`]) —
+    /// a multi-char cluster (a ZWJ emoji, a combining sequence, a flag)
+    /// contributes its whole symbol, and a masked continuation cell (the
+    /// zero-width right half of a 2-column glyph) contributes nothing — and
+    /// the rows are joined with `'\n'`.
+    ///
+    /// `rect` is clipped to the buffer: columns/rows outside it contribute
+    /// nothing, so the extraction never reads past the buffer's extent. An
+    /// empty or wholly out-of-bounds rect yields an empty string. The
+    /// result is the exact cell content — trailing blank cells (default
+    /// spaces) are preserved, matching what is painted.
+    pub fn text_in(&self, rect: Rect) -> String {
+        let x0 = rect.x.max(0) as u16;
+        let y0 = rect.y.max(0) as u16;
+        let x1 = rect.right().min(self.width as i32).max(0) as u16;
+        let y1 = rect.bottom().min(self.height as i32).max(0) as u16;
+        if x1 <= x0 || y1 <= y0 {
+            return String::new();
+        }
+        let mut out = String::new();
+        for y in y0..y1 {
+            if y > y0 {
+                out.push('\n');
+            }
+            for x in x0..x1 {
+                let Some(cell) = self.cell(x, y) else {
+                    continue;
+                };
+                if cell.is_masked() {
+                    continue;
+                }
+                out.push_str(&cell.symbol_str());
+            }
+        }
+        out
     }
 }
 
@@ -390,6 +590,7 @@ pub fn diff(prev: &Buffer, next: &Buffer) -> Vec<CellUpdate> {
                         x,
                         y,
                         ch: n.ch,
+                        symbol: n.symbol.clone(),
                         style: n.style,
                         width: 2,
                         masked: false,
@@ -406,6 +607,7 @@ pub fn diff(prev: &Buffer, next: &Buffer) -> Vec<CellUpdate> {
                                 x: nx,
                                 y,
                                 ch: ncell.ch,
+                                symbol: ncell.symbol.clone(),
                                 style: ncell.style,
                                 width: ncell.width,
                                 masked: ncell.width == 0,
@@ -419,6 +621,7 @@ pub fn diff(prev: &Buffer, next: &Buffer) -> Vec<CellUpdate> {
                         x,
                         y,
                         ch: n.ch,
+                        symbol: n.symbol.clone(),
                         style: n.style,
                         width: 0,
                         masked: true,
@@ -430,6 +633,7 @@ pub fn diff(prev: &Buffer, next: &Buffer) -> Vec<CellUpdate> {
                         x,
                         y,
                         ch: n.ch,
+                        symbol: n.symbol.clone(),
                         style: n.style,
                         width: 1,
                         masked: false,
@@ -489,6 +693,54 @@ mod tests {
         assert_eq!(b.cell(2, 0).unwrap().ch, 'a');
         // 'a' advances past the wide char: コ at 0-1, 'a' at 2.
         assert_eq!(b.cell(3, 0).unwrap(), &Cell::default());
+    }
+
+    #[test]
+    fn set_string_zwj_emoji_occupies_two_columns() {
+        // A ZWJ family emoji is ONE grapheme cluster rendered as a single
+        // 2-column glyph: the lead cell carries the full cluster symbol and
+        // the neighbor is masked.
+        let mut b = Buffer::new(4, 1);
+        b.set_string(0, 0, "👨‍👩‍👧‍👦x", Style::new());
+        let lead = b.cell(0, 0).unwrap();
+        assert_eq!(lead.ch, '👨');
+        assert_eq!(lead.symbol.as_deref(), Some("👨‍👩‍👧‍👦"));
+        assert_eq!(lead.width, 2);
+        assert!(!lead.is_masked());
+        let mask = b.cell(1, 0).unwrap();
+        assert_eq!(mask.ch, '\0');
+        assert_eq!(mask.width, 0);
+        assert!(mask.is_masked());
+        // The following char lands after the cluster's two columns.
+        assert_eq!(b.cell(2, 0).unwrap().ch, 'x');
+    }
+
+    #[test]
+    fn set_string_combining_sequence_occupies_one_cell() {
+        // A base + combining mark is ONE cluster occupying ONE cell, with the
+        // full symbol carried on the cell.
+        let mut b = Buffer::new(3, 1);
+        b.set_string(0, 0, "e\u{301}a", Style::new());
+        let c0 = b.cell(0, 0).unwrap();
+        assert_eq!(c0.ch, 'e');
+        assert_eq!(c0.symbol.as_deref(), Some("e\u{301}"));
+        assert_eq!(c0.width, 1);
+        assert!(!c0.is_masked());
+        // No masked neighbor: the next char occupies column 1.
+        assert_eq!(b.cell(1, 0).unwrap().ch, 'a');
+        assert_eq!(b.cell(2, 0).unwrap(), &Cell::default());
+    }
+
+    #[test]
+    fn set_string_flag_occupies_two_columns() {
+        let mut b = Buffer::new(3, 1);
+        b.set_string(0, 0, "🇷🇺a", Style::new());
+        let lead = b.cell(0, 0).unwrap();
+        assert_eq!(lead.ch, '🇷');
+        assert_eq!(lead.symbol.as_deref(), Some("🇷🇺"));
+        assert_eq!(lead.width, 2);
+        assert_eq!(b.cell(1, 0).unwrap().width, 0);
+        assert_eq!(b.cell(2, 0).unwrap().ch, 'a');
     }
 
     #[test]
@@ -634,6 +886,38 @@ mod tests {
     }
 
     #[test]
+    fn diff_identical_cluster_content_is_empty() {
+        // Two buffers holding the same ZWJ cluster content diff to nothing:
+        // the row-slice compare is by value (Box<str> equality), so a
+        // re-painted cluster is not a change.
+        let mut a = Buffer::new(4, 1);
+        a.set_string(0, 0, "👨‍👩‍👧‍👦", Style::new());
+        let mut b = Buffer::new(4, 1);
+        b.set_string(0, 0, "👨‍👩‍👧‍👦", Style::new());
+        assert!(diff(&a, &b).is_empty());
+    }
+
+    #[test]
+    fn diff_cluster_change_carries_full_symbol() {
+        // "ab" (two single cells) is replaced by a ZWJ cluster (one 2-column
+        // glyph): the lead update carries the FULL cluster symbol plus the
+        // masked neighbor — the flusher can print the cluster once.
+        let mut prev = Buffer::new(4, 1);
+        prev.set_string(0, 0, "ab", Style::new());
+        let mut next = Buffer::new(4, 1);
+        next.set_string(0, 0, "👨‍👩‍👧‍👦", Style::new());
+        let u = diff(&prev, &next);
+        assert_eq!(u.len(), 2, "lead + masked neighbor: {u:?}");
+        assert_eq!(u[0].x, 0);
+        assert_eq!(u[0].ch, '👨');
+        assert_eq!(u[0].symbol.as_deref(), Some("👨‍👩‍👧‍👦"));
+        assert_eq!(u[0].width, 2);
+        assert!(!u[0].masked);
+        assert_eq!(u[1].x, 1);
+        assert!(u[1].masked);
+    }
+
+    #[test]
     fn diff_change_in_one_row_only_updates_that_row() {
         let mut prev = Buffer::new(5, 3);
         prev.set_string(0, 0, "abcde", Style::new());
@@ -752,6 +1036,155 @@ mod tests {
         for x in 0..3 {
             assert_eq!(b.cell(x, 0), Some(&Cell::default()));
         }
+    }
+
+    #[test]
+    fn clear_rect_resets_only_inside_rect() {
+        let mut b = Buffer::new(5, 3);
+        for y in 0..3 {
+            for x in 0..5 {
+                b.set_char(x as u16, y as u16, 'x', Style::new());
+            }
+        }
+        b.clear_rect(Rect::new(1, 1, 2, 1));
+        // Inside the rect: blank.
+        assert_eq!(b.cell(1, 1).unwrap(), &Cell::default());
+        assert_eq!(b.cell(2, 1).unwrap(), &Cell::default());
+        // Outside the rect: untouched.
+        assert_eq!(b.cell(0, 1).unwrap().ch, 'x');
+        assert_eq!(b.cell(3, 1).unwrap().ch, 'x');
+        assert_eq!(b.cell(1, 0).unwrap().ch, 'x');
+        assert_eq!(b.cell(1, 2).unwrap().ch, 'x');
+        // A rect wholly outside the buffer is a no-op.
+        b.clear_rect(Rect::new(10, 10, 2, 2));
+        assert_eq!(b.cell(4, 2).unwrap().ch, 'x');
+    }
+
+    #[test]
+    fn copy_region_copies_rect_from_source() {
+        let mut src = Buffer::new(4, 2);
+        src.set_string(1, 0, "ab", Style::new().add_modifier(Modifiers::BOLD));
+        src.set_string(2, 1, "cd", Style::new().add_modifier(Modifiers::DIM));
+        let mut dst = Buffer::new(4, 2);
+        for y in 0..2 {
+            for x in 0..4 {
+                dst.set_char(x as u16, y as u16, '.', Style::new());
+            }
+        }
+        dst.copy_region(&src, Rect::new(1, 0, 2, 1));
+        // The copied region holds the source cells verbatim (ch + style).
+        assert_eq!(dst.cell(1, 0).unwrap().ch, 'a');
+        assert!(dst
+            .cell(1, 0)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::BOLD));
+        assert_eq!(dst.cell(2, 0).unwrap().ch, 'b');
+        // Cells outside the region keep their destination values.
+        assert_eq!(dst.cell(0, 0).unwrap().ch, '.');
+        assert_eq!(dst.cell(3, 0).unwrap().ch, '.');
+        assert_eq!(dst.cell(1, 1).unwrap().ch, '.');
+        // A rect clipped to the buffer bounds copies only the overlap: the
+        // region (1,0,4,2) overlaps dst2's single column 1, so src's 'a'
+        // (at src col 1) lands at dst2 col 1 and col 0 stays blank.
+        let mut dst2 = Buffer::new(2, 1);
+        dst2.copy_region(&src, Rect::new(1, 0, 4, 2));
+        assert_eq!(dst2.cell(0, 0).unwrap().ch, ' ');
+        assert_eq!(dst2.cell(1, 0).unwrap().ch, 'a');
+    }
+
+    #[test]
+    fn text_in_extracts_rows_joined_by_newline() {
+        // Two rows of exact-width content: each row's cells contribute their
+        // characters and the rows are joined with '\n'.
+        let mut b = Buffer::new(3, 2);
+        b.set_string(0, 0, "abc", Style::new());
+        b.set_string(0, 1, "def", Style::new());
+        assert_eq!(b.text_in(Rect::new(0, 0, 3, 2)), "abc\ndef");
+    }
+
+    #[test]
+    fn text_in_partial_rect_windows_into_the_buffer() {
+        // A sub-rect picks a window: cols 1..4 of row 0.
+        let mut b = Buffer::new(5, 1);
+        b.set_string(0, 0, "hello", Style::new());
+        assert_eq!(b.text_in(Rect::new(1, 0, 3, 1)), "ell");
+    }
+
+    #[test]
+    fn text_in_preserves_trailing_blank_cells() {
+        // The extraction is exact: trailing default spaces inside the rect
+        // are preserved (they are part of what is painted).
+        let mut b = Buffer::new(5, 1);
+        b.set_string(0, 0, "hi", Style::new());
+        assert_eq!(b.text_in(Rect::new(0, 0, 5, 1)), "hi   ");
+    }
+
+    #[test]
+    fn text_in_skips_masked_continuation_cells() {
+        // A wide char occupies cols 0-1 (lead + masked continuation): the
+        // mask contributes nothing, so the extraction yields the wide glyph
+        // once, followed by 'a' — never a doubled or NUL-laden column.
+        let mut b = Buffer::new(4, 1);
+        b.set_string(0, 0, "コa", Style::new());
+        assert_eq!(b.text_in(Rect::new(0, 0, 3, 1)), "コa");
+        // The full row (mask included) extracts the same glyph, not a split.
+        assert_eq!(b.text_in(Rect::new(0, 0, 4, 1)), "コa ");
+    }
+
+    #[test]
+    fn text_in_zwj_emoji_contributes_the_full_cluster_symbol() {
+        // A ZWJ family emoji is ONE 2-column cluster: the lead cell carries
+        // the full symbol string and the masked neighbor contributes nothing,
+        // so the extraction reconstructs the cluster whole.
+        let mut b = Buffer::new(4, 1);
+        b.set_string(0, 0, "👨‍👩‍👧‍👦x", Style::new());
+        assert_eq!(b.text_in(Rect::new(0, 0, 3, 1)), "👨‍👩‍👧‍👦x");
+        // The full row (masked neighbor + trailing blank) extracts the same
+        // cluster plus the following char and one trailing blank cell.
+        assert_eq!(b.text_in(Rect::new(0, 0, 4, 1)), "👨‍👩‍👧‍👦x ");
+    }
+
+    #[test]
+    fn text_in_combining_sequence_keeps_the_full_cluster() {
+        // A base + combining mark is ONE 1-column cluster carrying the full
+        // "e\u{301}" symbol on its single cell.
+        let mut b = Buffer::new(3, 1);
+        b.set_string(0, 0, "e\u{301}x", Style::new());
+        assert_eq!(b.text_in(Rect::new(0, 0, 2, 1)), "e\u{301}x");
+    }
+
+    #[test]
+    fn text_in_flag_contributes_the_full_cluster_symbol() {
+        // A regional-indicator flag is ONE 2-column cluster: lead symbol once,
+        // masked neighbor skipped.
+        let mut b = Buffer::new(3, 1);
+        b.set_string(0, 0, "🇷🇺a", Style::new());
+        assert_eq!(b.text_in(Rect::new(0, 0, 3, 1)), "🇷🇺a");
+    }
+
+    #[test]
+    fn text_in_clips_to_buffer_bounds() {
+        // A rect extending past the buffer's right/bottom edges is clipped:
+        // only the overlapping cells contribute.
+        let mut b = Buffer::new(3, 2);
+        b.set_string(0, 0, "abc", Style::new());
+        b.set_string(0, 1, "def", Style::new());
+        assert_eq!(b.text_in(Rect::new(1, 0, 10, 10)), "bc\nef");
+        // A negative origin clips the left/top edges too.
+        assert_eq!(b.text_in(Rect::new(-2, 0, 3, 2)), "a\nd");
+    }
+
+    #[test]
+    fn text_in_out_of_bounds_and_empty_rects_are_empty() {
+        let mut b = Buffer::new(3, 1);
+        b.set_string(0, 0, "abc", Style::new());
+        // Wholly outside the buffer.
+        assert_eq!(b.text_in(Rect::new(10, 10, 2, 2)), "");
+        // Zero-width / zero-height rects.
+        assert_eq!(b.text_in(Rect::new(0, 0, 0, 1)), "");
+        assert_eq!(b.text_in(Rect::new(0, 0, 1, 0)), "");
     }
 
     #[test]

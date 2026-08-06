@@ -83,11 +83,10 @@ use taffy::style::{
 };
 use taffy::tree::{Layout as TaffyLayout, NodeId as TaffyNodeId, TaffyTree};
 
+use tern_core::cell::clusters;
 use tern_core::layout::LayoutEngine;
 use tern_core::rect::{Rect, Size};
 use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene, SceneNode, Span};
-
-use unicode_width::UnicodeWidthStr;
 
 /// The tern layout engine: a thin wrapper over taffy 0.7.
 ///
@@ -517,7 +516,12 @@ fn reconcile(
 
 /// The pre-order reconciliation walk. Nodes that are hidden now (`display:
 /// none`) have their whole cached subtree removed; visible nodes are
-/// reconciled in place.
+/// reconciled in place. The descent mirrors [`build_node`]'s child filter
+/// ([`visible_children`]) exactly: a child a fresh build would not include —
+/// a non-absolute child of a `Text`/`StreamingText` leaf, or a `display:
+/// none` subtree — is never walked, so it can never be (re)built into the
+/// cached tree at a stale zero size. The dropped-children removal in
+/// [`reconcile_one`] is what evicts such nodes when they leave the layout.
 fn walk(
     scene: &Scene,
     id: NodeId,
@@ -532,7 +536,7 @@ fn walk(
     if matches!(prop_str(&node.props, "display"), Some("none")) {
         // Hidden now: the node and its whole subtree must leave the tree
         // (display:none subtrees are never built, so this only fires when the
-        // node was visible at the previous frame).
+        // node was visible at the previous frame — or for a hidden root).
         if state.node_map.contains_key(&id) {
             remove_subtree(scene, id, state, counters);
         }
@@ -542,7 +546,7 @@ fn walk(
         *force_rebuild = true;
         return;
     }
-    for &child in &node.children {
+    for child in visible_children(scene, node) {
         walk(scene, child, viewport, state, counters, force_rebuild);
     }
 }
@@ -626,6 +630,30 @@ fn reconcile_one(
         // from the child list — so a small structural change stays well below
         // the full-rebuild threshold.
         counters.changed += symmetric_diff_len(&prev.children, &children);
+        // Children that left the layout (a `display: none` toggle, or a
+        // parent that became a `Text`/`StreamingText` leaf filtering out its
+        // non-absolute children) must leave the cached tree: a fresh build
+        // never contains them, so keeping them around would leave stale
+        // zero-size nodes that diverge from the full layout.
+        let dropped: Vec<NodeId> = prev
+            .children
+            .iter()
+            .filter(|&&c| !children.contains(&c))
+            .copied()
+            .collect();
+        if !dropped.is_empty() {
+            for dropped in dropped {
+                remove_subtree(scene, dropped, state, counters);
+            }
+            // `TaffyTree::remove` detaches the child from its parent's
+            // children array WITHOUT invalidating the parent's layout cache,
+            // and `reconcile_children` may then see the child list already
+            // equal to the target and skip `set_children` — which would leave
+            // the parent's stale (pre-removal) layout in taffy's cache and
+            // diverge from a fresh build. Invalidate the parent explicitly so
+            // the next layout pass recomputes it with the new child list.
+            let _ = state.taffy.mark_dirty(t);
+        }
         reconcile_children(scene, t, &children, viewport, state, counters);
     }
     state.snapshots.insert(
@@ -684,7 +712,8 @@ fn symmetric_diff_len(a: &[NodeId], b: &[NodeId]) -> usize {
 
 /// Record snapshots for every visible node in the subtree rooted at `id` —
 /// exactly the nodes [`build_node`] just built — so a walk that visits them
-/// later sees them as up to date.
+/// later sees them as up to date. The descent mirrors [`build_node`]'s child
+/// filter: only the nodes the cached tree actually contains are snapshotted.
 fn snapshot_subtree(scene: &Scene, id: NodeId, viewport: Size, state: &mut EngineState<'_>) {
     let Some(node) = scene.node(id) else {
         return;
@@ -712,7 +741,7 @@ fn snapshot_subtree(scene: &Scene, id: NodeId, viewport: Size, state: &mut Engin
             children: visible_children(scene, node),
         },
     );
-    for &child in &node.children {
+    for child in visible_children(scene, node) {
         snapshot_subtree(scene, child, viewport, state);
     }
 }
@@ -949,9 +978,13 @@ fn prop_bool(props: &PropMap, key: &str) -> Option<bool> {
     }
 }
 
-/// Display width of a string in terminal cells (multi-width aware).
+/// Display width of a string in terminal cells: the sum of its grapheme
+/// clusters' widths (multi-width aware, cluster-indivisible — a ZWJ emoji
+/// measures 2 columns, a combining sequence measures 1). Mirrors the
+/// compositor's `display_width` so a text leaf's laid-out size agrees with
+/// what its paint pass draws.
 fn display_width(content: &str) -> usize {
-    UnicodeWidthStr::width(content)
+    clusters(content).map(|c| c.width as usize).sum()
 }
 
 /// Map a taffy `Layout` (relative to its parent, so already in scene

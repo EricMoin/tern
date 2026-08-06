@@ -5,6 +5,9 @@
 //! as a single queued ANSI escape-sequence stream. The diff-aware flush is
 //! split out into [`flush_diff_to`] over a generic `Write` so it can be unit
 //! tested against an in-memory buffer; the [`Backend`] methods use stdout.
+//! Window-title (OSC 0) and clipboard (OSC 52) writes follow the same seam:
+//! [`set_title_to`] / [`set_clipboard_to`] over a generic `Write`, with the
+//! `Backend` methods funneling to stdout.
 //!
 //! Consecutive updates with the same style on the same row at adjacent
 //! columns are batched into runs: one `MoveTo`, one unconditional SGR reset
@@ -110,6 +113,33 @@ fn detect_capabilities() -> BackendCapabilities {
     }
 }
 
+/// A `Write` wrapper that counts the bytes written through it, so the
+/// backend can report how many bytes a frame flush queued to the terminal.
+/// The count covers every byte the queueing writes (MoveTo / SGR / Print
+/// sequences) plus whatever the trailing flush pushes out.
+struct CountingWriter<W> {
+    inner: W,
+    bytes: usize,
+}
+
+impl<W> CountingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, bytes: 0 }
+    }
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.bytes += n;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 impl Backend {
     /// A fresh backend, with no park position recorded yet.
     pub const fn new() -> Self {
@@ -147,6 +177,19 @@ impl Backend {
     pub fn set_title(&self, title: &str) -> io::Result<()> {
         let mut out = io::stdout();
         set_title_to(&mut out, title)
+    }
+
+    /// Copy `text` to the system clipboard (OSC 52: `ESC ] 52 ; c ; <base64>
+    /// BEL`, where the payload is the text's UTF-8 bytes base64-encoded per
+    /// RFC 4648).
+    ///
+    /// crossterm has no OSC 52 support with the feature set tern enables (its
+    /// `osc52` feature is off by default, and its sequence uses the ST
+    /// terminator), so the escape is written through the backend queue
+    /// directly — the same seam as [`set_title`](Backend::set_title).
+    pub fn set_clipboard(&self, text: &str) -> io::Result<()> {
+        let mut out = io::stdout();
+        set_clipboard_to(&mut out, text)
     }
 
     /// Apply the renderer's startup screen transitions on stdout: the
@@ -208,15 +251,24 @@ impl Backend {
     }
 
     /// Flush a diff of [`CellUpdate`]s to stdout, then park the cursor at
-    /// `cursor_pos` (column, row).
+    /// `cursor_pos` (column, row). Returns the number of bytes queued to the
+    /// terminal — the ANSI escape-sequence stream for this frame — so the
+    /// renderer can report flushed-bytes-per-frame (the byte cost of a diff,
+    /// the seam the empty-diff fast path short-circuits).
     ///
     /// See [`flush_diff_to`] for the queueing semantics; its empty-diff fast
-    /// path is what makes consecutive no-op frames cheap. This legacy variant
-    /// parks the caret without touching its visibility; the caret-aware frame
-    /// flush is [`flush_diff_with_cursor`](Backend::flush_diff_with_cursor).
-    pub fn flush_diff(&mut self, updates: &[CellUpdate], cursor_pos: (u16, u16)) -> io::Result<()> {
-        let mut out = io::stdout();
-        flush_diff_to(&mut out, updates, cursor_pos, &mut self.last_flush_pos)
+    /// path is what makes consecutive no-op frames cheap (a fully suppressed
+    /// frame reports 0 bytes). This legacy variant parks the caret without
+    /// touching its visibility; the caret-aware frame flush is
+    /// [`flush_diff_with_cursor`](Backend::flush_diff_with_cursor).
+    pub fn flush_diff(
+        &mut self,
+        updates: &[CellUpdate],
+        cursor_pos: (u16, u16),
+    ) -> io::Result<usize> {
+        let mut out = CountingWriter::new(io::stdout());
+        flush_diff_to(&mut out, updates, cursor_pos, &mut self.last_flush_pos)?;
+        Ok(out.bytes)
     }
 
     /// Flush a diff of [`CellUpdate`]s to stdout, then position the terminal
@@ -269,6 +321,27 @@ pub fn disable_event_listening_to<W: Write>(w: &mut W) -> io::Result<()> {
 /// `Write` target.
 pub fn set_title_to<W: Write>(w: &mut W, title: &str) -> io::Result<()> {
     w.queue(SetTitle(title))?;
+    w.flush()
+}
+
+/// Copy `text` to the system clipboard (OSC 52: `ESC ] 52 ; c ; <base64>
+/// BEL`) on any `Write` target.
+///
+/// The escape is `ESC ] 52 ; c ; <payload> BEL` — OSC 52 with the selection
+/// parameter `c` (the clipboard) and the payload as the text's UTF-8 bytes
+/// base64-encoded per RFC 4648 (the standard xterm "Manipulate Selection
+/// Data" protocol). BEL (`\x07`) terminates the OSC string, matching the
+/// project's OSC 0 title convention; a terminal accepts BEL or ST (`ESC \`)
+/// interchangeably as the OSC terminator. crossterm's own clipboard command
+/// is gated behind its off-by-default `osc52` feature and emits the ST
+/// terminator, so the sequence is written through the queue directly rather
+/// than queued as a crossterm command.
+pub fn set_clipboard_to<W: Write>(w: &mut W, text: &str) -> io::Result<()> {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    w.write_all(b"\x1b]52;c;")?;
+    w.write_all(encoded.as_bytes())?;
+    w.write_all(b"\x07")?;
     w.flush()
 }
 
@@ -459,15 +532,15 @@ fn queue_cells<W: Write>(w: &mut W, updates: &[CellUpdate]) -> io::Result<()> {
 /// A batched run of consecutive same-style [`CellUpdate`]s on one row: one
 /// [`MoveTo`] to the run's first cell, one SGR style application for the
 /// shared style (skipped when the previously queued run applied the same
-/// style — see [`Run::queue`]), and every member's character printed in a
-/// single [`Print`] call.
+/// style — see [`Run::queue`]), and every member's text printed in a single
+/// [`Print`] call.
 ///
 /// Members occupy adjacent columns (`x` increases by 1 per member) and share
 /// one style. A run closes when the style, the row, or the column adjacency
-/// breaks, or when its last member's printed character advances the cursor
-/// by other than one column (a wide lead or a combining mark) — so a later
-/// member can never land on the wrong column. A masked NUL continuation cell
-/// joins its run as a space.
+/// breaks, or when its last member's printed text advances the cursor by
+/// other than one column (a 2-column cluster lead or a combining mark) — so a
+/// later member can never land on the wrong column. A masked NUL continuation
+/// cell joins its run as a space.
 struct Run {
     /// Column of the run's first member (the [`MoveTo`] target).
     x: u16,
@@ -477,9 +550,10 @@ struct Run {
     style: Style,
     /// Column of the run's last member.
     last_x: u16,
-    /// Cursor advance of the run's last member's printed character.
+    /// Cursor advance of the run's last member's printed text.
     last_advance: u8,
-    /// The run's characters, one per member, in column order.
+    /// The run's text, one cluster per member, in column order. A multi-char
+    /// cluster prints its full symbol string once.
     text: String,
 }
 
@@ -492,13 +566,13 @@ impl Run {
             style: update.style,
             last_x: update.x,
             last_advance: cell_advance(update),
-            text: String::from(cell_char(update)),
+            text: cell_text(update),
         }
     }
 
     /// Whether `update` continues this run: same row, same style, the next
     /// column over, and the run's last member advanced the cursor by exactly
-    /// one column so `update`'s character lands on its own column.
+    /// one column so `update`'s text lands on its own column.
     fn can_extend(&self, update: &CellUpdate) -> bool {
         update.y == self.y
             && update.style == self.style
@@ -506,9 +580,9 @@ impl Run {
             && self.last_advance == 1
     }
 
-    /// Append `update`'s character to the run.
+    /// Append `update`'s text to the run.
     fn push(&mut self, update: &CellUpdate) {
-        self.text.push(cell_char(update));
+        self.text.push_str(&cell_text(update));
         self.last_x = update.x;
         self.last_advance = cell_advance(update);
     }
@@ -539,20 +613,23 @@ impl Run {
     }
 }
 
-/// The character an update contributes to its run's `Print` call: a masked
-/// continuation cell (NUL) is cleared by printing a space; a zero-width
-/// combining mark (non-NUL) is printed raw.
-fn cell_char(update: &CellUpdate) -> char {
+/// The text an update contributes to its run's `Print` call: a masked
+/// continuation cell (NUL) is cleared by printing a space; a multi-char
+/// grapheme cluster prints its full symbol string once; a single-char cluster
+/// prints its character; a zero-width combining mark (non-NUL) prints raw.
+fn cell_text(update: &CellUpdate) -> String {
     if update.masked && update.ch == '\0' {
-        ' '
+        " ".to_string()
+    } else if let Some(symbol) = &update.symbol {
+        symbol.to_string()
     } else {
-        update.ch
+        update.ch.to_string()
     }
 }
 
-/// How many terminal columns an update's printed character advances the
-/// cursor: 2 for a wide lead, 0 for a combining mark, 1 for everything else
-/// (single-width characters and NUL masks, which print as spaces).
+/// How many terminal columns an update's printed text advances the cursor:
+/// 2 for a 2-column cluster lead, 0 for a combining mark, 1 for everything
+/// else (single-width clusters and NUL masks, which print as spaces).
 fn cell_advance(update: &CellUpdate) -> u8 {
     if update.width == 2 {
         2
@@ -657,9 +734,30 @@ mod tests {
             x,
             y,
             ch,
+            symbol: None,
             style,
             width,
             masked,
+        }
+    }
+
+    /// A cluster update: the lead cell of a multi-char grapheme cluster.
+    fn cluster_update(
+        x: u16,
+        y: u16,
+        ch: char,
+        symbol: &str,
+        style: Style,
+        width: u8,
+    ) -> CellUpdate {
+        CellUpdate {
+            x,
+            y,
+            ch,
+            symbol: Some(symbol.into()),
+            style,
+            width,
+            masked: false,
         }
     }
 
@@ -763,6 +861,50 @@ mod tests {
         assert!(s.starts_with("\x1b[1;1H\x1b[0m コ"), "got: {s:?}");
         // No per-cell MoveTo between the mask and the wide glyph.
         assert!(!s.contains("\x1b[2;2H"), "got: {s:?}");
+    }
+
+    #[test]
+    fn flush_diff_prints_zwj_cluster_symbol_once() {
+        // A ZWJ family emoji is a single 2-column grapheme cluster. The diff
+        // emits its lead update (carrying the full cluster symbol) followed by
+        // the masked continuation cell. The flush must print the FULL cluster
+        // string exactly once — never the lead char alone, never a re-split.
+        let style = Style::new();
+        let out = flush(
+            &[
+                cluster_update(0, 0, '👨', "👨‍👩‍👧‍👦", style, 2), // cluster lead
+                update(1, 0, '\0', style, 0, true),             // its mask
+                update(2, 0, 'x', style, 1, false),
+            ],
+            (0, 0),
+        );
+        let s = String::from_utf8(out).unwrap();
+        // The lead is its own run (advances 2, so the mask cannot extend it):
+        // one MoveTo, one SGR reset, and the full cluster in one Print. The
+        // mask + 'x' share the next run: " x".
+        assert!(s.starts_with("\x1b[1;1H\x1b[0m👨‍👩‍👧‍👦"), "got: {s:?}");
+        assert!(s.contains("\x1b[1;2H x"), "got: {s:?}");
+        // The cluster string appears exactly once in the whole frame.
+        assert_eq!(s.matches("👨‍👩‍👧‍👦").count(), 1, "got: {s:?}");
+    }
+
+    #[test]
+    fn flush_diff_prints_combining_sequence_symbol_once() {
+        // A base + combining mark is ONE 1-column cluster: it prints its full
+        // symbol and advances one column, so the following cell can extend the
+        // same run — one Print holds the whole combining sequence plus the
+        // next glyph.
+        let style = Style::new();
+        let out = flush(
+            &[
+                cluster_update(0, 0, 'e', "e\u{301}", style, 1), // combining seq
+                update(1, 0, 'a', style, 1, false),
+            ],
+            (0, 0),
+        );
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.starts_with("\x1b[1;1H\x1b[0me\u{301}a"), "got: {s:?}");
+        assert_eq!(s.matches("e\u{301}").count(), 1, "got: {s:?}");
     }
 
     #[test]
@@ -1097,6 +1239,36 @@ mod tests {
         let mut out = Vec::new();
         set_title_to(&mut out, "Hello").expect("set title should succeed");
         assert_eq!(String::from_utf8(out).unwrap(), "\x1b]0;Hello\x07");
+    }
+
+    #[test]
+    fn set_clipboard_emits_osc52_clipboard_sequence() {
+        // OSC 52, clipboard selection (`c`), payload = the text's UTF-8
+        // bytes base64-encoded (RFC 4648) — "foo" -> "Zm9v" — terminated by
+        // BEL: ESC ] 52 ; c ; Zm9v BEL.
+        let mut out = Vec::new();
+        set_clipboard_to(&mut out, "foo").expect("set clipboard should succeed");
+        assert_eq!(
+            String::from_utf8(out.clone()).unwrap(),
+            "\x1b]52;c;Zm9v\x07",
+            "got: {:?}",
+            out
+        );
+        // The ST terminator must not appear: the sequence is BEL-terminated.
+        assert!(!out.windows(2).any(|w| w == b"\x1b\\"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn set_clipboard_base64_encodes_utf8_bytes() {
+        // Multi-byte text: the base64 payload covers the raw UTF-8 bytes, not
+        // code points. "hi🙂" is 6 bytes (h i + 4-byte emoji) -> "aGnwn5mC".
+        let mut out = Vec::new();
+        set_clipboard_to(&mut out, "hi🙂").expect("set clipboard should succeed");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b]52;c;aGnwn5mC\x07",
+            "the payload must base64-encode the UTF-8 bytes"
+        );
     }
 
     #[test]

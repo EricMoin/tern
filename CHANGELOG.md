@@ -97,6 +97,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   press on a painted cell (`Renderer.hit_test`) to the topmost registered
   focusable node; wired by `useClickToFocus` (`@tern/react`) and
   `subscribeClickFocus` (`@tern/solid`).
+- **Mouse selection (roadmap Phase 5):** a native selection overlay on the
+  compositor — `TuiRenderer::set_selection` / `clear_selection` /
+  `selection_text` / `selection_word_range` (tern-node), surfaced as
+  `Renderer.setSelection` / `clearSelection` / `selectionText` /
+  `selectionWordRange` on `@tern/core` — plus a core interaction module
+  (`startSelection` / `dragSelection` / `endSelection` / `copySelection` /
+  `selectWordAt` / `selectionKey` / `SELECTION_DOUBLE_CLICK_MS`): a
+  `down_left` press anchors a selection session at the pressed cell (a
+  second press on a nearby cell within 500 ms is a double-click and selects
+  the word under the pointer), each `drag_left` extends the rect, and any
+  `up_*` release ends the session — clear-on-release, the overlay is
+  transient and lives only while the button is held. `copySelection` pushes
+  the selection text to the system clipboard (OSC 52); `selectionKey` maps
+  `ctrl+shift+c` to it (plain `ctrl+c` stays the exit convention, never
+  consumed). Wired by `useSelection` (`@tern/react`) and
+  `subscribeSelection` (`@tern/solid`) with copy-on-release (copy before
+  `endSelection`).
+- **IME posture (decision, confirmed-IME input):** IME composition/preedit is
+  a documented non-goal — the terminal emulator owns preedit rendering, and
+  crossterm 0.29's `Event` enum surfaces no composition events to forward.
+  Confirmed IME input (a composition commit) reaches the app as a
+  bracket-pasted string and flows through the shipped path:
+  `EnableBracketedPaste` → `TernEvent::Paste` → `FocusManager.routePaste` →
+  `pasteInto` / `pasteIntoTextarea`. Multi-codepoint CJK/IME-confirmed
+  strings — pre-composed and decomposed forms — round-trip losslessly into a
+  focused `Input` and `Textarea` (regression-tested, plain and
+  pre-composed); full rationale in `docs/roadmap.md` → "IME posture".
+- **Works-over-a-pty incl. ssh (roadmap Phase 5 scoping):** the Phase 5 ssh
+  exit criterion is met by existing machinery — a tern app runs inside any
+  pty (a local terminal, or the remote end of an `ssh host -t` session)
+  because it writes escape-sequence diffs to stdout and reads input from
+  stdin; no `tern-server` binary is required for that property. The PTY
+  smoke harness now resizes the live session mid-run (80x24 → 111x31, via a
+  backgrounded `stty -f /dev/tty` inside `script`) before feeding `q`,
+  exercising the SIGWINCH → crossterm `Resize` event path an ssh client
+  window resize exercises — every demo must still assert its scene and exit
+  0 after the resize. A manual ssh verification recipe is documented in
+  `docs/guide.md`; the Phase 5 differentiator (embedded key auth + a
+  multiplexed persistent `tern-server`) stays deferred on the roadmap.
+- **Wasm preview spike (roadmap Phase 6):** a `tern-wasm` crate
+  (`crate-type = ["cdylib", "rlib"]`, compiles for `wasm32-unknown-unknown`)
+  binds the pure-Rust, wasm-safe core crates (`tern-core` / `tern-layout` /
+  `tern-components`; no `tern-terminal`) behind a plain C ABI
+  (`tern_reset` / `tern_root` / `tern_add_child` / `tern_render_to_cells`,
+  …) that drives the scene through the same JSON-prop protocol as the napi
+  binding and returns a flat per-cell stream. The static demo page in
+  `examples/web/` (JS shim + canvas painter, `./build.sh` producing the
+  committed `tern_wasm.wasm`) renders the synthetic scene in a browser. The
+  host-side ABI round-trip test (`cargo test -p tern-wasm`) passes and
+  `cargo build --target wasm32-unknown-unknown -p tern-wasm` is clean; full
+  `@tern/core` reconciler parity on wasm and `tern-highlight`-in-wasm stay
+  deferred (see roadmap Phase 6).
 - `FocusManager` traversal, subscription, and reverse index: `next` /
   `prev` (wrap-around), `focusFirst`, `focusIdFor` (the scene-node-to-id
   reverse index), and `subscribe` / `unsubscribe` for focus-change
