@@ -50,8 +50,10 @@ jobs:
             target: aarch64-unknown-linux-gnu
             # npm run build -- <args> appends args to the LAST command of the
             # script chain (node fix-dts.mjs), so cross rows must invoke the
-            # napi CLI directly to pass --target.
-            build: npx napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross && node fix-dts.mjs
+            # napi CLI directly to pass --target. --use-napi-cross is avoided:
+            # its toolchain ships as an npm optionalDependency that fails to
+            # install in CI (npm/cli#4828); the apt cross gcc is deterministic.
+            build: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu && CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc npx napi build --platform --release --target aarch64-unknown-linux-gnu && node fix-dts.mjs
             load_check: false
           - host: macos-latest
             target: x86_64-apple-darwin
