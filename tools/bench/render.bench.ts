@@ -2,7 +2,7 @@
 /**
  * render.bench.ts — render benchmarks for the tern TUI engine, JS side.
  *
- * Loads the real tern-node addon through `@tern/core` and times four
+ * Loads the real tern-node addon through `@tern/core` and times seven
  * scenarios against the same synthetic scene (see
  * `src/core/tern-components/tests/bench_timing.rs` for the Rust twin), at the
  * real terminal size under a PTY:
@@ -27,6 +27,19 @@
  *     compared against a single-`requestFrame` control — a ~1.0 ratio proves
  *     all 1000 calls collapsed into ONE native render (a broken coalescer
  *     would cost ~1000x the control).
+ *   scenario 4 — viewport scroll: N = 500 frames, each panning the whole
+ *     ~202-row content pane up by ONE row (`scroll_y` on the root box). The
+ *     diff covers (nearly) the whole 4800-cell viewport and the mutated
+ *     node's bounds span the viewport, so the dirty union trips the
+ *     full-repaint threshold — the large-dirty path the one-cell scenarios
+ *     never exercise (the perf.md round-3 caveat).
+ *   scenario 5 — alternating full screens: N = 500 frames, each flipping the
+ *     visibility of two full-screen `streaming_text` leaves (40 rows of a
+ *     repeated character each, so every cell differs), so the diff is the
+ *     whole viewport every frame. Prints flushed-bytes per frame via the
+ *     native `last_flush_bytes` counter (fed by the backend queue): the ANSI
+ *     byte cost of a full-repaint frame, the seam the diff fast paths
+ *     short-circuit.
  *
  * Run from the repo root (a PTY is required for raw mode; the native addon
  * needs `--allow-ffi` plus read access to the `.node` binding, and the napi
@@ -69,9 +82,22 @@ const SMALL_CHANGE_N = 1000;
 const BURST_ROUNDS = 200;
 /** The number of requestFrame calls issued within one tick (scenario 3). */
 const BURST_SIZE = 1000;
+/** The number of one-row scroll frames to time (scenario 4). */
+const SCROLL_N = 500;
+/** The number of alternating full-screen frames to time (scenario 5). */
+const FULLSCREEN_N = 500;
+/** The scroll range scenario 4 cycles through: the synthetic scene has
+ * ~204 content rows and a 40-row viewport, so any `scroll_y` in 0..=164
+ * keeps every visible row filled; 160 is safely inside. */
+const SCROLL_RANGE = 160;
 /** The synthetic scene's target viewport, mirroring the Rust bench. */
 const VIEWPORT_W = 120;
 const VIEWPORT_H = 40;
+/** The two full-screen states of scenario 5: 40 rows x 118 columns (the
+ * content-pane width, matching the bench scene's `VIEWPORT_W - 2`) of a
+ * single character, so every cell differs between the two screens. */
+const SCREEN_A = Array.from({ length: VIEWPORT_H }, () => "A".repeat(VIEWPORT_W - 2)).join("\n");
+const SCREEN_B = Array.from({ length: VIEWPORT_H }, () => "B".repeat(VIEWPORT_W - 2)).join("\n");
 /** The number of nested boxes under the root box. */
 const BOX_COUNT = 200;
 /** The number of spans fed to the streaming_text node. */
@@ -96,13 +122,16 @@ function skip(reason: unknown): never {
  * The spinner sits first so its changing glyph is visible inside the
  * viewport; `tick(spinner)` between renders keeps the frame diff non-empty.
  * The first text leaf is returned too: scenario 2 mutates exactly one cell of
- * it per frame.
+ * it per frame. The root box is returned so scenario 4 can pan its content
+ * via `scroll_y` and scenario 5 can detach it before mounting the
+ * alternating full-screen leaf.
  *
- * Returns `{ spinner, leaf }`.
+ * Returns `{ spinner, leaf, rootBox }`.
  */
 function buildScene(renderer: ReturnType<typeof createRenderer>): {
   spinner: Node;
   leaf: Node;
+  rootBox: Node;
 } {
   const rootBox = Box({
     width: VIEWPORT_W,
@@ -138,7 +167,7 @@ function buildScene(renderer: ReturnType<typeof createRenderer>): {
 
   renderer.root.addChild(rootBox);
   if (leaf === null) throw new Error("scene has no text leaf");
-  return { spinner, leaf };
+  return { spinner, leaf, rootBox };
 }
 
 /** The nearest-rank percentile of a sorted sample: `p` in 0..=100. */
@@ -304,6 +333,109 @@ async function scenario3(
   return { mean: burst.mean, p50: burst.p50, ratio, expected };
 }
 
+/**
+ * Scenario 4 — viewport scroll (the large-dirty frame the one-cell scenarios
+ * never exercise). Per frame the whole ~204-row content pane pans UP by ONE
+ * row (`scroll_y` on the root box, cycling within `SCROLL_RANGE` so the
+ * viewport never scrolls past the content tail), so the diff covers (nearly)
+ * the whole 4800-cell viewport and the mutated node's bounds span the
+ * viewport — the dirty union trips the >half-viewport full-repaint
+ * threshold. The mutation (one `setProps` key) stays outside the timer, like
+ * scenarios 0 and 2; the timer covers only the render.
+ */
+function scenario4(
+  renderer: ReturnType<typeof createRenderer>,
+  rootBox: Node,
+): { mean: number; p50: number; fps: number } {
+  const perFrameMs: number[] = new Array(SCROLL_N);
+  for (let i = 0; i < SCROLL_N; i++) {
+    // One-row viewport scroll: `scroll_y` pans the content up by one row
+    // each frame (cycling 0..SCROLL_RANGE-1).
+    rootBox.setProps({ ...rootBox.props, scroll_y: i % SCROLL_RANGE });
+    const t0 = performance.now();
+    renderer.render();
+    perFrameMs[i] = performance.now() - t0;
+  }
+  const { mean, p50, fps } = summarize(perFrameMs);
+  console.log(
+    `render.bench: scenario 4 — viewport scroll (${SCROLL_N} frames, one-row shift, full-repaint threshold)`,
+  );
+  console.log(`  mean: ${mean.toFixed(3)} ms/frame`);
+  console.log(`  p50:  ${p50.toFixed(3)} ms/frame`);
+  console.log(`  fps:  ${fps.toFixed(1)}`);
+  return { mean, p50, fps };
+}
+
+/**
+ * Scenario 5 — alternating full screens (the other large-dirty frame shape).
+ * Two distinct full-screen `streaming_text` leaves — each 40 rows of a
+ * repeated character, so every cell differs between the two screens — swap
+ * visibility every frame (one `display: none`/`flex` `setProps` per leaf,
+ * the minimal mutation that flips a whole screen), so the diff is the whole
+ * viewport and the flush writes the full-screen ANSI stream every frame. Per
+ * frame the flushed bytes are read from the native `last_flush_bytes`
+ * counter (fed by the backend queue) and averaged into a bytes-per-frame
+ * number: the byte cost a full repaint pushes through the terminal, the seam
+ * the diff fast paths short-circuit.
+ *
+ * The synthetic scene is swapped for the two-screen content pane before
+ * timing (the root box is detached and a fresh 120x40 pane mounted, with
+ * screen A visible and B hidden); that one-time structural mutation is
+ * outside the timer. The per-frame visibility toggles (two `setProps`) also
+ * stay outside the timer — it covers only the render.
+ */
+function scenario5(
+  renderer: ReturnType<typeof createRenderer>,
+  rootBox: Node,
+): { mean: number; p50: number; fps: number; bytesPerFrame: number } {
+  // Swap the scene: detach the synthetic root box, mount a fresh 120x40
+  // content pane holding the two full-screen leaves (A visible, B hidden).
+  rootBox.remove();
+  const screenBox = Box({
+    width: VIEWPORT_W,
+    height: VIEWPORT_H,
+    flex_direction: "column",
+  });
+  const screenA = StreamingText({ width: VIEWPORT_W - 2, height: VIEWPORT_H });
+  const screenB = StreamingText({ width: VIEWPORT_W - 2, height: VIEWPORT_H });
+  screenA.appendSpan(SCREEN_A);
+  screenB.appendSpan(SCREEN_B);
+  screenB.setProps({ ...screenB.props, display: "none" });
+  screenBox.addChild(screenA);
+  screenBox.addChild(screenB);
+  renderer.root.addChild(screenBox);
+  renderer.render(); // warmup: paint screen A (outside the timer)
+  // Warm screen B's layout: flip once so the timed loop's first flip is not
+  // the first time screen B is laid out (a cold structural paint would skew
+  // frame 0 and inflate the mean).
+  screenA.setProps({ ...screenA.props, display: "none" });
+  screenB.setProps({ ...screenB.props, display: "flex" });
+  renderer.render();
+
+  const perFrameMs: number[] = new Array(FULLSCREEN_N);
+  let flushedBytes = 0;
+  for (let i = 0; i < FULLSCREEN_N; i++) {
+    // Flip the screens: screen A <-> screen B (every cell differs).
+    const showA = i % 2 === 0;
+    screenA.setProps({ ...screenA.props, display: showA ? "flex" : "none" });
+    screenB.setProps({ ...screenB.props, display: showA ? "none" : "flex" });
+    const t0 = performance.now();
+    renderer.render();
+    perFrameMs[i] = performance.now() - t0;
+    flushedBytes += renderer.lastFlushBytes;
+  }
+  const { mean, p50, fps } = summarize(perFrameMs);
+  const bytesPerFrame = flushedBytes / FULLSCREEN_N;
+  console.log(
+    `render.bench: scenario 5 — alternating full screens (${FULLSCREEN_N} frames)`,
+  );
+  console.log(`  mean: ${mean.toFixed(3)} ms/frame`);
+  console.log(`  p50:  ${p50.toFixed(3)} ms/frame`);
+  console.log(`  fps:  ${fps.toFixed(1)}`);
+  console.log(`  bytes per frame: ${bytesPerFrame.toFixed(0)} (mean ANSI bytes flushed per frame)`);
+  return { mean, p50, fps, bytesPerFrame };
+}
+
 async function main(): Promise<void> {
   // 1. Load the addon; the whole bench is skipped (exit 0) when it is
   //    unavailable — e.g. the .node binding was not built for this platform.
@@ -323,9 +455,11 @@ async function main(): Promise<void> {
   }
 
   try {
-    // 3. Build the synthetic scene once and run the four scenarios against
-    //    it (the spinner + one text leaf are the mutation points).
-    const { spinner, leaf } = buildScene(renderer);
+    // 3. Build the synthetic scene once and run the scenarios against it
+    //    (the spinner + one text leaf are the mutation points of 0/2/3; the
+    //    root box is the scroll pane of scenario 4 and is detached by
+    //    scenario 5).
+    const { spinner, leaf, rootBox } = buildScene(renderer);
 
     // Scenario 0 — the animated round-trip (the round-1 canonical number).
     const s0 = scenario0(renderer, spinner);
@@ -340,11 +474,19 @@ async function main(): Promise<void> {
     // Scenario 3 — requestFrame burst coalescing.
     const s3 = await scenario3(renderer, spinner);
 
+    // Scenario 4 — viewport scroll (one-row shift; full-repaint threshold).
+    const s4 = scenario4(renderer, rootBox);
+
+    // Scenario 5 — alternating full screens (flushed bytes per frame).
+    const s5 = scenario5(renderer, rootBox);
+
     console.log();
     console.log(
       `render.bench: summary — round-trip p50 ${s0.p50.toFixed(3)} ms | no-change p50 ${s1.p50.toFixed(3)} ms | ` +
         `single-cell p50 ${s2.p50.toFixed(3)} ms | burst ratio ${s3.ratio.toFixed(2)} ` +
-        `(${s3.expected} native render(s) per ${BURST_SIZE}-call burst)`,
+        `(${s3.expected} native render(s) per ${BURST_SIZE}-call burst) | ` +
+        `scroll p50 ${s4.p50.toFixed(3)} ms | full-screen p50 ${s5.p50.toFixed(3)} ms ` +
+        `(${s5.bytesPerFrame.toFixed(0)} bytes/frame)`,
     );
   } finally {
     try {

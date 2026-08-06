@@ -39,6 +39,9 @@ Rust; the JS side only describes the scene.
   `fg` / `bg` / `border_style` at element-creation time.
 - **Golden testing** — `snapshotFrame` / `framesEqual` paint to an off-screen
   buffer with no terminal I/O, for buffer-exact assertions.
+- **Terminal introspection** — `renderer.size` reports the last painted
+  viewport (or the current terminal size before the first paint), and
+  `renderer.setClipboard(text)` copies to the system clipboard via OSC 52.
 
 ## How it works
 
@@ -274,6 +277,12 @@ in the app hot path), as a tagged `TernEventJs` union on the `renderer.events`
 async iterable and through the `onKey` / `onResize` / `onFocus` / `onMouse` /
 `onPaste` handlers. Keys and pastes route through the `FocusManager` first —
 a focused element consumes them, the tree-level handler sees the rest.
+
+`renderer.size` reports the terminal size as `{ width, height }` — the
+viewport the last render/snapshot painted at (the current terminal size
+before any paint) — and `renderer.setClipboard(text)` copies to the system
+clipboard via OSC 52 (`ESC ] 52 ; c ; <base64> BEL`; the terminal emulator
+must support it).
 
 ## Examples
 

@@ -151,10 +151,83 @@ export declare class TuiRenderer {
    */
   get capabilities(): RendererCapabilities
   /**
+   * The number of bytes the most recent `render()` flush queued to the
+   * terminal: the ANSI escape-sequence stream for that frame's diff (0 for
+   * a fully suppressed empty-diff frame). Fed by the backend queue via the
+   * flush return value; a no-op fast-path render (scene unchanged) never
+   * flushes, so the counter keeps the previous flush's value until the next
+   * real flush. The byte-cost measure behind the bench's
+   * flushed-bytes-per-frame numbers.
+   */
+  get last_flush_bytes(): bigint
+  /**
    * Set the terminal window title (OSC 0). Errors on a destroyed
    * renderer.
    */
   set_title(title: string): void
+  /**
+   * The terminal size as `{ width, height }` in cells: the viewport the
+   * most recent [`render`](Self::render) or
+   * [`render_to_buffer`](Self::render_to_buffer) painted at (80x24 before
+   * any paint).
+   *
+   * Before the first paint no real viewport exists yet, so the first
+   * access seeds the default from the terminal through the cached-size
+   * machinery — the cache when it is still valid, otherwise a
+   * [`RenderBackend::size`] probe (refreshing the cache) — and records the
+   * probed size as the shared scene viewport: a fresh renderer reports the
+   * current terminal size instead of the synthetic 80x24 fallback, and its
+   * snapshot/content-size defaults match. After any paint the last painted
+   * viewport is authoritative and no probe happens. Errors on a destroyed
+   * renderer.
+   */
+  get size(): RendererSize
+  /**
+   * Copy `text` to the system clipboard (OSC 52: `ESC ] 52 ; c ; <base64>
+   * BEL`, the payload being the text's UTF-8 bytes base64-encoded). Errors
+   * on a destroyed renderer.
+   */
+  set_clipboard(text: string): void
+  /**
+   * Set the selection overlay to the inclusive rectangle spanned by
+   * (`col1`, `row1`) and (`col2`, `row2`) in viewport cells. The endpoints
+   * are normalized by the compositor, so either may be the top-left. The
+   * overlay is applied at the next [`render`](Self::render) (which the
+   * selection edit forces) and to the next
+   * [`render_to_buffer`](Self::render_to_buffer) snapshot. Per-renderer
+   * state — the shared scene never carries the selection. Errors on a
+   * destroyed renderer.
+   */
+  set_selection(col1: number, row1: number, col2: number, row2: number): void
+  /**
+   * Clear the selection overlay: the next render paints without any
+   * reversed selection cells (and the next snapshot omits the overlay).
+   * Errors on a destroyed renderer.
+   */
+  clear_selection(): void
+  /**
+   * The text of the renderer's current selection, extracted from the last
+   * painted frame (the frame the most recent [`render`](Self::render)
+   * produced): row-major and cluster/mask-aware — a multi-char cluster
+   * (ZWJ emoji, combining sequence, flag) contributes its whole symbol, a
+   * masked continuation cell contributes nothing, and rows are joined
+   * with `'
+  '`. An empty string when no selection is set or nothing has
+   * been rendered yet. Errors on a destroyed renderer.
+   */
+  selection_text(): string
+  /**
+   * The inclusive cell range of the contiguous non-whitespace run (word)
+   * containing (`col`, `row`) in the last painted frame, or `null` when
+   * the cell is blank/whitespace (or out of bounds, or nothing has been
+   * rendered yet).
+   *
+   * Cluster-aware: a masked continuation cell (the right half of a wide
+   * glyph) is treated as part of its glyph's run — never as whitespace —
+   * so a click on a wide character's second column still returns the word
+   * that contains the glyph. Errors on a destroyed renderer.
+   */
+  selection_word_range(col: number, row: number): SelectionRange | null
   /**
    * Start push-based event delivery: spawn tern-terminal's background
    * event loop and deliver every normalized terminal event to `callback`
@@ -283,6 +356,33 @@ export interface RendererCapabilities {
    * a 256-color palette, 16 for basic ANSI, 0 when none.
    */
   colors: number
+}
+
+/**
+ * The terminal size reported by a [`TuiRenderer`]: `{ width, height }` in
+ * cells.
+ */
+export interface RendererSize {
+  /** The width in columns. */
+  width: number
+  /** The height in rows. */
+  height: number
+}
+
+/**
+ * An inclusive cell range, in viewport coordinates: the rectangle spanned
+ * by (`col1`, `row1`) and (`col2`, `row2`). Either endpoint may be the
+ * top-left; consumers normalize with `min`/`max`.
+ */
+export interface SelectionRange {
+  /** The column of one endpoint (inclusive). */
+  col1: number
+  /** The row of one endpoint (inclusive). */
+  row1: number
+  /** The column of the other endpoint (inclusive). */
+  col2: number
+  /** The row of the other endpoint (inclusive). */
+  row2: number
 }
 
 /**

@@ -8,5 +8,6 @@ description = "tern terminal: diff-flushes painted buffers to the terminal"
 
 [dependencies]
 tern-core = { path = "../tern-core" }
+base64 = "0.22"
 crossterm = "0.29"
 supports-color = "3"

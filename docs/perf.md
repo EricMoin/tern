@@ -4,7 +4,9 @@ This document describes the per-frame rendering pipeline, the optimizations
 shipped in the high-frame-rate round (subtasks 2–8), the
 `Renderer.requestFrame` coalescing API, the round-2 incremental-rendering work
 (incremental layout, dirty-region repaint, props incremental sync), the
-round-3 change-detection work (mutation-site pushed dirty set), and how to
+round-3 change-detection work (mutation-site pushed dirty set), the round-4
+large-dirty work (scratch-frame pooling, retained-buffer reuse, single-layout
+full-repaint fallback), and how to
 reproduce the benchmark numbers recorded in
 [`tools/bench/BASELINE.md`](../tools/bench/BASELINE.md). Read the results
 section last — the measured gains on the synthetic scene are small, and this
@@ -303,7 +305,7 @@ cargo test --release -p tern-components --test bench_timing -- --ignored --nocap
 # 2. TS renderer round-trip through the real tern-node addon (needs a PTY):
 deno run --allow-all tools/bench/render.bench.ts
 
-# 3. Both, with a baseline-vs-now comparison table (rounds 1, 2 and 3):
+# 3. Both, with a baseline-vs-now comparison table (rounds 1, 2, 3 and 4):
 bash tools/bench/run.sh
 ```
 
@@ -399,6 +401,61 @@ working tree). The honest reading:
   full repaint), so real-world gains on big repaints are smaller than the
   one-cell number. Full tables and the honest verdict:
   `tools/bench/BASELINE.md` → "Round 3 after".
+
+### Round 4 (large-dirty frames, release addon both sides)
+
+Round 4 attacks the large-dirty frame floor the round-3 caveat called out.
+The harness gained two large-dirty scenarios (viewport scroll and alternating
+full screens — both trip the `>half-viewport` full-repaint fallback), and the
+compositor's large-dirty path was optimized. Full tables:
+`tools/bench/BASELINE.md` → "Round 4 before" / "Round 4 after".
+
+- **Viewport scroll (scenario 4) — the large-dirty win:** TS p50 ~1.908 →
+  ~1.154 ms (−39.5%), Rust scroll-churn p50 ~1.957 → ~1.317 ms (−32.7%).
+  Every scroll frame takes the full-repaint fallback, and the measured
+  dominant cost was the **layout reconcile walk running twice** — once in
+  `paint_dirty` (to compute the dirty union) and once inside `paint_full`.
+  Passing the already-computed rects through the fallback removes the second
+  walk, which is most of the gain.
+- **Alternating full screens (scenario 5):** flat (~0.39 → ~0.38 ms p50,
+  5009 bytes/frame unchanged). Its cost is dominated by painting 4720 cells
+  and flushing the full viewport, not by the layout/signature work this round
+  removed — honest record: no regression, byte cost unchanged.
+- **One-cell and no-change scenarios: no regression.** Single-cell p50 −3.3%
+  (TS) / −1.4% (Rust); no-change frames hold at ~0; the requestFrame burst
+  still collapses 1000 calls into 1 native render (ratio ~1.1, macrotask
+  noise — the before-run in the same session measured 1.11).
+
+### 12. Large-dirty path (tern-components + tern-core)
+
+The round-4 work is four small changes, each removing a per-frame cost from
+the large-dirty path (`src/core/tern-components/src/compositor.rs` +
+`src/core/tern-core/src/buffer.rs`):
+
+1. **Scratch-frame pooling** — the dirty path's scratch frame is a pooled
+   `Compositor` field, sized on demand and grown when the viewport grows: no
+   per-frame viewport-sized allocation. Only the dirty-union region is
+   cleared before repainting (`Buffer::clear_rect`) — a cheap clear instead
+   of blanking the whole viewport for a one-cell repaint.
+2. **Retained-buffer reuse** — the dirty path moves the retained buffer out
+   and patches the union in place, cloning once for the new retained frame
+   (was: two full clones + a fresh scratch allocation per frame). The paint
+   order is rebuilt into a pooled list.
+3. **Dirty-union walk without an id list** — the union is computed in two
+   passes over the retained and current rect maps (ids that had geometry last
+   frame, then ids that gained geometry this frame): no per-frame id-list
+   allocation, sort or dedup. The all-node old-vs-new rect comparison is
+   unchanged — it remains the repaint region's correctness backbone.
+4. **Full-repaint path** — `paint_full` reuses the retained buffer as its
+   paint target (cleared in place, one clone for the caller), rebuilds the
+   retained paint signatures only for the mutation-site pushed ids (or every
+   id on a force scan) instead of the whole-tree walk — a later dirty pass
+   treats a missing baseline conservatively as a change, so no repaint is
+   ever lost — and, the measured dominant win, receives the rects the dirty
+   path already computed when it falls back past the >half-viewport
+   threshold, so a large-dirty frame runs the layout reconcile walk **once**
+   instead of twice. The union copy is `Buffer::copy_region` — row-major
+   slice copies instead of per-cell bounds-checked clones.
 
 Rerun both benches on the same machine after any render-path change to
 quantify the delta — `tools/bench/run.sh` prints both comparison tables

@@ -7,4 +7,5 @@ repository.workspace = true
 description = "tern scene tree: the core scene graph for the TUI renderer"
 
 [dependencies]
+unicode-segmentation = "1"
 unicode-width = "0.2"

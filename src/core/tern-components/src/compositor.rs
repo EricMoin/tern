@@ -68,7 +68,7 @@
 use std::collections::{HashMap, HashSet};
 
 use tern_core::buffer::{Buffer, Region};
-use tern_core::cell::{char_width, Cell};
+use tern_core::cell::{clusters, Cell};
 use tern_core::color::Color;
 use tern_core::cursor::Cursor;
 use tern_core::layout::LayoutEngine;
@@ -129,12 +129,35 @@ pub struct Compositor {
     /// The scene epoch at the last paint; a lower epoch means a different
     /// (fresh) scene instance.
     last_scene_epoch: u64,
+    /// A pooled scratch frame reused across dirty repaints (and by the full
+    /// paint path). Sized to the viewport on demand and grown when the
+    /// viewport grows — never a per-frame viewport-sized allocation: the
+    /// previous frame's buffer capacity is reused. The dirty path clears only
+    /// the union region that will be read back before repainting into it.
+    scratch: Option<Buffer>,
+    /// A pooled z-ordered paint list, rebuilt and reused every frame (no
+    /// per-frame paint-order allocation or sort scratch).
+    order_scratch: Vec<NodeId>,
+    /// The per-node region-relevant state (own clip/scroll/parent) of the
+    /// last paint, retained so a changed node's OLD painted bounds — which
+    /// can extend beyond its layout rect through its effective region — can
+    /// be reconstructed on the next dirty pass, even when the node was
+    /// removed from the scene since.
+    last_regions: HashMap<NodeId, RegionState>,
     /// Instrumentation: how the last frame was painted.
     last_paint_mode: PaintMode,
     /// Instrumentation: nodes in the paint order of the last frame.
     last_painted_node_count: usize,
     /// Instrumentation: nodes repainted by the last dirty pass.
     last_repainted_node_count: usize,
+    /// The current selection overlay (anchor + active endpoints, inclusive
+    /// buffer cells), or `None` when no selection is set (the default).
+    selection: Option<Selection>,
+    /// The selection the retained buffer was painted at. A change forces a
+    /// full repaint: the overlay is applied to a freshly painted frame, so
+    /// cells of a shrunk/moved/cleared selection can never keep a stale
+    /// REVERSED from a retained frame.
+    last_selection: Option<Selection>,
 }
 
 /// How the last [`paint_scene`](Compositor::paint_scene) produced its frame.
@@ -149,6 +172,21 @@ enum PaintMode {
     /// Only the dirty regions were repainted; the payload is the number of
     /// nodes repainted.
     Dirty(usize),
+}
+
+/// The compositor's selection overlay: the two inclusive cell endpoints
+/// (anchor + active) in buffer space that span the selected rectangle.
+///
+/// The overlay is a post-pass over the painted frame — every non-masked cell
+/// inside the rect has [`Modifiers::REVERSED`] composed onto its own style,
+/// mirroring the block-caret machinery. It is a **no-op when unset**: a
+/// compositor that never calls [`Compositor::set_selection`] produces frames
+/// byte-identical to one without the overlay (the dirty-parity fuzz relies on
+/// this).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Selection {
+    anchor: (u16, u16),
+    active: (u16, u16),
 }
 
 /// The paint-relevant state of a scene node — everything that can change what
@@ -180,12 +218,28 @@ struct PaintSig {
     stream: Option<(usize, u64)>,
 }
 
+/// The region-relevant state of a node at a paint: its own clip rect, scroll
+/// offset and parent. Retained per frame ([`Compositor::last_regions`]) so a
+/// changed node's OLD painted bounds can be reconstructed on the next dirty
+/// pass: the effective region a node drew through is a function of its
+/// clip/scroll/parent chain, and covering the cells it painted through the
+/// OLD region — not just its layout rect — is what prevents stale cells when
+/// a clip or scroll edit shifts a subtree's painted output.
+#[derive(Debug, Clone, Copy)]
+struct RegionState {
+    parent: Option<NodeId>,
+    clip: Option<Rect>,
+    scroll_x: i32,
+    scroll_y: i32,
+}
+
 /// The frame state retained after a paint: the painted buffer, the
-/// scene-absolute rects, the per-node paint signatures and the paint order.
+/// scene-absolute rects, and the per-node paint signatures. The paint order
+/// is not retained (only its count) — it is rebuilt into a pooled list each
+/// frame.
 struct FrameState {
     rects: HashMap<NodeId, Rect>,
     sigs: HashMap<NodeId, PaintSig>,
-    order: Vec<NodeId>,
     buffer: Buffer,
 }
 
@@ -199,10 +253,30 @@ impl Compositor {
             last_paint_sig: HashMap::new(),
             last_viewport: None,
             last_scene_epoch: 0,
+            scratch: None,
+            order_scratch: Vec::new(),
+            last_regions: HashMap::new(),
             last_paint_mode: PaintMode::NoPaint,
             last_painted_node_count: 0,
             last_repainted_node_count: 0,
+            selection: None,
+            last_selection: None,
         }
+    }
+
+    /// Set the selection overlay: every non-masked cell inside the rectangle
+    /// spanned by `anchor` and `active` (both inclusive, buffer space) is
+    /// painted with [`Modifiers::REVERSED`] composed onto its own style from
+    /// the next paint on. The endpoints are normalized at overlay time, so
+    /// either may be the top-left.
+    pub fn set_selection(&mut self, anchor: (u16, u16), active: (u16, u16)) {
+        self.selection = Some(Selection { anchor, active });
+    }
+
+    /// Clear the selection overlay. The next paint produces a frame without
+    /// any reversed selection cells.
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
     }
 
     /// How the last frame was painted (test instrumentation: a localized
@@ -313,7 +387,15 @@ impl Compositor {
         // compositor saw; its retained buffer is meaningless, so repaint
         // everything.
         let fresh_scene = self.last_scene_epoch > scene_epoch;
-        if cold || viewport_changed || fresh_scene {
+        // A selection edit is compositor state, not scene state: the retained
+        // frame was painted at `last_selection`, so a different selection now
+        // would leave the old overlay's reversed cells behind. Any selection
+        // change forces a full repaint — the overlay is then applied to a
+        // freshly painted frame. When the selection is unchanged, the normal
+        // (no-paint / dirty / full) flow applies, with the overlay re-applied
+        // on top of whatever the path produced.
+        let selection_changed = self.last_selection != self.selection;
+        if cold || viewport_changed || fresh_scene || selection_changed {
             return self.paint_full(scene, viewport, scene_epoch);
         }
         if scene_epoch == self.last_scene_epoch {
@@ -326,59 +408,102 @@ impl Compositor {
 
     /// Paint the whole scene into a fresh buffer — the correctness baseline
     /// every dirty repaint is tested against — and retain the frame state.
+    ///
+    /// Computes the frame's scene-absolute rects, then delegates to
+    /// [`paint_full_with_rects`](Compositor::paint_full_with_rects).
     fn paint_full(&mut self, scene: &Scene, viewport: Size, scene_epoch: u64) -> Buffer {
-        // Consume the mutation-site pushed dirty set: a full paint rebuilds
-        // every paint signature anyway, so the hint is only drained to keep
-        // the set consistent for the next dirty pass (a mutation recorded
-        // between this drain and the next paint is what the next pass must
-        // see).
-        let _ = scene.take_dirty();
-        // taffy 0.7 reports each node's `Layout.location` relative to its
-        // parent (verified against taffy's `round_layout` in
-        // `taffy/src/compute/mod.rs`: `layout.location = round(unrounded
-        // location)` with no parent-origin accumulation). Painting needs
-        // scene-absolute rects, so [`layout_rects`](Compositor::layout_rects)
-        // accumulates parent origins into the raw layout result before
-        // anything else (and reserves the bottom row for a `StatusBar`, if
-        // the scene has one). For trees where every nested parent sits at the
-        // origin (all pre-existing golden tests) this is an exact no-op; it
-        // is what makes depth-2+ subtrees — nested boxes, and the roadmap
-        // components' group/panel -> text leaves — land at their real scene
-        // positions.
         let rects = self.layout_rects(scene, viewport);
-        let mut buffer = Buffer::new(viewport.width, viewport.height);
-        // Collect every laid-out node in pre-order, then paint by ascending
-        // effective z-index. The sort is stable, so equal z-indexes keep
-        // pre-order: with no `z_index` prop anywhere this paints exactly like
-        // the historical pre-order traversal.
-        let order = paint_order(scene, &rects);
-        for id in &order {
-            if let Some(node) = scene.node(*id) {
-                if let Some(&rect) = rects.get(id) {
+        self.paint_full_with_rects(scene, viewport, scene_epoch, rects)
+    }
+
+    /// The body of a full repaint, given the frame's already-computed
+    /// scene-absolute rects. Separated so the dirty path can fall through to
+    /// a full repaint with the rects it already computed — a large-dirty
+    /// frame must not run the layout reconcile walk twice.
+    fn paint_full_with_rects(
+        &mut self,
+        scene: &Scene,
+        viewport: Size,
+        scene_epoch: u64,
+        rects: HashMap<NodeId, Rect>,
+    ) -> Buffer {
+        // Consume the mutation-site pushed dirty set (and the force flag): a
+        // full paint rebuilds every painted cell anyway, so the hint is only
+        // drained to keep the set consistent for the next dirty pass.
+        //
+        // The retained paint signatures are rebuilt ONLY for the pushed ids
+        // (or every id when a raw `node_mut` forced the full scan): a full
+        // paint is taken precisely when the dirty region is large, and the
+        // signature comparison only runs on the NEXT dirty pass, where a
+        // missing baseline is treated conservatively as a change (the node
+        // gets repainted — extra work, never a missed repaint). Skipping the
+        // whole-tree walk here removes the per-frame full-scene signature
+        // build (a `PaintSig` text clone per text leaf) from the large-dirty
+        // path; the all-node old-vs-new RECT comparison remains the repaint
+        // region's correctness backbone.
+        //
+        // Note: when the fallback came from the dirty path, the pushed set
+        // was already drained there, so the retained signatures are (near)
+        // empty — a later dirty pass then treats every pushed id without a
+        // baseline as changed and repaints it, which is conservative and
+        // correct.
+        let (pushed, force_full_scan) = scene.take_dirty();
+        let painted = self.build_paint_order(scene, &rects);
+        // Reuse the retained buffer as the paint target: a full paint
+        // overwrites (or blanks) every cell, so clearing it and painting in
+        // place reuses its capacity instead of allocating a fresh
+        // viewport-sized buffer per frame. One clone produces the caller's
+        // copy; the compositor keeps the painted buffer as the next frame's
+        // retained base.
+        let mut buffer = self
+            .last_buffer
+            .take()
+            .unwrap_or_else(|| Buffer::new(viewport.width, viewport.height));
+        if buffer.width != viewport.width || buffer.height != viewport.height {
+            buffer.resize(viewport.width, viewport.height);
+        }
+        buffer.clear();
+        for &id in &self.order_scratch {
+            if let Some(node) = scene.node(id) {
+                if let Some(&rect) = rects.get(&id) {
                     // A node's frame (box background/border) is drawn through
                     // its ancestors' regions only; its content (text, stream,
                     // children) also applies its own scroll offset, so a pane
                     // scrolls its content inside its own fixed frame.
-                    let frame = effective_region(scene, *id, viewport, false);
-                    let content = effective_region(scene, *id, viewport, true);
+                    let frame = effective_region(scene, id, viewport, false);
+                    let content = effective_region(scene, id, viewport, true);
                     paint_node(node, rect, frame, content, &mut buffer);
                 }
             }
         }
-        let sigs = collect_paint_sigs(scene, &rects);
+        let sigs = if force_full_scan {
+            collect_paint_sigs(scene, &rects)
+        } else {
+            collect_paint_sigs_for(scene, &rects, &pushed)
+        };
+        // A full paint rebuilds every cell, so the retained region state is
+        // refreshed for every node with geometry — the old painted bounds of
+        // the next dirty pass must be reconstructible for any changed node.
+        self.refresh_region_state(scene, &rects, None);
+        // The selection overlay is applied at the final-buffer stage: on top
+        // of the freshly painted frame and BEFORE the buffer is cloned for
+        // the caller and retained for the next frame, so the returned buffer,
+        // the retained frame and the renderer's diff all see the overlay.
+        self.apply_selection_overlay(&mut buffer);
+        let out = buffer.clone();
         self.retain_frame(
             viewport,
             scene_epoch,
             FrameState {
                 rects,
                 sigs,
-                order,
-                buffer: buffer.clone(),
+                buffer,
             },
             PaintMode::Full,
             0,
+            painted,
         );
-        buffer
+        out
     }
 
     /// Repaint only the regions whose content changed since the last paint,
@@ -406,23 +531,36 @@ impl Compositor {
             collect_paint_sigs_for(scene, &rects, &pushed)
         };
 
-        // The dirty union: over every changed node, its OLD ∪ NEW painted
-        // bounds — never the new bounds alone, so moves, shrinks, removals
-        // and display:none toggles leave no stale cells.
+        // The dirty union: over every changed node, the OLD ∪ NEW cells it
+        // can paint — its layout rect MAPPED through its effective region
+        // (clip + scroll) in both frames — never the raw new bounds alone,
+        // so moves, shrinks, removals, clip/scroll shifts and display:none
+        // toggles leave no stale cells. A node's painted cells are bounded by
+        // its rect drawn through the region: a glyph at content column `c`
+        // lands at buffer column `c - scroll`, so the union covers the rect
+        // shifted by the region's scroll AND the unshifted rect (a wrapped
+        // streaming leaf's rows stay inside the rect), each clipped to the
+        // region's clip. When a node's effective region changed (a
+        // clip/scroll edit — the paint-only pushed path), its whole subtree's
+        // painted cells move with it: descendants can sit anywhere inside the
+        // ancestor's effective clip (absolute positioning, overflow, scroll),
+        // so the effective content clip rects of both frames are unioned in
+        // as well — the clip, never the ancestor's own rect, bounds the
+        // subtree's painted cells.
+        //
+        // The ids are walked in two passes over the retained and current
+        // rect maps (ids that had geometry last frame, then ids that gained
+        // geometry this frame) — no per-frame id-list allocation, sort or
+        // dedup; the union is order-independent, so the walk order does not
+        // matter.
         let viewport_rect = Rect::new(0, 0, viewport.width as u32, viewport.height as u32);
         let mut dirty: Option<Rect> = None;
-        let mut ids: Vec<NodeId> = self.last_rects.keys().copied().collect();
-        ids.extend(rects.keys().copied());
-        ids.sort_unstable();
-        ids.dedup();
-        for id in ids {
-            let old = self.last_rects.get(&id).copied();
-            let new = rects.get(&id).copied();
-            // Paint signatures are compared only for the pushed ids (or for
-            // every id when a raw `node_mut` forced the full scan): an id the
-            // scene did not report as mutated cannot have changed its
-            // paint-relevant state, so its old signature is still current.
-            let sig_changed = if force_full_scan || pushed.contains(&id) {
+        // Paint signatures are compared only for the pushed ids (or for
+        // every id when a raw `node_mut` forced the full scan): an id the
+        // scene did not report as mutated cannot have changed its
+        // paint-relevant state, so its old signature is still current.
+        let sig_changed = |id: NodeId| {
+            if force_full_scan || pushed.contains(&id) {
                 match (self.last_paint_sig.get(&id), sigs.get(&id)) {
                     (Some(a), Some(b)) => a != b,
                     (None, Some(_)) | (Some(_), None) => true,
@@ -430,32 +568,61 @@ impl Compositor {
                 }
             } else {
                 false
-            };
-            if old == new && !sig_changed {
+            }
+        };
+        for (&id, &old) in self.last_rects.iter() {
+            let new = rects.get(&id).copied();
+            if Some(old) == new && !sig_changed(id) {
                 continue;
             }
-            let mut region = match (old, new) {
-                (Some(o), Some(n)) => rect_union(o, n),
-                (Some(o), None) | (None, Some(o)) => o,
-                (None, None) => continue,
-            };
-            // A text/streaming leaf's caret paints at rect.x + caret_col,
-            // which can lie outside the rect: cover the whole row to be safe.
-            let is_caret_leaf = matches!(
-                scene.node(id).map(|n| n.kind),
-                Some(NodeKind::Text | NodeKind::StreamingText)
-            ) && matches!(scene.prop(id, "caret"), Some(PropValue::Int(_)));
-            if is_caret_leaf && region.height == 1 {
-                region = Rect::new(0, region.y, viewport.width as u32, region.height);
+            let new_content = new.map(|_| effective_region(scene, id, viewport, true));
+            let new_frame = new.map(|_| effective_region(scene, id, viewport, false));
+            if let (Some(n), Some(nc), Some(nf)) = (new, new_content, new_frame) {
+                union_add_mapped(&mut dirty, scene, id, n, nc, viewport);
+                union_add_mapped(&mut dirty, scene, id, n, nf, viewport);
             }
-            if let Some(r) = region.intersection(&viewport_rect) {
-                if r.width > 0 && r.height > 0 {
-                    dirty = Some(match dirty {
-                        Some(d) => rect_union(d, r),
-                        None => r,
-                    });
+            match (
+                self.old_effective_region(id, viewport, true),
+                self.old_effective_region(id, viewport, false),
+            ) {
+                (Some(oc), Some(of)) => {
+                    union_add_mapped(&mut dirty, scene, id, old, oc, viewport);
+                    union_add_mapped(&mut dirty, scene, id, old, of, viewport);
+                    // The node's effective region changed -> its whole
+                    // subtree's painted cells moved with it; the subtree is
+                    // bounded by the effective content clip, never by the
+                    // node's own rect.
+                    let region_changed = match new_content {
+                        Some(nc) => {
+                            nc.clip != oc.clip
+                                || nc.scroll_x != oc.scroll_x
+                                || nc.scroll_y != oc.scroll_y
+                        }
+                        None => true,
+                    };
+                    if region_changed {
+                        union_add(&mut dirty, oc.clip, viewport_rect);
+                        if let Some(nc) = new_content {
+                            union_add(&mut dirty, nc.clip, viewport_rect);
+                        }
+                    }
                 }
+                // Retained region state missing (cannot happen after the
+                // first full paint, but stay sound): the old painted cells
+                // are unbounded, so cover the whole viewport.
+                _ => union_add(&mut dirty, viewport_rect, viewport_rect),
             }
+        }
+        for (&id, &new) in rects.iter() {
+            if self.last_rects.contains_key(&id) {
+                continue;
+            }
+            // A node with geometry this frame but none last frame is always
+            // a change (`old == new` is false), regardless of its signature.
+            let nc = effective_region(scene, id, viewport, true);
+            let nf = effective_region(scene, id, viewport, false);
+            union_add_mapped(&mut dirty, scene, id, new, nc, viewport);
+            union_add_mapped(&mut dirty, scene, id, new, nf, viewport);
         }
 
         let Some(union) = dirty else {
@@ -466,9 +633,11 @@ impl Compositor {
         };
 
         // Coverage fallback (perf knob): more than half the viewport is
-        // dirty, so a full repaint is cheaper and equally correct.
+        // dirty, so a full repaint is cheaper and equally correct. The rects
+        // computed above are passed through, so the large-dirty frame does
+        // not run the layout reconcile walk twice.
         if union.area() * 2 > viewport_rect.area() {
-            return self.paint_full(scene, viewport, scene_epoch);
+            return self.paint_full_with_rects(scene, viewport, scene_epoch, rects);
         }
 
         // Repaint every z-ordered node whose painted bounds intersect the
@@ -488,26 +657,76 @@ impl Compositor {
         // With a scratch frame every node paints exactly as it would in a full
         // paint, and only the union's cells are taken. Cells outside the union
         // are provably unchanged: any cell whose value could differ is covered
-        // by some changed node's OLD ∪ NEW bounds, i.e. by the union itself.
-        let order = paint_order(scene, &rects);
-        let mut scratch = Buffer::new(viewport.width, viewport.height);
-        let mut repainted = 0usize;
-        for id in &order {
-            let Some(&rect) = rects.get(id) else {
-                continue;
-            };
-            if rect.intersection(&union).is_none() && !caret_cell_in(scene, *id, rect, &union) {
-                continue;
+        // by some changed node's OLD ∪ NEW painted bounds — its rect mapped
+        // through its effective regions, or the effective clip when a region
+        // edit moved a whole subtree — i.e. by the union itself.
+        //
+        // The scratch frame is pooled across frames (sized on demand, grown
+        // when the viewport grows) and only its union region is cleared — a
+        // cheap clear instead of blanking the whole viewport, and no per-frame
+        // viewport-sized allocation.
+        let painted = self.build_paint_order(scene, &rects);
+
+        let repainted = {
+            // Field-level borrow of the pooled scratch (sized on demand), so
+            // the paint-order list (`self.order_scratch`) stays readable at
+            // the same time.
+            let scratch = self.scratch.get_or_insert_with(|| Buffer::new(0, 0));
+            if scratch.width != viewport.width || scratch.height != viewport.height {
+                scratch.resize(viewport.width, viewport.height);
             }
-            if let Some(node) = scene.node(*id) {
-                let frame = effective_region(scene, *id, viewport, false);
-                let content = effective_region(scene, *id, viewport, true);
-                paint_node(node, rect, frame, content, &mut scratch);
-                repainted += 1;
+            scratch.clear_rect(union);
+            let mut repainted = 0usize;
+            for &id in &self.order_scratch {
+                let Some(&rect) = rects.get(&id) else {
+                    continue;
+                };
+                // Repaint a node when its painted bounds — its rect mapped
+                // through its effective regions (which can extend beyond the
+                // raw rect via clip/scroll), not the raw rect alone — touch
+                // the union, or when its caret cell does.
+                let frame = effective_region(scene, id, viewport, false);
+                let content = effective_region(scene, id, viewport, true);
+                let touches = painted_bounds_touch(rect, frame, &union)
+                    || painted_bounds_touch(rect, content, &union)
+                    || caret_cell_in(scene, id, rect, &content, &union);
+                if !touches {
+                    continue;
+                }
+                if let Some(node) = scene.node(id) {
+                    paint_node(node, rect, frame, content, scratch);
+                    repainted += 1;
+                }
             }
-        }
-        let mut buffer = self.last_buffer.clone().expect("retained buffer present");
-        copy_rect(&mut buffer, &scratch, union);
+            repainted
+        };
+        // Reuse the retained buffer as the output: move it out, patch the
+        // dirty union's cells from the freshly painted scratch (row-major
+        // slice copies), and clone once for the new retained frame — one
+        // copy per dirty frame instead of the previous fresh scratch
+        // allocation + two full clones of the retained buffer.
+        let mut buffer = self.last_buffer.take().expect("retained buffer present");
+        buffer.copy_region(self.scratch.as_ref().expect("scratch present"), union);
+        // The selection overlay at the final-buffer stage, BEFORE the retained
+        // clone: the copied clean cells already carry the previous frame's
+        // overlay (it was painted at the same selection — `selection_changed`
+        // would have routed this frame to a full repaint), and the freshly
+        // repainted union cells get the overlay added here. Adding REVERSED is
+        // idempotent, so re-applying over already-reversed cells is a no-op.
+        self.apply_selection_overlay(&mut buffer);
+        let retained = buffer.clone();
+
+        // Refresh the retained region state (own clip/scroll/parent) for the
+        // ids this frame mutated (or every id when a raw `node_mut` forced
+        // the full scan), AFTER the old painted bounds were reconstructed:
+        // `last_regions` must keep reflecting the state the retained buffer
+        // was painted at, so the refresh happens at the end of the paint,
+        // from the current (already-mutated) scene, never before the union.
+        self.refresh_region_state(
+            scene,
+            &rects,
+            if force_full_scan { None } else { Some(&pushed) },
+        );
 
         self.retain_frame(
             viewport,
@@ -515,11 +734,11 @@ impl Compositor {
             FrameState {
                 rects,
                 sigs,
-                order,
-                buffer: buffer.clone(),
+                buffer: retained,
             },
             PaintMode::Dirty(repainted),
             repainted,
+            painted,
         );
         buffer
     }
@@ -532,6 +751,7 @@ impl Compositor {
         state: FrameState,
         mode: PaintMode,
         repainted: usize,
+        painted: usize,
     ) {
         self.last_buffer = Some(state.buffer);
         self.last_rects = state.rects;
@@ -539,8 +759,121 @@ impl Compositor {
         self.last_viewport = Some(viewport);
         self.last_scene_epoch = scene_epoch;
         self.last_paint_mode = mode;
-        self.last_painted_node_count = state.order.len();
+        self.last_painted_node_count = painted;
         self.last_repainted_node_count = repainted;
+        self.last_selection = self.selection;
+    }
+
+    /// Apply the selection overlay (when set) to `buffer`: every non-masked
+    /// cell inside the rectangle spanned by the anchor and active endpoints
+    /// has [`Modifiers::REVERSED`] composed onto its **own** style — the
+    /// cell's character and colors are untouched, only the modifier is added,
+    /// mirroring [`Buffer::render_caret`]'s style merge. The endpoints are
+    /// inclusive and normalized, so either may be the top-left corner.
+    ///
+    /// Masked continuation cells (the zero-width right halves of wide glyphs)
+    /// are skipped, exactly like the caret: reversing a mask would corrupt
+    /// the wide glyph's neighbor. The lead cell's reversal covers the whole
+    /// glyph visually.
+    ///
+    /// A strict no-op when no selection is set — the frame is left untouched,
+    /// which is what keeps an unselected compositor's output byte-identical
+    /// to one without the overlay.
+    fn apply_selection_overlay(&self, buffer: &mut Buffer) {
+        let Some(sel) = &self.selection else {
+            return;
+        };
+        let (ax, ay) = sel.anchor;
+        let (bx, by) = sel.active;
+        let x0 = ax.min(bx);
+        let y0 = ay.min(by);
+        let x1 = ax.max(bx);
+        let y1 = ay.max(by);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let Some(cell) = buffer.cell_mut(x, y) else {
+                    continue;
+                };
+                if cell.is_masked() {
+                    continue;
+                }
+                cell.style = cell.style.add_modifier(Modifiers::REVERSED);
+            }
+        }
+    }
+
+    /// Rebuild the pooled z-ordered paint list for `rects` and return its
+    /// length: every laid-out node in pre-order, sorted by ascending
+    /// effective z-index (stable, so equal indexes keep pre-order). The list
+    /// is reused across frames — no per-frame paint-order allocation.
+    fn build_paint_order(&mut self, scene: &Scene, rects: &HashMap<NodeId, Rect>) -> usize {
+        self.order_scratch.clear();
+        collect_paint_order(scene, scene.root_id(), rects, &mut self.order_scratch);
+        self.order_scratch.sort_by(|&a, &b| z_index(scene, a).cmp(&z_index(scene, b)));
+        self.order_scratch.len()
+    }
+
+    /// Refresh the retained per-node region state (own clip/scroll/parent)
+    /// from the scene. With `Some(ids)` only those ids are refreshed — the
+    /// incremental variant for the dirty path, sound because a node's
+    /// clip/scroll/parent can only change through a mutation that pushes its
+    /// id (a raw `node_mut` borrow sets the force flag, which routes to the
+    /// full variant). With `None` the whole map is rebuilt from `rects` — the
+    /// full-paint variant (a full paint walks every node anyway).
+    ///
+    /// A removed id keeps its retained entry: that entry IS the old state the
+    /// removal frame must reconstruct to clear the removed subtree's cells.
+    fn refresh_region_state(
+        &mut self,
+        scene: &Scene,
+        rects: &HashMap<NodeId, Rect>,
+        ids: Option<&HashSet<NodeId>>,
+    ) {
+        let state_of = |id: NodeId| -> Option<RegionState> {
+            let node = scene.node(id)?;
+            let (scroll_x, scroll_y) = scene.scroll_offset(id);
+            Some(RegionState {
+                parent: node.parent,
+                clip: scene.clip_rect(id),
+                scroll_x,
+                scroll_y,
+            })
+        };
+        match ids {
+            Some(ids) => {
+                for &id in ids {
+                    if let Some(st) = state_of(id) {
+                        self.last_regions.insert(id, st);
+                    }
+                }
+            }
+            None => {
+                self.last_regions = rects.keys().filter_map(|&id| state_of(id).map(|st| (id, st))).collect();
+            }
+        }
+    }
+
+    /// The effective region `id` drew through at the last paint, rebuilt from
+    /// the retained per-node region state (own clip/scroll/parent chain).
+    /// `None` when any chain member's retained state is missing — the caller
+    /// must then fall back to a conservative bound for the old painted cells.
+    fn old_effective_region(&self, id: NodeId, viewport: Size, include_own: bool) -> Option<Region> {
+        let mut clip = Rect::new(0, 0, viewport.width as u32, viewport.height as u32);
+        let mut scroll_x = 0i32;
+        let mut scroll_y = 0i32;
+        let mut cur = Some(id);
+        while let Some(nid) = cur {
+            let st = self.last_regions.get(&nid)?;
+            if include_own || nid != id {
+                if let Some(c) = st.clip {
+                    clip = clip.intersection(&c).unwrap_or(Rect::zero());
+                }
+                scroll_x += st.scroll_x;
+                scroll_y += st.scroll_y;
+            }
+            cur = st.parent;
+        }
+        Some(Region::new(clip, scroll_x, scroll_y))
     }
 
     /// The ids of the nodes covering the cell at (`col`, `row`), ordered
@@ -646,6 +979,16 @@ impl Compositor {
 
     /// Compute scene-absolute rects for `scene` under `viewport`, reserving
     /// the bottom viewport row for the scene's `StatusBar` (when it has one).
+    ///
+    /// taffy 0.7 reports each node's `Layout.location` relative to its parent
+    /// (verified against taffy's `round_layout` in `taffy/src/compute/mod.rs`:
+    /// `layout.location = round(unrounded location)` with no parent-origin
+    /// accumulation), so the raw layout result is accumulated into
+    /// scene-absolute rects here. For trees where every nested parent sits at
+    /// the origin (all pre-existing golden tests) this is an exact no-op; it
+    /// is what makes depth-2+ subtrees — nested boxes, and the roadmap
+    /// components' group/panel -> text leaves — land at their real scene
+    /// positions.
     ///
     /// A `StatusBar` owns the reserved row (docs/components.md "StatusBar —
     /// Reserved row"): the layout viewport handed to the engine is one row
@@ -832,16 +1175,6 @@ fn z_index(scene: &Scene, id: NodeId) -> i32 {
     }
 }
 
-/// The stable z-ordered paint list for the given rects: every laid-out node
-/// in pre-order, sorted by ascending effective z-index (stable, so equal
-/// indexes keep pre-order).
-fn paint_order(scene: &Scene, rects: &HashMap<NodeId, Rect>) -> Vec<NodeId> {
-    let mut order: Vec<NodeId> = Vec::new();
-    collect_paint_order(scene, scene.root_id(), rects, &mut order);
-    order.sort_by(|&a, &b| z_index(scene, a).cmp(&z_index(scene, b)));
-    order
-}
-
 /// Per-node paint signatures for every node with geometry this frame — the
 /// whole-tree walk, used by [`Compositor::paint_full`] and as the
 /// force-full-scan fallback of [`Compositor::paint_dirty`].
@@ -953,34 +1286,83 @@ fn rect_union(a: Rect, b: Rect) -> Rect {
     Rect::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32)
 }
 
-/// Copy the cells inside `r` from `src` into `dst` (both viewport-sized;
-/// the rect is clipped to the buffer bounds). This is how a dirty repaint
-/// lands: the freshly painted scratch frame supplies the union's cells, and
-/// every cell outside it keeps its retained value.
-fn copy_rect(dst: &mut Buffer, src: &Buffer, r: Rect) {
-    let x0 = r.x.max(0) as u16;
-    let y0 = r.y.max(0) as u16;
-    let x1 = r.right().min(dst.width as i32).max(0) as u16;
-    let y1 = r.bottom().min(dst.height as i32).max(0) as u16;
-    for y in y0..y1 {
-        for x in x0..x1 {
-            if let Some(&cell) = src.cell(x, y) {
-                dst.set_cell(x, y, cell);
-            }
-        }
-    }
-}
-
 /// Whether `id`'s caret cell (rect origin + its `caret` display column) falls
 /// inside `r` — a text/streaming leaf with a caret paints that cell even
 /// outside its own rect, so it must be repainted when the dirty region
 /// touches it.
-fn caret_cell_in(scene: &Scene, id: NodeId, rect: Rect, r: &Rect) -> bool {
+fn caret_cell_in(scene: &Scene, id: NodeId, rect: Rect, content: &Region, r: &Rect) -> bool {
     let col = match scene.prop(id, "caret") {
         Some(PropValue::Int(i)) => *i,
         _ => return false,
     };
-    r.contains(rect.x + col as i32, rect.y)
+    // The caret cell, mapped through the content region like any other cell.
+    let cx = rect.x + col as i32 - content.scroll_x;
+    let cy = rect.y - content.scroll_y;
+    r.contains(cx, cy)
+}
+
+/// Fold one region into the dirty union (clipped to the viewport).
+fn union_add(dirty: &mut Option<Rect>, region: Rect, viewport_rect: Rect) {
+    if let Some(r) = region.intersection(&viewport_rect) {
+        if r.width > 0 && r.height > 0 {
+            *dirty = Some(match *dirty {
+                Some(d) => rect_union(d, r),
+                None => r,
+            });
+        }
+    }
+}
+
+/// Fold the painted bounds of `rect` drawn through `region` into the dirty
+/// union: the rect shifted by the region's scroll, plus the unshifted rect (a
+/// wrapped streaming leaf's rows stay inside the rect), each clipped to the
+/// region's clip. Every cell the node can paint through `region` lies inside
+/// these bounds. A caret-bearing text/streaming leaf additionally covers its
+/// whole mapped row — the caret column can lie beyond the rect.
+fn union_add_mapped(
+    dirty: &mut Option<Rect>,
+    scene: &Scene,
+    id: NodeId,
+    rect: Rect,
+    region: Region,
+    viewport: Size,
+) {
+    if let Some(m) = region
+        .clip
+        .intersection(&rect.offset(-region.scroll_x, -region.scroll_y))
+    {
+        union_add(dirty, m, Rect::new(0, 0, viewport.width as u32, viewport.height as u32));
+    }
+    if let Some(m) = region.clip.intersection(&rect) {
+        union_add(dirty, m, Rect::new(0, 0, viewport.width as u32, viewport.height as u32));
+    }
+    let is_caret_leaf = matches!(
+        scene.node(id).map(|n| n.kind),
+        Some(NodeKind::Text | NodeKind::StreamingText)
+    ) && matches!(scene.prop(id, "caret"), Some(PropValue::Int(_)));
+    if is_caret_leaf {
+        let row = Rect::new(0, rect.y - region.scroll_y, viewport.width as u32, 1);
+        if let Some(m) = region.clip.intersection(&row) {
+            union_add(dirty, m, Rect::new(0, 0, viewport.width as u32, viewport.height as u32));
+        }
+    }
+}
+
+/// Whether `rect` drawn through `region` can paint any cell inside `u` — the
+/// repaint-selection counterpart of the dirty union's painted bounds: the
+/// rect shifted by the region's scroll, plus the unshifted rect (a wrapped
+/// streaming leaf's rows stay inside the rect), each clipped to the region's
+/// clip. A node whose painted cells fall inside the union is repainted; a
+/// node whose cells all fall outside it paints nothing the union needs.
+fn painted_bounds_touch(rect: Rect, region: Region, u: &Rect) -> bool {
+    let shifted = rect.offset(-region.scroll_x, -region.scroll_y);
+    [shifted, rect].iter().any(|r| {
+        region
+            .clip
+            .intersection(r)
+            .and_then(|m| m.intersection(u))
+            .is_some()
+    })
 }
 
 /// Paint a single node into its laid-out rect, drawing its frame through
@@ -1001,24 +1383,40 @@ fn paint_node(node: &SceneNode, rect: Rect, frame: Region, content: Region, buff
 /// excluded), so a scrollable pane's background and border stay put while its
 /// content pans inside them.
 fn paint_box(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) {
+    // The mapped extent of the rect through the region, clamped to the
+    // region's clip and the buffer. Computed in i32: a mapped edge can land
+    // outside the buffer (a scroll can push the rect's far edge negative),
+    // and casting a negative end coordinate to u16 would underflow to a huge
+    // value — painting a ring that spans the whole buffer. When either
+    // extent is empty the box is fully invisible through the region and
+    // paints nothing (the dirty-union coverage proof relies on this: a
+    // node's painted cells never exceed its rect mapped through its
+    // regions, so the union — built from those mapped rects — always covers
+    // them).
+    let x0 = region.map_x(rect.x).max(region.clip.x).max(0);
+    let y0 = region.map_y(rect.y).max(region.clip.y).max(0);
+    let x1 = region
+        .map_x(rect.right())
+        .min(region.clip.right())
+        .min(buffer.width as i32);
+    let y1 = region
+        .map_y(rect.bottom())
+        .min(region.clip.bottom())
+        .min(buffer.height as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+
     // Background: fill the rect only when a non-default background is set, so
     // default boxes stay transparent over whatever is beneath them.
     if node.style.bg != Color::Default {
-        let x0 = region.map_x(rect.x).max(region.clip.x).max(0) as u16;
-        let y0 = region.map_y(rect.y).max(region.clip.y).max(0) as u16;
-        let x1 = region
-            .map_x(rect.right())
-            .min(region.clip.right())
-            .min(buffer.width as i32) as u16;
-        let y1 = region
-            .map_y(rect.bottom())
-            .min(region.clip.bottom())
-            .min(buffer.height as i32) as u16;
-        if x1 > x0 && y1 > y0 {
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    buffer.set_cell(x, y, Cell::styled(' ', node.style));
-                }
+        let x0 = x0 as u16;
+        let y0 = y0 as u16;
+        let x1 = x1 as u16;
+        let y1 = y1 as u16;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                buffer.set_cell(x, y, Cell::styled(' ', node.style));
             }
         }
     }
@@ -1028,19 +1426,10 @@ fn paint_box(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) 
     let Some((tl, tr, bl, br, h, v)) = border_glyphs(node.style.border_style) else {
         return;
     };
-    let x0 = region.map_x(rect.x).max(region.clip.x).max(0) as u16;
-    let y0 = region.map_y(rect.y).max(region.clip.y).max(0) as u16;
-    let x1 = region
-        .map_x(rect.right())
-        .min(region.clip.right())
-        .min(buffer.width as i32) as u16;
-    let y1 = region
-        .map_y(rect.bottom())
-        .min(region.clip.bottom())
-        .min(buffer.height as i32) as u16;
-    if x1 <= x0 || y1 <= y0 {
-        return;
-    }
+    let x0 = x0 as u16;
+    let y0 = y0 as u16;
+    let x1 = x1 as u16;
+    let y1 = y1 as u16;
     let last_x = x1 - 1;
     let last_y = y1 - 1;
     for x in x0..x1 {
@@ -1060,8 +1449,9 @@ fn paint_box(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) 
 
 /// Paint a text leaf's content starting at its rect origin, through `region`
 /// (the content is shifted by the region's scroll offset and clipped to its
-/// clip rect — and to the buffer). A wide character that would straddle the
-/// right edge is dropped, never truncated mid-glyph.
+/// clip rect — and to the buffer). Text advances grapheme cluster by cluster:
+/// a cluster that would straddle the right edge is dropped, never split
+/// mid-cluster (a ZWJ emoji or a combining sequence stays whole).
 ///
 /// When the node carries a `caret` Int prop (a display-column offset — the
 /// [`Input`](crate::Input) component stamps it), the block caret is painted
@@ -1071,6 +1461,16 @@ fn paint_box(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) 
 /// caret position is mapped through the region like any other cell, so a
 /// scrolled/clipped text leaf scrolls its caret along with its content.
 fn paint_text(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) {
+    // A rect with no interior rows (zero height) has no painted extent — its
+    // cells are bounded by the rect mapped through the region, and the dirty
+    // union is built from exactly those mapped rects, so a node must never
+    // paint outside them (mirrors `paint_streaming_text`'s `bottom <= rect.y`
+    // guard). Without this, a zero-height text leaf would still paint its row
+    // in a full paint while the incremental path — whose union can prove
+    // nothing about a zero-height rect — would skip it.
+    if rect.bottom() <= rect.y {
+        return;
+    }
     if let Some(PropValue::Str(content)) = node.props.get("text") {
         let y = rect.y;
         if region.map_y(y) >= region.clip.y
@@ -1079,11 +1479,11 @@ fn paint_text(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer)
         {
             let right = rect.right().min(region.clip.right() + region.scroll_x);
             let mut cx = rect.x;
-            for ch in content.chars() {
-                if cx >= right || ch == '\n' {
+            for cluster in clusters(content) {
+                if cx >= right || cluster.text == "\n" || cluster.text == "\r\n" {
                     break;
                 }
-                let w = char_width(ch);
+                let w = cluster.width;
                 if w == 0 {
                     continue;
                 }
@@ -1091,7 +1491,7 @@ fn paint_text(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer)
                 // off-screen to the left or the wide glyph crosses the right
                 // edge.
                 if cx >= 0 && cx + w as i32 <= right {
-                    buffer.set_char_region(cx, y, ch, node.style, region);
+                    buffer.set_cluster_region(cx, y, &cluster, node.style, region);
                 }
                 cx += w as i32;
             }
@@ -1173,10 +1573,11 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &m
     let mut word_style = Style::new();
 
     for span in stream {
-        for ch in span.text.chars() {
-            match ch {
+        for cluster in clusters(&span.text) {
+            match cluster.text {
                 // Hard break: flush the pending word, then start a new row.
-                '\n' => {
+                // CRLF is a single grapheme cluster and breaks like LF.
+                "\n" | "\r\n" => {
                     paint_word(&word, word_style, rect, &mut cursor, region, buffer);
                     word.clear();
                     cursor.row += 1;
@@ -1188,7 +1589,7 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &m
                 // Soft break: flush the pending word, then place the space
                 // only when it fits; a trailing space at a row's end is
                 // dropped (the wrap would collapse it anyway).
-                ' ' => {
+                " " => {
                     paint_word(&word, word_style, rect, &mut cursor, region, buffer);
                     word.clear();
                     if cursor.row < bottom
@@ -1203,7 +1604,7 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &m
                     if word.is_empty() {
                         word_style = span.style;
                     }
-                    word.push(ch);
+                    word.push_str(cluster.text);
                 }
             }
         }
@@ -1228,6 +1629,10 @@ fn paint_streaming_text_single_row(
     region: Region,
     buffer: &mut Buffer,
 ) {
+    // A zero-height rect has no painted extent (see the `paint_text` guard).
+    if rect.bottom() <= rect.y {
+        return;
+    }
     let right = rect.right().min(region.clip.right() + region.scroll_x);
     if right <= rect.x {
         return;
@@ -1241,20 +1646,20 @@ fn paint_streaming_text_single_row(
     }
     let mut cx = rect.x;
     for span in stream {
-        for ch in span.text.chars() {
-            if ch == '\n' {
+        for cluster in clusters(&span.text) {
+            if cluster.text == "\n" || cluster.text == "\r\n" {
                 return; // single-row: the line ends here
             }
-            let w = char_width(ch);
+            let w = cluster.width;
             if w == 0 {
                 continue;
             }
             // Trim: a glyph that would straddle the right edge is dropped
-            // whole (never mid-glyph); nothing after it fits either.
+            // whole (never mid-cluster); nothing after it fits either.
             if cx + w as i32 > right {
                 return;
             }
-            buffer.set_char_region(cx, rect.y, ch, span.style, region);
+            buffer.set_cluster_region(cx, rect.y, &cluster, span.style, region);
             cx += w as i32;
         }
     }
@@ -1270,9 +1675,10 @@ fn row_inside_frame(rect: Rect, region: Region, row: i32) -> bool {
     mapped >= rect.y && mapped < rect.bottom()
 }
 
-/// The display width of a string in terminal cells (multi-width aware).
+/// The display width of a string in terminal cells: the sum of its grapheme
+/// clusters' widths (multi-width aware, cluster-indivisible).
 fn display_width(content: &str) -> u32 {
-    content.chars().map(|c| char_width(c) as u32).sum()
+    clusters(content).map(|c| c.width as u32).sum()
 }
 
 /// The wrapped content size of `content` laid out at `width` cells: the
@@ -1284,7 +1690,8 @@ fn display_width(content: &str) -> u32 {
 /// hard-broken across rows; a `\n` forces a break; a trailing space at a row's
 /// end is dropped. The reported width can therefore be narrower than the
 /// content's total display width (wrapped rows), and an empty content reports
-/// `(0, 0)` — no content, no size.
+/// `(0, 0)` — no content, no size. Breaking is grapheme-cluster aware: a
+/// cluster never splits across rows.
 fn measure_wrapped(content: &str, width: u32) -> (u32, u32) {
     if content.is_empty() {
         return (0, 0);
@@ -1294,15 +1701,15 @@ fn measure_wrapped(content: &str, width: u32) -> (u32, u32) {
     let mut max_col: u32 = 0;
     let mut col: u32 = 0;
     let mut word = String::new();
-    for ch in content.chars() {
-        match ch {
-            '\n' => {
+    for cluster in clusters(content) {
+        match cluster.text {
+            "\n" | "\r\n" => {
                 flush_word(&word, width, &mut col, &mut lines, &mut max_col);
                 word.clear();
                 lines += 1;
                 col = 0;
             }
-            ' ' => {
+            " " => {
                 flush_word(&word, width, &mut col, &mut lines, &mut max_col);
                 word.clear();
                 // A trailing space at a row's end is dropped (the wrap would
@@ -1312,7 +1719,7 @@ fn measure_wrapped(content: &str, width: u32) -> (u32, u32) {
                     max_col = max_col.max(col);
                 }
             }
-            _ => word.push(ch),
+            _ => word.push_str(cluster.text),
         }
     }
     flush_word(&word, width, &mut col, &mut lines, &mut max_col);
@@ -1321,8 +1728,8 @@ fn measure_wrapped(content: &str, width: u32) -> (u32, u32) {
 
 /// Place one pending token onto the wrapped measurement, applying the same
 /// wrap rule as [`paint_word`]: whole-token wrap when it does not fit the
-/// current row but fits a fresh one, hard char-by-char break when the token is
-/// wider than the whole row.
+/// current row but fits a fresh one, hard cluster-by-cluster break when the
+/// token is wider than the whole row.
 fn flush_word(word: &str, width: u32, col: &mut u32, lines: &mut u32, max_col: &mut u32) {
     if word.is_empty() {
         return;
@@ -1337,8 +1744,8 @@ fn flush_word(word: &str, width: u32, col: &mut u32, lines: &mut u32, max_col: &
         *max_col = (*max_col).max(*col);
         return;
     }
-    for ch in word.chars() {
-        let w = char_width(ch) as u32;
+    for cluster in clusters(word) {
+        let w = cluster.width as u32;
         if w == 0 {
             continue;
         }
@@ -1357,13 +1764,16 @@ fn flush_word(word: &str, width: u32, col: &mut u32, lines: &mut u32, max_col: &
 ///
 /// A token that does not fit on the current row (which already holds content)
 /// moves whole to the next row; a token wider than the whole row is
-/// hard-broken across rows. A wide character that would straddle `right` — or
-/// that is wider than the row itself — is dropped, never split mid-glyph. The
-/// cursor advances past every token glyph, including dropped ones. Each glyph
-/// is drawn via [`Buffer::set_char_region`], so it is also shifted by the
-/// region's scroll and clipped to its clip rect; glyphs on a row whose mapped
-/// position falls outside `frame` (the node's own rect) are skipped, so
-/// scrolled content stays inside the pane.
+/// hard-broken across rows. Text advances grapheme cluster by cluster: a
+/// cluster that would straddle `right` — or that is wider than the row itself
+/// — wraps whole to the next row, or is dropped whole when it cannot fit a
+/// fresh row either; a cluster is never split mid-cluster (a ZWJ emoji stays
+/// a single 2-column glyph). The cursor advances past every token glyph,
+/// including dropped ones. Each glyph is drawn via
+/// [`Buffer::set_cluster_region`], so it is also shifted by the region's
+/// scroll and clipped to its clip rect; glyphs on a row whose mapped position
+/// falls outside `frame` (the node's own rect) are skipped, so scrolled
+/// content stays inside the pane.
 fn paint_word(
     word: &str,
     style: Style,
@@ -1381,7 +1791,7 @@ fn paint_word(
     // the content pan bound runs to the frame's bottom plus vertical scroll.
     let right = frame.right().min(region.clip.right() + region.scroll_x);
     let bottom = frame.bottom() + region.scroll_y;
-    let width: i32 = word.chars().map(|c| char_width(c) as i32).sum();
+    let width: i32 = display_width(word) as i32;
     // Wrap the whole token when it does not fit on the current row and can fit
     // on a fresh row; a token wider than the row itself is hard-broken below.
     if cursor.col > line_start && cursor.col + width > right && width <= right - line_start {
@@ -1391,13 +1801,13 @@ fn paint_word(
             return;
         }
     }
-    for ch in word.chars() {
-        let w = char_width(ch);
+    for cluster in clusters(word) {
+        let w = cluster.width;
         if w == 0 {
             continue;
         }
         if cursor.col + w as i32 > right {
-            // Does not fit on this row: wrap. A wide char that still cannot
+            // Does not fit on this row: wrap. A wide glyph that still cannot
             // fit on a fresh row (wider than the row) is dropped whole.
             cursor.row += 1;
             cursor.col = line_start;
@@ -1409,7 +1819,7 @@ fn paint_word(
             }
         }
         if row_inside_frame(frame, region, cursor.row) {
-            buffer.set_char_region(cursor.col, cursor.row, ch, style, region);
+            buffer.set_cluster_region(cursor.col, cursor.row, &cluster, style, region);
         }
         cursor.col += w as i32;
     }
@@ -1455,6 +1865,30 @@ mod tests {
             .collect()
     }
 
+    /// Reconstruct rows with FULL cluster symbols from a buffer (masked
+    /// continuation cells as spaces), mirroring tern-node's `buffer_rows` —
+    /// for grapheme-cluster golden comparisons.
+    fn buffer_rows_clusters(buffer: &Buffer) -> Vec<String> {
+        (0..buffer.height)
+            .map(|y| {
+                (0..buffer.width)
+                    .map(|x| {
+                        buffer.cell(x, y).map_or_else(
+                            || " ".to_string(),
+                            |c| {
+                                if c.is_masked() {
+                                    " ".to_string()
+                                } else {
+                                    c.symbol_str().into_owned()
+                                }
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     /// Paint a raw scene and return it as a `Vec<String>` grid for golden
     /// comparisons.
     fn render_scene_rows(scene: &Scene, viewport: Size) -> Vec<String> {
@@ -1488,6 +1922,84 @@ mod tests {
         scene.set_prop(s, "width", PropValue::Int(width));
         scene.set_prop(s, "height", PropValue::Int(height));
         scene
+    }
+
+    #[test]
+    fn streaming_text_zwj_emoji_at_right_edge_wraps_whole() {
+        // A 2-column ZWJ family emoji inside a token that does not fit the
+        // 3-cell row: the hard break moves the cluster to the next row WHOLE —
+        // the emoji is never split across rows.
+        let mut scene = streaming_scene(3, 2);
+        let root = scene.root_id();
+        let s = scene
+            .children(root)
+            .and_then(|ids| ids.first().copied())
+            .expect("streaming node");
+        scene.append_span(
+            s,
+            Span {
+                text: "ab👨‍👩‍👧‍👦c".into(),
+                style: Style::new(),
+            },
+        );
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(3, 2));
+        // Row 0 holds "ab"; the cluster wrapped whole to row 1 (lead at col 0,
+        // masked neighbor at col 1) with 'c' after it.
+        assert_eq!(buffer.cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(buffer.cell(1, 0).unwrap().ch, 'b');
+        let lead = buffer.cell(0, 1).expect("cluster lead");
+        assert_eq!(lead.ch, '👨');
+        assert_eq!(lead.symbol.as_deref(), Some("👨‍👩‍👧‍👦"));
+        assert_eq!(lead.width, 2);
+        assert!(buffer.cell(1, 1).expect("mask").is_masked());
+        assert_eq!(buffer.cell(2, 1).unwrap().ch, 'c');
+        // Full-symbol row reconstruction shows the complete cluster on row 1.
+        assert_eq!(buffer_rows_clusters(&buffer), vec!["ab ", "👨‍👩‍👧‍👦 c"]);
+    }
+
+    #[test]
+    fn text_truncation_drops_cluster_whole() {
+        // A 2-cell rect cannot hold the 2-column ZWJ emoji after "ab": the
+        // cluster is dropped WHOLE at the right edge — never split into a
+        // lone '👨' cell.
+        let tree = Text::new("ab👨‍👩‍👧‍👦", Style::new());
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(tree, Size::new(2, 1));
+        assert_eq!(buffer.cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(buffer.cell(1, 0).unwrap().ch, 'b');
+        // No trace of the emoji: neither cell holds a partial glyph.
+        assert_eq!(buffer.cell(0, 0).unwrap().symbol, None);
+        assert_eq!(buffer.cell(1, 0).unwrap().symbol, None);
+    }
+
+    #[test]
+    fn text_truncation_drops_oversized_cluster_whole() {
+        // A cluster wider than the whole row is dropped whole, not split: a
+        // 1-cell rect cannot hold a 2-column emoji, so the cell stays blank —
+        // a split would have left '👨' behind.
+        let tree = Text::new("👨‍👩‍👧‍👦", Style::new());
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(tree, Size::new(1, 1));
+        assert_eq!(buffer.cell(0, 0).unwrap().ch, ' ');
+        assert_eq!(buffer.cell(0, 0).unwrap().symbol, None);
+    }
+
+    #[test]
+    fn text_combining_sequence_occupies_one_cell() {
+        // A base + combining mark is ONE cluster in ONE cell: the lead cell
+        // carries the full "e\u{301}" symbol at width 1, and the next glyph
+        // lands in the following column — no masked neighbor.
+        let tree = Text::new("e\u{301}x", Style::new());
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(tree, Size::new(3, 1));
+        let c0 = buffer.cell(0, 0).unwrap();
+        assert_eq!(c0.ch, 'e');
+        assert_eq!(c0.symbol.as_deref(), Some("e\u{301}"));
+        assert_eq!(c0.width, 1);
+        assert!(!c0.is_masked());
+        assert_eq!(buffer.cell(1, 0).unwrap().ch, 'x');
+        assert_eq!(buffer.cell(2, 0).unwrap(), &Cell::default());
     }
 
     #[test]
@@ -1682,6 +2194,204 @@ mod tests {
             assert!(!c.style.modifiers.contains(Modifiers::REVERSED));
         }
         assert_eq!(buffer.cell(1, 1).unwrap().ch, 'a');
+    }
+
+    /// A raw scene with a single `Text` leaf sized to `width` x `height` at
+    /// the origin (a root text fills the viewport's first row).
+    fn selection_text_scene(text: &str, width: i64, height: i64) -> Scene {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let t = scene
+            .add_child(root, NodeKind::Text, Style::new())
+            .expect("add text");
+        scene.set_prop(t, "text", PropValue::Str(text.into()));
+        scene.set_prop(t, "width", PropValue::Int(width));
+        scene.set_prop(t, "height", PropValue::Int(height));
+        scene
+    }
+
+    #[test]
+    fn selection_overlay_reverses_selected_cells_and_preserves_content() {
+        // A selection spanning cols 1-3 of the text row: those cells gain
+        // REVERSED on top of their own style; the character content and the
+        // cells outside the selection are untouched.
+        let scene = selection_text_scene("hello", 5, 1);
+        let mut compositor = Compositor::new();
+        compositor.set_selection((1, 0), (3, 0));
+        let buffer = compositor.paint_scene(&scene, Size::new(5, 1));
+
+        assert_eq!(buffer.cell(0, 0).unwrap().ch, 'h');
+        assert!(!buffer
+            .cell(0, 0)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::REVERSED));
+        for x in 1..=3 {
+            let c = buffer.cell(x, 0).unwrap();
+            assert_eq!(c.ch, "hello".chars().nth(x as usize).unwrap());
+            assert!(
+                c.style.modifiers.contains(Modifiers::REVERSED),
+                "cell {x} must be reversed"
+            );
+        }
+        assert!(!buffer
+            .cell(4, 0)
+            .unwrap()
+            .style
+            .modifiers
+            .contains(Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn selection_overlay_endpoints_are_normalized() {
+        // The active endpoint may sit above/left of the anchor: the spanned
+        // rectangle is the same either way.
+        let scene = selection_text_scene("hello", 5, 1);
+        let mut a = Compositor::new();
+        a.set_selection((3, 0), (1, 0));
+        let buf_a = a.paint_scene(&scene, Size::new(5, 1));
+        let mut b = Compositor::new();
+        b.set_selection((1, 0), (3, 0));
+        let buf_b = b.paint_scene(&scene, Size::new(5, 1));
+        assert_eq!(buf_a, buf_b);
+        for x in 1..=3 {
+            assert!(buf_a.cell(x, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        }
+    }
+
+    #[test]
+    fn selection_overlay_is_a_noop_when_unset() {
+        // The default compositor (no selection) must produce a frame without
+        // any reversed cells — the overlay is a strict no-op when unset.
+        let scene = selection_text_scene("hello", 5, 1);
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(5, 1));
+        for x in 0..5 {
+            assert!(
+                !buffer.cell(x, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED),
+                "cell {x} must not be reversed without a selection"
+            );
+        }
+    }
+
+    #[test]
+    fn selection_overlay_skips_masked_continuation_cells() {
+        // A wide char inside the selection: its lead cell is reversed (the
+        // glyph is covered), its masked continuation cell is left untouched —
+        // never a reversed NUL that would corrupt the glyph's neighbor.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let t = scene
+            .add_child(root, NodeKind::Text, Style::new())
+            .expect("add text");
+        scene.set_prop(t, "text", PropValue::Str("コab".into()));
+        scene.set_prop(t, "width", PropValue::Int(4));
+        scene.set_prop(t, "height", PropValue::Int(1));
+
+        let mut compositor = Compositor::new();
+        compositor.set_selection((0, 0), (3, 0)); // the whole row
+        let buffer = compositor.paint_scene(&scene, Size::new(4, 1));
+        // コ at cols 0-1 (lead + mask), 'a' at 2, 'b' at 3.
+        let lead = buffer.cell(0, 0).unwrap();
+        assert_eq!(lead.ch, 'コ');
+        assert!(lead.style.modifiers.contains(Modifiers::REVERSED));
+        let mask = buffer.cell(1, 0).unwrap();
+        assert!(mask.is_masked());
+        assert!(!mask.style.modifiers.contains(Modifiers::REVERSED));
+        assert!(buffer.cell(2, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        assert!(buffer.cell(3, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn selection_overlay_change_and_clear_leave_no_stale_reversal() {
+        // Moving or clearing the selection must never leave REVERSED on cells
+        // that are no longer selected: a selection change forces a full
+        // repaint, so the frame is rebuilt fresh before the overlay applies.
+        let scene = selection_text_scene("hello", 5, 1);
+        let mut compositor = Compositor::new();
+        compositor.set_selection((1, 0), (3, 0));
+        let first = compositor.paint_scene(&scene, Size::new(5, 1));
+        assert!(first.cell(2, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+
+        // Shrink the selection: the old cell 3 must lose REVERSED.
+        compositor.set_selection((1, 0), (2, 0));
+        let shrunk = compositor.paint_scene(&scene, Size::new(5, 1));
+        assert!(shrunk.cell(1, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        assert!(shrunk.cell(2, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        assert!(!shrunk.cell(3, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+
+        // Clear it: no reversed cells remain.
+        compositor.clear_selection();
+        let cleared = compositor.paint_scene(&scene, Size::new(5, 1));
+        for x in 0..5 {
+            assert!(!cleared.cell(x, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        }
+    }
+
+    #[test]
+    fn selection_overlay_applied_identically_on_warm_and_fresh_paths() {
+        // The mandatory dirty-parity property with a selection SET: a warm
+        // compositor (dirty repaints + retained frames) with a selection must
+        // produce cell-for-cell identical frames to a fresh compositor (full
+        // recompute) with the same selection, across mutations. This pins
+        // that the overlay is applied identically on warm and fresh paths.
+        let scene = selection_text_scene("hello", 5, 1);
+        let mut warm = Compositor::new();
+        warm.set_selection((1, 0), (3, 0));
+        let mut fresh = Compositor::new();
+        fresh.set_selection((1, 0), (3, 0));
+
+        // Frame 0 (cold full paint on both).
+        let warm0 = warm.paint_scene(&scene, Size::new(5, 1));
+        let fresh0 = fresh.paint_scene(&scene, Size::new(5, 1));
+        assert_eq!(warm0, fresh0);
+
+        // Mutate the scene (dirty path on the warm compositor), repaint.
+        let mut scene = scene;
+        let root = scene.root_id();
+        scene.set_prop(root, "padding", PropValue::Int(0));
+        // (re-fetch the text id — it is the root's only child)
+        let t = scene.children(root).unwrap()[0];
+        scene.set_prop(t, "text", PropValue::Str("world".into()));
+        let warm1 = warm.paint_scene(&scene, Size::new(5, 1));
+        let fresh1 = {
+            let mut f = Compositor::new();
+            f.set_selection((1, 0), (3, 0));
+            f.paint_scene(&scene, Size::new(5, 1))
+        };
+        assert_eq!(warm1, fresh1);
+        assert!(warm1.cell(1, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+
+        // The dirty buffer's diff vs the previous frame matches the fresh
+        // path's diff (the renderer's terminal output is identical).
+        assert_eq!(warm1.diff_from(&warm0), fresh1.diff_from(&fresh0));
+    }
+
+    #[test]
+    fn selection_overlay_unchanged_selection_keeps_dirty_path() {
+        // With a fixed selection, a localized scene mutation takes the dirty
+        // path (not a forced full repaint): the overlay is re-applied on top
+        // of the dirty result and parity holds. The retained buffer must keep
+        // its reversed cells across the dirty pass.
+        let scene = selection_text_scene("hello", 5, 1);
+        let mut compositor = Compositor::new();
+        compositor.set_selection((1, 0), (3, 0));
+        compositor.paint_scene(&scene, Size::new(5, 1));
+
+        let mut scene = scene;
+        let root = scene.root_id();
+        let t = scene.children(root).unwrap()[0];
+        scene.set_prop(t, "text", PropValue::Str("hexxo".into()));
+        let buffer = compositor.paint_scene(&scene, Size::new(5, 1));
+        // The dirty pass repainted the text cell; the overlay still applies.
+        assert_eq!(buffer.cell(2, 0).unwrap().ch, 'x');
+        assert!(buffer.cell(2, 0).unwrap().style.modifiers.contains(Modifiers::REVERSED));
+        // And it matches a fresh full recompute with the same selection.
+        let mut fresh = Compositor::new();
+        fresh.set_selection((1, 0), (3, 0));
+        let full = fresh.paint_scene(&scene, Size::new(5, 1));
+        assert_eq!(buffer, full);
     }
 
     #[test]

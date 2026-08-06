@@ -82,6 +82,28 @@ const { truecolor, colors } = renderer.capabilities;
 if (!truecolor) console.log(`painting for a ${colors}-color terminal`);
 ```
 
+`renderer.size` reports the terminal size as `{ width, height }` in cells:
+the viewport the most recent `render()` or `snapshotFrame()` painted at.
+Before any paint the native side surfaces the current terminal size (one
+probe through its cached-size machinery), so a fresh renderer never reports
+the synthetic 80×24 fallback. After a resize event the reported size catches
+up with the next render — `onResize` still fires first:
+
+```ts
+const { width, height } = renderer.size;   // viewport of the last paint
+if (width < 80) console.log("narrow terminal");
+```
+
+`renderer.setClipboard(text)` copies `text` to the system clipboard via
+**OSC 52** (`ESC ] 52 ; c ; <base64> BEL`, the payload being the text's UTF-8
+bytes base64-encoded per RFC 4648). The terminal emulator must support OSC 52
+(xterm, kitty, foot, WezTerm, iTerm2, …; tmux forwards it when
+`set-clipboard` is enabled):
+
+```ts
+renderer.setClipboard("answer: 42");   // paste it anywhere
+```
+
 ## Component overview
 
 Every widget exists in three forms, all producing the same scene node
@@ -248,6 +270,21 @@ the visible window with vertical scroll-to-caret. `<Textarea>` in
 registers with a `FocusManager` so routed keys edit it; `Textarea` in
 `@tern/solid` is the plain factory.
 
+#### Grapheme clusters
+
+`editKey` and `editTextareaKey` move by **grapheme clusters** (UAX #29
+extended grapheme clusters, via `Intl.Segmenter` — present in both declared
+runtimes, Deno and Node ≥ 20; a documented fallback splits on code points,
+keeping surrogate pairs whole): a ZWJ emoji sequence (`👨‍👩‍👧‍👦`), a flag
+(`🇷🇺`) or a base-plus-combining sequence (`e` + `◌́`) is ONE step for
+`left` / `right` / `backspace` / `delete`, and the cursor never rests
+mid-cluster — a caret column inside a cluster snaps to the cluster boundary.
+A cluster occupies `cluster_width` terminal columns (the sum of its member
+characters' widths, clamped to 2 — the tern-core convention, `cell.rs:75`),
+so the Input caret column, Textarea soft-wrap, and caret-line composition all
+count a ZWJ emoji as 2 columns, never per code point; the compositor paints a
+2-column cluster as one glyph with a masked continuation cell.
+
 ### Modal
 
 `Modal(props)` (core) builds a full-bleed overlay: an absolutely positioned
@@ -298,11 +335,16 @@ not a change callback prop.
 
 - `pasteInto(input, text)` — insert pasted text into an `Input` node at the
   caret, mutating the value and caret in place (the paste counterpart of
-  `editKey`); multi-width aware, the caret advances by the pasted text's
-  display width. Returns `{ value, caret }`.
+  `editKey`); multi-width aware, the text lands at the grapheme-cluster
+  boundary snapped back from the caret column (a column inside a cluster
+  inserts before that cluster), and the caret advances by the pasted text's
+  display width (its clusters' widths — a ZWJ emoji counts 2). Returns
+  `{ value, caret }`.
 - `pasteIntoTextarea(textarea, text)` — insert pasted text into a `Textarea`
   node at the caret; a pasted `\n` splits into new logical lines (the
-  post-caret tail joins the last pasted segment). Returns
+  post-caret tail joins the last pasted segment). A paste lands on a
+  grapheme-cluster boundary (a mid-cluster cursor snaps to the boundary
+  after its cluster — where its caret visually paints). Returns
   `{ lines, row, col }`.
 - `usePaste(handler, { isActive, focusManager })` (`@tern/react`) and
   `subscribePaste(renderer, handler, { isActive, focusManager })`
@@ -325,6 +367,45 @@ not a change callback prop.
   node: the live scene tree is walked in paint order and the first node the
   manager has registered (via `focusIdFor`) is focused. Returns whether a
   focus was applied.
+- `startSelection(renderer, event)` / `dragSelection(renderer, event)` /
+  `endSelection(renderer, event)` — the mouse selection state machine over
+  the renderer's native selection overlay: a `down_left` press anchors a
+  session at the pressed cell (a second press on a nearby cell within
+  `SELECTION_DOUBLE_CLICK_MS` ms — 500 — is a double-click and selects the
+  word under the pointer via `selectWordAt`), each `drag_left` extends the
+  selection to the dragged cell, and any `up_*` release ends the session —
+  clear-on-release, the overlay is transient and lives only while the button
+  is held. Each helper returns the applied `SelectionRange`, or `null` when
+  the event did not apply.
+- `copySelection(renderer)` — copies the renderer's current selection text
+  to the system clipboard (OSC 52). With the v1 clear-on-release contract the
+  copy must happen while the selection is active — a host's `up_*` handler
+  calls it before `endSelection` (copy-on-release), or the key binding
+  `selectionKey(renderer, event)` maps `ctrl+shift+c` to it (plain `ctrl+c`
+  stays the app's exit convention and is never consumed).
+
+### Text selection
+
+`useSelection()` (`@tern/react`) and `subscribeSelection(renderer)`
+(`@tern/solid`) wire the selection state machine onto the renderer's mouse
+events: press-drag-release selects, a double-click selects the word under
+the pointer, and release copies the selected text to the clipboard
+(copy-on-release). Each applied step repaints the scene so the native
+overlay renders; non-mouse events fall through.
+
+```tsx
+// @tern/react
+useSelection();
+```
+
+```ts
+// @tern/solid
+const dispose = subscribeSelection(renderer);   // returns a disposer
+```
+
+Hosts that want a copy *key* instead of (or in addition to) copy-on-release
+route the core `selectionKey` (ctrl+shift+c) through `useInput` /
+`subscribeInput`.
 
 ## Recipes
 
@@ -462,7 +543,9 @@ const dispose = subscribeFocusTraversal(renderer, undefined, ["modal-input"]);
 `renderer.snapshotFrame(width?, height?)` paints the shared scene into a
 fresh buffer (no terminal I/O) and returns one string per row —
 masked/continuation cells are spaces, so every row is exactly `width` display
-columns (multi-width aware). `framesEqual(a, b)` compares two frames (same
+columns (multi-width aware). The snapshot's viewport is recorded as the last
+painted viewport, so `renderer.size` reports it afterwards.
+`framesEqual(a, b)` compares two frames (same
 row count + string equality) for golden assertions — the canonical
 rounded-border scene:
 
@@ -476,6 +559,43 @@ renderer.render();
 const frame = renderer.snapshotFrame(6, 3);
 framesEqual(frame, ["┌──┐  ", "│Hi│  ", "└──┘  "]); // true
 ```
+
+### Manual ssh verification (works-over-a-pty recipe)
+
+tern's diff flush is generic over the output sink — `flush_diff_to<W: Write>`
+(`tern-terminal` `backend.rs:429`) writes the run-batched escape-sequence
+diff through **any** `std::io::Write`, and the app's `stdout` is one. When
+that stdout is a pty — a local terminal *or* the remote end of an `ssh -t`
+session — crossterm's event layer drives the app from the same pty:
+`event::read()` surfaces keys, and the Unix event source maps the pty's
+SIGWINCH to a `Resize` event, which re-lays the scene out at the new size.
+No `tern-server` binary is needed for this; it is why `ssh host -t tern`
+works today.
+
+Manual recipe (from a machine that can reach the target host):
+
+```sh
+# 1. On the host: build the native addon once (release default).
+npm install && npm run build --prefix src/bindings/tern-node
+
+# 2. From a client: run a demo over an allocated pty. The -t flag is what
+#    gives the remote command a controlling tty (a pty), without which tern
+#    has no terminal to drive and no SIGWINCH source.
+ssh user@host -t 'deno run --allow-all packages/examples/kitchen-sink-react.ts'
+
+# 3. Verify render + resize + input:
+#    - the scene renders (the kitchen-sink layout paints on screen);
+#    - resize the client window — the app re-lays out at the new size
+#      (a Resize event from SIGWINCH flows into the push event loop);
+#    - press q — the demo quits cleanly and the ssh session ends.
+```
+
+If tern is not on the remote `PATH`, give the absolute repo path or
+`cd` into it first. The PTY smoke harness
+(`bash packages/examples/run-smoke.sh`) regression-tests the same
+property headlessly — it resizes a `script` pty mid-session (a backgrounded
+`stty -f /dev/tty` raises SIGWINCH to the foreground process group before
+`q` is fed) and asserts every demo still exits 0.
 
 ## Event model
 
@@ -566,6 +686,14 @@ The Phase 2 event surface is consumed in the renderers:
   ±1, clamped to the content bounds; a `table` scrolls its content region so
   the sticky header stays pinned). A consumed wheel repaints the scene;
   non-wheel events fall through.
+- **Mouse selection** — `useSelection()` (`@tern/react`) and
+  `subscribeSelection(renderer)` (`@tern/solid`) wire the core selection
+  helpers (`startSelection` / `dragSelection` / `endSelection`) onto the
+  renderer's mouse events over the native selection overlay: press-drag-
+  release selects, a double-click selects the word under the pointer, and
+  release copies the selected text to the clipboard (copy-on-release —
+  `copySelection` before `endSelection`). Each applied step repaints the
+  scene; non-mouse events fall through.
 - **Focus-aware redraw** — the `@tern/react` `<Spinner>` mount effect and
   `@tern/solid` `startSpinner` skip `tick()` / `render()` while the terminal
   is unfocused, resuming on regain.

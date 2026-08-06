@@ -53,6 +53,19 @@ The tree-level input hooks consult the manager first — `useInput` in
 `@tern/react` and `subscribeInput` in `@tern/solid` route each key through
 the core `FocusManager` before falling back to the tree handler.
 
+### IME posture (decision)
+
+**Composition/preedit stays with the terminal emulator** — tern deliberately
+does not surface IME composition/preedit events: crossterm 0.29's `Event`
+enum carries no composition variant (only focus / key / mouse / paste /
+resize), and the emulator owns preedit rendering anyway. A confirmed IME
+composition reaches the app as a bracket-pasted string and flows through the
+`Paste` event → `FocusManager.routePaste` → `pasteInto` / `pasteIntoTextarea`
+path above — multi-codepoint CJK/IME-confirmed strings (pre-composed and
+decomposed) are regression-tested to round-trip losslessly into a focused
+`Input` and `Textarea`. Full rationale in
+[roadmap.md](roadmap.md#ime-posture--composition-stays-a-non-goal).
+
 ## Status legend
 
 | Status | Meaning |
@@ -76,6 +89,7 @@ the core `FocusManager` before falling back to the tree handler.
 | [Table](#table) | ✅ Shipped | — |
 | [Textarea](#textarea) | ✅ Shipped | — |
 | [Modal](#modal) | ✅ Shipped | — |
+| [Selection](#selection) | ✅ Shipped | — |
 | [Theme system](#theme-system--soft-wrap) | ✅ Shipped | — |
 | [Soft wrap (`wrap` prop)](#theme-system--soft-wrap) | ✅ Shipped | — |
 
@@ -250,7 +264,11 @@ cell-buffer renderer that repaints per frame.
 - **Caret:** block or line caret, blink handled by the renderer's redraw
   timer; caret position exposed as a column offset into the line.
 - **Editing:** insert/delete, cursor movement (left/right, home/end), word
-  jumps (option-arrow), selection + clipboard paste, IME composition passthrough.
+  jumps (option-arrow), selection + clipboard paste, and confirmed-IME input
+  via bracketed paste. IME composition/preedit itself stays with the terminal
+  emulator — see the [IME posture](roadmap.md#ime-posture--composition-stays-a-non-goal)
+  decision (crossterm surfaces no preedit events and the emulator owns the
+  composing overlay; a confirmed composition arrives as a `Paste` event).
 - **History:** up/down arrows walk a bounded ring buffer; empty-entry resets
   to draft.
 - **Focus:** an `Input` participates in the focus model — focused input owns
@@ -284,6 +302,9 @@ element (`Input` in `@tern/core`; `<Input>` in `@tern/react`, `Input` in
 in `@tern/react` / `subscribePaste` in `@tern/solid`) auto-pastes into a
 focused `<Input focusId>` through the core `pasteInto` — inserting at the
 caret, multi-width aware, and firing `onChange` (an empty paste is a no-op).
+IME-confirmed CJK/IME strings round-trip losslessly through this paste path
+(cluster-safe insert, pre-composed and decomposed forms — see the
+[IME posture](#ime-posture-decision) note above).
 
 ---
 
@@ -630,7 +651,9 @@ with the registration disposed via `disposeTextareaFocus` (feature parity
 with the React host component). Routed paste (via `usePaste` /
 `subscribePaste`) auto-pastes into a focused textarea through the core
 `pasteIntoTextarea` — a pasted `\n` splits into new logical lines, firing
-`onChange`.
+`onChange`. IME-confirmed multi-codepoint CJK/IME strings round-trip
+losslessly through this path too, including multi-line and decomposed forms
+(see the [IME posture](#ime-posture-decision) note above).
 
 ---
 
@@ -681,6 +704,71 @@ focus through the `FocusManager` — `focusFirst` on open, restoring the
 recorded id (or blurring) on close. `<Modal>` in `@tern/react` takes the
 content as a `content` prop (no React children); `Modal` in `@tern/solid` is
 the plain factory.
+
+---
+
+## Selection
+
+**Purpose:** select and copy text from the rendered scene with the mouse —
+the terminal-native way to grab a command, an error line, or a log excerpt
+without editing.
+
+**Core problem:** there is no DOM to select from — the scene is a
+cell-buffer, so selection must live in the renderer's paint state (a
+reversed-cell overlay) and its text must be reconstructed from the painted
+frame, not from a document model.
+
+**Design:**
+
+- **Native overlay.** The selection is per-renderer state on the native
+  compositor: `Renderer.setSelection(col1, row1, col2, row2)` paints the
+  inclusive cell rect reversed at the next `render()`; `clearSelection()`
+  drops it. The overlay never touches the shared scene.
+- **Text extraction.** `Renderer.selectionText()` reconstructs the selected
+  text from the last painted frame — row-major, cluster/mask-aware (a wide
+  glyph contributes its whole symbol, a masked continuation cell nothing),
+  rows joined with `'\n'`. `selectionWordRange(col, row)` resolves the
+  contiguous non-whitespace run (word) containing a cell for double-click
+  select.
+- **Interaction state machine.** The core helpers `startSelection` /
+  `dragSelection` / `endSelection` are pure interaction math over the
+  renderer's selection API: a `down_left` anchors a session (a second press
+  on a nearby cell within `SELECTION_DOUBLE_CLICK_MS` ms — 500 — is a
+  double-click and selects the word), each `drag_left` extends the rect, and
+  any `up_*` release ends the session — clear-on-release, the highlight is
+  transient and lives only while the button is held (persistent selection
+  after release is future work).
+- **Clipboard.** `copySelection(renderer)` copies the active selection text
+  to the system clipboard (OSC 52). With clear-on-release the copy must
+  happen during the gesture — the host wiring does copy-on-release (copy
+  before `endSelection`), and `selectionKey` maps `ctrl+shift+c` to it
+  (plain `ctrl+c` stays the app's exit convention).
+
+**API sketch (JS):**
+
+```tsx
+// @tern/react — one hook wires the whole gesture
+useSelection();
+```
+
+```ts
+// @tern/solid — returns a disposer
+const dispose = subscribeSelection(renderer);
+```
+
+**Acceptance:** a press-drag-release gesture paints the overlay while held
+and clears it on release; a double-click selects the word under the pointer;
+release copies the selected text to the clipboard; the selection text
+extracts the exact painted cells (multi-row, cluster-aware); `ctrl+shift+c`
+copies the active selection and plain `ctrl+c` is never consumed.
+
+**Shipped:** native selection overlay on the compositor (`set_selection` /
+`clear_selection` / `selection_text` / `selection_word_range` on the
+tern-node renderer, surfaced as `Renderer.setSelection` / `clearSelection` /
+`selectionText` / `selectionWordRange`), the core interaction module
+(`startSelection` / `dragSelection` / `endSelection` / `copySelection` /
+`selectWordAt` / `selectionKey` / `SELECTION_DOUBLE_CLICK_MS`), and the host
+wiring `useSelection` (`@tern/react`) / `subscribeSelection` (`@tern/solid`).
 
 ---
 
@@ -836,3 +924,48 @@ never reach the scene; explicit props always win). `@tern/react` provides
 **Soft wrap (shipped):** the `wrap` prop passes through to each content leaf
 of `DiffView` and is accepted on `StreamingText` for API stability — the
 compositor soft-wraps at the node width.
+
+## Unicode & grapheme clusters
+
+**The indivisible text unit is the grapheme cluster** (UAX #29 extended
+grapheme clusters, via `unicode-segmentation`). A ZWJ emoji sequence
+(`👨‍👩‍👧‍👦`), a flag (`🇷🇺`), a keycap (`1️⃣`), or a base-plus-combining
+sequence (`e` + U+0301 → `é`) is one cluster and is treated as a single
+logical glyph everywhere in the paint pipeline:
+
+- **Width** — a cluster occupies `min(2, Σ member char widths)` columns. A
+  ZWJ emoji or a flag is a 2-column glyph; a combining sequence is 1 column
+  (its base's width); a lone combining mark is 0 columns and is skipped.
+  `display_width`, `measure_wrapped`, `flush_word`, and the layout engine's
+  content-size path all measure cluster-by-cluster, so layout, wrapping, and
+  painting agree on the same width.
+- **Wrapping** — a cluster that does not fit on the current row wraps whole
+  to the next row; a cluster wider than the whole row is dropped whole.
+  `paint_word`, `paint_streaming_text`, and the right-edge truncation paths
+  (`paint_text`, the `wrap: false` single-row trim) never split a cluster
+  across rows or at the right edge.
+- **Painting** — a cluster is written as one logical glyph occupying
+  `cluster_width` columns. The lead cell carries the cluster's full symbol
+  string (tern-core's `Cell.symbol`, ratatui-style); a 2-column cluster's
+  second column is a masked continuation cell, so the wide-char invariant is
+  unchanged. Single-char cells keep `symbol == None`, so the common case
+  stays inline and allocation-free (tern-core's `Cell` drops `Copy`; the diff
+  and the flusher only need `Clone` + `PartialEq`).
+- **Flush** — the terminal flusher (`tern-terminal`) prints the full cluster
+  string exactly once per cluster lead, in one `Print` call; a run's adjacency
+  logic tracks the cluster's column advance so the following cell never lands
+  on the wrong column. Combining sequences print as a single `Print` too.
+- **Snapshots** — `render_to_buffer` / `snapshotFrame` rows reconstruct each
+  cluster's full symbol, so a ZWJ emoji or flag appears as a single 2-column
+  glyph in the row strings (masked continuation cells render as spaces).
+
+**Cell model change:** `Cell` (and `CellUpdate`) gained a `symbol:
+Option<Box<str>>` field holding the cluster's full text for multi-char
+clusters. `Cell` is no longer `Copy` (its `Box<str>` cannot be) — the row-
+slice fast path of `Buffer::diff_from` uses `PartialEq` slice comparison and
+does not depend on `Copy`; `Buffer::resize` now `clone_from_slice`s instead
+of `copy_from_slice`.
+
+The editing components (`Input`, `Textarea`, `StatusBar`) still measure
+cursor/segment positions character-by-character; cluster-aware cursor
+movement is future work (see `roadmap.md`).
