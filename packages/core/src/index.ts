@@ -42,7 +42,15 @@
  *   `scroll_down` / `scroll_left` / `scroll_right`) to `scrollBy` on the
  *   given scrollable node, and `focusAt(renderer, event)` routes a
  *   `down_left` press on a painted cell to the topmost registered focusable
- *   node via the `FocusManager`.
+ *   node via the `FocusManager`. Mouse text selection is viewport-cell-scoped
+ *   v1: `startSelection(renderer, event)` / `dragSelection(renderer, event)`
+ *   / `endSelection(renderer, event)` drive a press-drag-release selection
+ *   overlay (two `down_left` presses within
+ *   `SELECTION_DOUBLE_CLICK_MS` ms on nearby cells select the word under the
+ *   pointer via `selectWordAt`), `copySelection(renderer)` copies the
+ *   selection text to the system clipboard (OSC 52), and `selectionKey`
+ *   binds `ctrl+shift+c` to copy — plain `ctrl+c` stays the exit convention
+ *   and is never consumed.
  * - A theme system: `Theme` (a named palette of fg/bg per semantic role plus
  *   per-component style presets), `defaultTheme`, `mergeTheme(base, overrides)`
  *   and `resolveTheme(theme, props)`. Resolution consumes semantic hints
@@ -53,7 +61,11 @@
  *   `resolveTheme` explicitly at element-creation time.
  * - `Renderer` owns the render/input loop: `render()` (synchronous, immediate
  *   paint), `requestFrame()` (coalesced paint on the next macrotask — several
- *   calls within one tick collapse into a single native render), `events` (an
+ *   calls within one tick collapse into a single native render), `size` (the
+ *   viewport the last render/snapshot painted at — `{ width, height }` in
+ *   cells, the current terminal size before the first paint),
+ *   `setClipboard(text)` (copy to the system clipboard via OSC 52),
+ *   `events` (an
  *   `AsyncIterable` of tagged `TernEventJs` events pushed from the native
  *   thread), `onKey(cb)`, `onResize(cb)`, `onFocus(cb)`, `onMouse(cb)`,
  *   `onPaste(cb)` and
@@ -87,6 +99,7 @@ export type {
   MouseEventJs,
   NodeHandle,
   RendererCapabilities,
+  RendererSize,
   TernEventJs,
   TuiRenderer,
   TuiRendererOptions,
@@ -214,6 +227,23 @@ export interface Span {
   text: string;
   /** Optional style keys for this span. */
   style?: NodeProps;
+}
+
+/**
+ * An inclusive cell range, in viewport coordinates: the rectangle spanned
+ * by (`col1`, `row1`) and (`col2`, `row2`). Either endpoint may be the
+ * top-left; consumers normalize with `min`/`max`. Mirrors the native
+ * `SelectionRange` surface from the tern-node binding.
+ */
+export interface SelectionRange {
+  /** The column of one endpoint (inclusive). */
+  col1: number;
+  /** The row of one endpoint (inclusive). */
+  row1: number;
+  /** The column of the other endpoint (inclusive). */
+  col2: number;
+  /** The row of the other endpoint (inclusive). */
+  row2: number;
 }
 
 /** Options accepted by `createRenderer`. */
@@ -628,48 +658,143 @@ function charWidth(ch: string): number {
 }
 
 /**
- * The char (code-unit) index whose leading edge sits at (or snaps back
- * before) `column` display columns. Used to translate the caret's display
- * column — the value the compositor paints — into a string index for
- * editing. `column` always lands on a char boundary: a column inside a wide
- * char snaps to that char's start.
+ * One grapheme cluster of a value: its code-unit start, its text, and its
+ * display width in terminal columns (the tern-core `cluster_width`
+ * convention — cell.rs:75).
+ */
+interface ClusterRun {
+  /** The code-unit index where the cluster starts. */
+  start: number;
+  /** The cluster's length in code units. */
+  len: number;
+  /** The display width in columns: 1, 2, or 0 (a lone zero-width mark). */
+  width: number;
+  /** The cluster's full text (e.g. `"👨‍👩‍👧‍👦"` or `"e\u{301}"`). */
+  text: string;
+}
+
+/** The lazily-created shared grapheme segmenter, or `null` once a runtime
+ * without `Intl.Segmenter` is observed (the documented fallback below). */
+let graphemeSegmenterInstance: Intl.Segmenter | null | undefined;
+
+/** The shared `Intl.Segmenter` (granularity `"grapheme"`), or `null` when the
+ * runtime lacks it. Both declared runtimes ship it — Deno's full ICU and
+ * Node >= 20 (full-icu) — so the fallback only fires on exotic hosts. */
+function graphemeSegmenter(): Intl.Segmenter | null {
+  if (graphemeSegmenterInstance === undefined) {
+    graphemeSegmenterInstance =
+      typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
+        ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+        : null;
+  }
+  return graphemeSegmenterInstance;
+}
+
+/**
+ * The extended grapheme clusters of `value` (UAX #29), each with its
+ * code-unit offset, its text, and its display width — the atom every edit in
+ * this layer moves by. When `Intl.Segmenter` is unavailable the documented
+ * fallback splits on code points (surrogate pairs stay whole), so combining
+ * sequences and ZWJ emoji degrade to per-code-point steps instead of
+ * mid-cluster corruption.
+ */
+function clusterRuns(value: string): ClusterRun[] {
+  const runs: ClusterRun[] = [];
+  const segmenter = graphemeSegmenter();
+  if (segmenter !== null) {
+    let start = 0;
+    for (const seg of segmenter.segment(value)) {
+      const text = seg.segment;
+      runs.push({ start, len: text.length, width: clusterWidth(text), text });
+      start += text.length;
+    }
+    return runs;
+  }
+  // Fallback: iterate code points (`for...of` over a string yields one code
+  // point per iteration, keeping surrogate pairs whole).
+  let start = 0;
+  for (const ch of value) {
+    runs.push({ start, len: ch.length, width: charWidth(ch), text: ch });
+    start += ch.length;
+  }
+  return runs;
+}
+
+/**
+ * The display width of one grapheme cluster in terminal columns, mirroring
+ * tern-core's `cluster_width` (cell.rs:75): the sum of its member
+ * characters' {@link charWidth}s, clamped to 2. A ZWJ emoji sequence or a
+ * flag sums well past 2 but renders in exactly 2 columns; a base-plus-
+ * combining sequence sums to its base's width; a lone zero-width mark sums
+ * to 0.
+ */
+function clusterWidth(cluster: string): number {
+  let width = 0;
+  for (const ch of cluster) width += charWidth(ch);
+  return Math.min(2, width);
+}
+
+/**
+ * The code-unit index whose leading edge sits at (or snaps back before)
+ * `column` display columns — always a grapheme-cluster boundary. Used to
+ * translate the caret's display column — the value the compositor paints —
+ * into a string index for editing. `column` always lands on a cluster
+ * boundary: a column inside a wide cluster snaps to that cluster's start.
  */
 function columnToIndex(value: string, column: number): number {
   if (column <= 0) return 0;
   let col = 0;
-  for (let i = 0; i < value.length; ) {
-    const ch = String.fromCodePoint(value.codePointAt(i) ?? 0);
-    const w = charWidth(ch);
-    if (col + w > column) return i;
-    col += w;
-    i += ch.length;
+  for (const run of clusterRuns(value)) {
+    if (col + run.width > column) return run.start;
+    col += run.width;
   }
   return value.length;
 }
 
-/** The display column of the char boundary at `index` (code units). */
+/** The display column of the cluster boundary at `index` (code units). A
+ * mid-cluster index counts the containing cluster's full width — a cluster
+ * is one glyph, so the caret cannot rest inside it. */
 function indexToColumn(value: string, index: number): number {
   let col = 0;
-  for (let i = 0; i < index && i < value.length; ) {
-    const ch = String.fromCodePoint(value.codePointAt(i) ?? 0);
-    col += charWidth(ch);
-    i += ch.length;
+  for (const run of clusterRuns(value)) {
+    if (run.start >= index) break;
+    col += run.width;
   }
   return col;
 }
 
-/** The last code point fully before `index`, or `null` when `index` is 0. */
-function lastCodePointBefore(
-  value: string,
-  index: number,
-): { start: number; len: number; width: number } | null {
-  let last: { start: number; len: number; width: number } | null = null;
-  for (let i = 0; i < index && i < value.length; ) {
-    const ch = String.fromCodePoint(value.codePointAt(i) ?? 0);
-    last = { start: i, len: ch.length, width: charWidth(ch) };
-    i += ch.length;
+/** The last grapheme cluster before `index` (a mid-cluster index snaps back
+ * to its containing cluster), or `null` when `index` is 0. */
+function lastClusterBefore(value: string, index: number): ClusterRun | null {
+  let last: ClusterRun | null = null;
+  for (const run of clusterRuns(value)) {
+    if (run.start >= index) break;
+    last = run;
   }
   return last;
+}
+
+/** The cluster starting at `index` — or, defensively, containing a mid-
+ * cluster `index` — or `null` at the end of `value`. */
+function clusterAt(value: string, index: number): ClusterRun | null {
+  for (const run of clusterRuns(value)) {
+    if (run.start >= index) return run.start === index ? run : null;
+    if (index < run.start + run.len) return run;
+  }
+  return null;
+}
+
+/** Snap a code-unit index to the grapheme-cluster boundary its caret rests
+ * on: a mid-cluster index maps to the boundary AFTER its containing cluster —
+ * where the caret visually paints, since `indexToColumn` counts a cluster
+ * whole — and a boundary index is unchanged. The textarea counterpart of
+ * `columnToIndex`'s wide-glyph snap, in code-unit space. */
+function snapToClusterEnd(value: string, index: number): number {
+  for (const run of clusterRuns(value)) {
+    if (run.start >= index) return index;
+    if (index < run.start + run.len) return run.start + run.len;
+  }
+  return index;
 }
 
 // --- Input ----------------------------------------------------------------
@@ -728,7 +853,10 @@ export function Input(props: InputProps = {}): Node {
  * Handles `char` insert, `backspace`, `left`/`right`, `home` and `end`;
  * any other key leaves the input unchanged. Because the caret is a display
  * column, movement and deletion are multi-width aware (a wide char counts
- * two columns). Returns the new `{ value, caret }`.
+ * two columns) and grapheme aware: the cursor, backspace and right/left
+ * arrows move whole grapheme clusters (a ZWJ emoji or a base-plus-combining
+ * sequence is one step, never split mid-cluster), mirroring tern-core's
+ * cluster-width convention (cell.rs:75). Returns the new `{ value, caret }`.
  */
 export function editKey(input: Node, key: KeyEvent): { value: string; caret: number } {
   const props = input.props;
@@ -751,24 +879,26 @@ function applyEditKey(
   if (name === "char" && !key.ctrl && !key.alt && key.char !== undefined) {
     const index = columnToIndex(value, caret);
     const next = value.slice(0, index) + key.char + value.slice(index);
-    return { value: next, caret: caret + charWidth(key.char) };
+    // The caret lands on the cluster boundary after the inserted char — the
+    // display column at the end of the inserted text (a combining mark or
+    // ZWJ that merges into a cluster advances by that cluster's width).
+    return { value: next, caret: indexToColumn(next, index + key.char.length) };
   }
   if (name === "backspace") {
-    const prev = lastCodePointBefore(value, columnToIndex(value, caret));
+    const prev = lastClusterBefore(value, columnToIndex(value, caret));
     if (prev === null) return { value, caret };
     const next = value.slice(0, prev.start) + value.slice(prev.start + prev.len);
     return { value: next, caret: Math.max(0, caret - prev.width) };
   }
   if (name === "left") {
-    const prev = lastCodePointBefore(value, columnToIndex(value, caret));
+    const prev = lastClusterBefore(value, columnToIndex(value, caret));
     if (prev === null) return { value, caret };
     return { value, caret: Math.max(0, caret - prev.width) };
   }
   if (name === "right") {
-    const index = columnToIndex(value, caret);
-    const code = value.codePointAt(index);
-    if (code === undefined) return { value, caret };
-    return { value, caret: caret + charWidth(String.fromCodePoint(code)) };
+    const cluster = clusterAt(value, columnToIndex(value, caret));
+    if (cluster === null) return { value, caret };
+    return { value, caret: caret + cluster.width };
   }
   if (name === "home") return { value, caret: 0 };
   if (name === "end") return { value, caret: indexToColumn(value, value.length) };
@@ -779,9 +909,10 @@ function applyEditKey(
  * Insert pasted text into an input node at the caret, mutating its value and
  * caret in place — the paste counterpart of {@link editKey}. The caret is a
  * display column, so the insertion is multi-width aware: the text lands at the
- * char boundary snapped back from the caret column (a column inside a wide
- * char inserts before that char), and the caret advances by the pasted text's
- * total display width. Returns the new `{ value, caret }`.
+ * grapheme-cluster boundary snapped back from the caret column (a column
+ * inside a wide cluster inserts before that cluster), and the caret advances
+ * by the pasted text's total display width (its clusters' widths — a ZWJ
+ * emoji counts 2, never per code point). Returns the new `{ value, caret }`.
  */
 export function pasteInto(input: Node, text: string): { value: string; caret: number } {
   const props = input.props;
@@ -865,10 +996,11 @@ function textareaHeight(props: TextareaProps): number | null {
   return typeof h === "number" && Number.isFinite(h) && h > 0 ? Math.floor(h) : null;
 }
 
-/** The total display width of a string in terminal columns. */
+/** The total display width of a string in terminal columns — the sum of its
+ * grapheme clusters' widths (a ZWJ emoji counts 2, never per code point). */
 function textWidth(text: string): number {
   let width = 0;
-  for (const ch of text) width += charWidth(ch);
+  for (const run of clusterRuns(text)) width += run.width;
   return width;
 }
 
@@ -906,12 +1038,12 @@ function wrapLineWithOffsets(
       rowWidth = 0;
       rowStart = tokenStart;
     }
-    // The code-unit index (within `line`) of the current token char.
+    // The code-unit index (within `line`) of the current token cluster.
     let cur = tokenStart;
-    for (const ch of token) {
-      const w = charWidth(ch);
+    for (const run of clusterRuns(token)) {
+      const w = run.width;
       if (w === 0) {
-        cur += ch.length;
+        cur += run.len;
         continue;
       }
       if (rowWidth + w > limit) {
@@ -919,15 +1051,15 @@ function wrapLineWithOffsets(
         row = "";
         rowWidth = 0;
         if (w > limit) {
-          cur += ch.length; // a glyph wider than a fresh row is dropped
+          cur += run.len; // a cluster wider than a fresh row is dropped whole
           rowStart = cur;
           continue;
         }
-        rowStart = cur; // the wrapped row starts at this char
+        rowStart = cur; // the wrapped row starts at this cluster
       }
-      row += ch;
+      row += run.text;
       rowWidth += w;
-      cur += ch.length;
+      cur += run.len;
     }
     token = "";
   };
@@ -1145,6 +1277,10 @@ function textareaKeyPosition(
 ): { lines: string[]; row: number; col: number; changed: boolean } {
   const name = key.name;
   const line = lines[row] ?? "";
+  // Snap a mid-cluster cursor to the cluster boundary its caret rests on
+  // (after the containing cluster — where it visually paints): every edit
+  // and movement lands on a grapheme-cluster boundary, never inside one.
+  col = snapToClusterEnd(line, col);
 
   if (name === "up" || name === "down") {
     const caretRow = caretDisplayRow(lines, row, col, width);
@@ -1164,7 +1300,7 @@ function textareaKeyPosition(
   }
   if (name === "backspace") {
     if (col > 0) {
-      const prev = lastCodePointBefore(line, col);
+      const prev = lastClusterBefore(line, col);
       if (prev === null) return { lines, row, col, changed: false };
       const next = line.slice(0, prev.start) + line.slice(prev.start + prev.len);
       const nextLines = [...lines];
@@ -1184,8 +1320,8 @@ function textareaKeyPosition(
   }
   if (name === "delete") {
     if (col < line.length) {
-      const code = line.codePointAt(col);
-      const len = code === undefined ? 1 : String.fromCodePoint(code).length;
+      const cluster = clusterAt(line, col);
+      const len = cluster === null ? 1 : cluster.len;
       const next = line.slice(0, col) + line.slice(col + len);
       const nextLines = [...lines];
       nextLines[row] = next;
@@ -1209,7 +1345,7 @@ function textareaKeyPosition(
   }
   if (name === "left") {
     if (col > 0) {
-      const prev = lastCodePointBefore(line, col);
+      const prev = lastClusterBefore(line, col);
       return { lines, row, col: prev === null ? 0 : prev.start, changed: prev !== null };
     }
     if (row > 0) return { lines, row: row - 1, col: lines[row - 1]!.length, changed: true };
@@ -1217,8 +1353,8 @@ function textareaKeyPosition(
   }
   if (name === "right") {
     if (col < line.length) {
-      const code = line.codePointAt(col);
-      const len = code === undefined ? 1 : String.fromCodePoint(code).length;
+      const cluster = clusterAt(line, col);
+      const len = cluster === null ? 1 : cluster.len;
       return { lines, row, col: col + len, changed: true };
     }
     if (row + 1 < lines.length) return { lines, row: row + 1, col: 0, changed: true };
@@ -1236,8 +1372,13 @@ function textareaKeyPosition(
  * `delete` (joining adjacent lines at the boundaries), `left`/`right` /
  * `home`/`end`, `enter` (split), and `up`/`down` across the soft-wrapped
  * display lines (preserving a preferred display column across a run of
- * vertical moves). Any other key leaves the textarea unchanged. Returns the
- * new `{ lines, row, col }`.
+ * vertical moves). Movement and deletion are grapheme aware — `left` /
+ * `right` / `backspace` / `delete` step whole grapheme clusters (a ZWJ emoji
+ * or a base-plus-combining sequence is one step, never split mid-cluster),
+ * mirroring tern-core's cluster-width convention — and a mid-cluster cursor
+ * (e.g. from caller props) snaps to the boundary after its cluster before
+ * any edit. Any other key leaves the textarea unchanged. Returns the new
+ * `{ lines, row, col }`.
  */
 export function editTextareaKey(textarea: Node, event: KeyEvent): TextareaState {
   const props = textarea.props as TextareaProps;
@@ -1283,15 +1424,22 @@ export function editTextareaKey(textarea: Node, event: KeyEvent): TextareaState 
  * the current line, the post-caret tail joins the last pasted segment), and
  * the caret lands at the end of the pasted text. The caret column is a
  * code-unit index into the line, so wide characters are handled by the same
- * code-unit math as `editTextareaKey`; wrap width and vertical scroll stay
- * multi-width aware through the shared soft-wrap machinery. Returns the new
- * `{ lines, row, col }`.
+ * cluster math as `editTextareaKey`; a paste lands on a grapheme-cluster
+ * boundary (a mid-cluster cursor snaps to the boundary after its cluster),
+ * and wrap width and vertical scroll stay multi-width aware through the
+ * shared soft-wrap machinery. Returns the new `{ lines, row, col }`.
  */
 export function pasteIntoTextarea(textarea: Node, text: string): TextareaState {
   const props = textarea.props as TextareaProps;
   const lines = Array.isArray(props.lines) ? [...props.lines] : [""];
   const row = Math.max(0, Math.min(typeof props.row === "number" ? Math.floor(props.row) : 0, lines.length - 1));
-  const col = Math.max(0, Math.min(typeof props.col === "number" ? Math.floor(props.col) : 0, lines[row]!.length));
+  const rawCol = Math.max(
+    0,
+    Math.min(typeof props.col === "number" ? Math.floor(props.col) : 0, lines[row]!.length),
+  );
+  // A paste lands on a grapheme-cluster boundary: a mid-cluster cursor snaps
+  // to the boundary after its cluster (where its caret visually paints).
+  const col = snapToClusterEnd(lines[row]!, rawCol);
   const width = textareaWidth(props);
   const height = textareaHeight(props);
 
@@ -2882,25 +3030,25 @@ interface TableRegionState {
 /** The windowed-table records of every table's content region. */
 const tableRegionStates = new WeakMap<Node, TableRegionState>();
 
-/** The display width of `text` in terminal columns (sum of `charWidth`). */
+/** The display width of `text` in terminal columns — the sum of its grapheme
+ * clusters' widths (a ZWJ emoji counts 2, never per code point). */
 function displayWidth(text: string): number {
   let width = 0;
-  for (const ch of text) width += charWidth(ch);
+  for (const run of clusterRuns(text)) width += run.width;
   return width;
 }
 
-/** Truncate `text` to `width` display columns, never splitting a wide glyph
- * (a wide char that would straddle the boundary is dropped). */
+/** Truncate `text` to `width` display columns, never splitting a grapheme
+ * cluster (a cluster that would straddle the boundary is dropped whole). */
 function truncateToWidth(text: string, width: number): string {
   if (displayWidth(text) <= width) return text;
   let out = "";
   let used = 0;
-  for (const ch of text) {
-    const w = charWidth(ch);
-    if (w === 0) continue;
-    if (used + w > width) break;
-    out += ch;
-    used += w;
+  for (const run of clusterRuns(text)) {
+    if (run.width === 0) continue;
+    if (used + run.width > width) break;
+    out += run.text;
+    used += run.width;
   }
   return out;
 }
@@ -4988,6 +5136,209 @@ function topmostFocusId(root: Node, manager: FocusManager): string | null {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Mouse selection (viewport-cell-scoped v1)
+// ---------------------------------------------------------------------------
+//
+// Mouse drag-select + double-click word select (roadmap Phase 5): a
+// `down_left` press starts a selection session anchored at the pressed cell
+// ({@link startSelection}); each `drag_left` moves the active endpoint to the
+// dragged cell, extending the selection rect ({@link dragSelection}); any
+// `up_*` release ends the session ({@link endSelection}) — clear-on-release,
+// the overlay is transient and lives only while the mouse button is held, so
+// a released gesture leaves no reversed cells (persistent selection after
+// release is future work). The session lives per renderer (a WeakMap,
+// mirroring `panelDrags`), so independent renderers never share selection
+// state.
+//
+// Two `down_left` presses on the same cell (within
+// {@link SELECTION_DOUBLE_CLICK_MS} milliseconds and no more than one cell
+// apart) synthesize a double-click: the second press replaces the 1-cell
+// selection with the word under the pointer, resolved through the native
+// `selection_word_range` API ({@link selectWordAt}). {@link copySelection}
+// copies the renderer's current selection text to the system clipboard (OSC
+// 52) — the action behind the `ctrl+shift+c` binding in
+// {@link selectionKey} (plain `ctrl+c` stays the app's exit convention and is
+// never consumed by the selection handler).
+//
+// The whole module is viewport-cell-scoped v1: event `column`/`row` are
+// interpreted directly as cells of the terminal viewport the renderer paints
+// at, never as a scene node's local coordinates. Node-scoped selection —
+// resolving the pressed cell through `renderer.hit_test` to the owning scene
+// node and translating into that node's local coordinate space — is future
+// work.
+//
+// The helpers are pure interaction math over the renderer's selection API;
+// they never paint. The host drives the render loop — a `render()` after
+// routing mouse events paints the overlay (or clears it) — mirroring
+// `wheelScroll` / `focusAt`. A host that wants copy-on-release calls
+// {@link copySelection} before {@link endSelection}.
+
+/** The double-click window: two `down_left` presses on nearby cells within
+ * this many milliseconds synthesize a double-click (word select). */
+export const SELECTION_DOUBLE_CLICK_MS = 500;
+
+/** The active mouse selection session on a renderer. */
+interface SelectionSession {
+  /** The fixed endpoint of the selection (the press-down cell). */
+  anchor: { col: number; row: number };
+  /** The moving endpoint (updated by each {@link dragSelection}). */
+  active: { col: number; row: number };
+}
+
+/** The active selection session per renderer (one at a time per renderer). */
+const selectionSessions = new WeakMap<Renderer, SelectionSession>();
+
+/** The most recent `down_left` press per renderer, for double-click
+ * synthesis. */
+interface SelectionPress {
+  col: number;
+  row: number;
+  /** The wall-clock time of the press (from {@link selectionClock}). */
+  at: number;
+}
+
+/** The most recent press per renderer (survives the gesture: the second press
+ * of a double-click lands after the first gesture's release). */
+const selectionLastPress = new WeakMap<Renderer, SelectionPress>();
+
+/** The wall-clock source for double-click timing. Overridable through
+ * {@link setSelectionClockForTesting}. */
+let selectionClock: () => number = () => Date.now();
+
+/**
+ * Replace the wall-clock source used for double-click timing. Test-only seam
+ * (mirrors `setAddonForTesting`): a fake clock makes the
+ * {@link SELECTION_DOUBLE_CLICK_MS} window boundary assertable without a real
+ * wait. Pass `() => Date.now()` to restore.
+ */
+export function setSelectionClockForTesting(clock: () => number): void {
+  selectionClock = clock;
+}
+
+/**
+ * Select the contiguous non-whitespace run (word) containing (`col`, `row`),
+ * applying the word's cell range as the renderer's selection overlay.
+ * Returns the applied range, or `null` when the cell is blank/whitespace (or
+ * out of bounds, or nothing has been painted yet) — the selection is left
+ * untouched then. Cluster-aware: the native word-range lookup treats a masked
+ * continuation cell (a wide glyph's second column) as part of its glyph's run.
+ */
+export function selectWordAt(renderer: Renderer, col: number, row: number): SelectionRange | null {
+  const range = renderer.selectionWordRange(col, row);
+  if (range === null) return null;
+  renderer.setSelection(range.col1, range.row1, range.col2, range.row2);
+  return range;
+}
+
+/**
+ * Start a mouse selection: a `down_left` press anchors a selection session at
+ * the pressed cell and applies a 1-cell selection overlay. A second press on
+ * a nearby cell — within {@link SELECTION_DOUBLE_CLICK_MS} milliseconds and
+ * no more than one cell away — is treated as a double-click and selects the
+ * word under the pointer instead ({@link selectWordAt}; a double-click on
+ * whitespace falls back to the 1-cell selection). Returns the applied
+ * selection range, or `null` when the event is not `down_left`.
+ */
+export function startSelection(renderer: Renderer, event: MouseEventJs): SelectionRange | null {
+  if (event.kind !== "down_left") return null;
+  const col = event.column;
+  const row = event.row;
+  const prev = selectionLastPress.get(renderer);
+  const at = selectionClock();
+  const doubleClick =
+    prev !== undefined &&
+    at - prev.at <= SELECTION_DOUBLE_CLICK_MS &&
+    Math.abs(col - prev.col) + Math.abs(row - prev.row) <= 1;
+  let range: SelectionRange;
+  if (doubleClick) {
+    const word = selectWordAt(renderer, col, row);
+    if (word === null) {
+      range = { col1: col, row1: row, col2: col, row2: row };
+      renderer.setSelection(col, row, col, row);
+    } else {
+      range = word;
+    }
+  } else {
+    range = { col1: col, row1: row, col2: col, row2: row };
+    renderer.setSelection(col, row, col, row);
+  }
+  selectionSessions.set(renderer, { anchor: { col, row }, active: { col, row } });
+  selectionLastPress.set(renderer, { col, row, at });
+  return range;
+}
+
+/**
+ * Move an active selection's active endpoint: a `drag_left` event extends the
+ * selection to the dragged cell, keeping the press-down anchor fixed. The
+ * updated rect is applied through `renderer.setSelection` (the native overlay
+ * normalizes the endpoints, so dragging above/left of the anchor still
+ * selects the spanned rectangle). Returns the applied (post-extension)
+ * range, or `null` when no session is active or the event is not `drag_left`.
+ */
+export function dragSelection(renderer: Renderer, event: MouseEventJs): SelectionRange | null {
+  const session = selectionSessions.get(renderer);
+  if (session === undefined || event.kind !== "drag_left") return null;
+  session.active = { col: event.column, row: event.row };
+  const range: SelectionRange = {
+    col1: session.anchor.col,
+    row1: session.anchor.row,
+    col2: session.active.col,
+    row2: session.active.row,
+  };
+  renderer.setSelection(range.col1, range.row1, range.col2, range.row2);
+  return range;
+}
+
+/**
+ * End an active mouse selection: any `up_*` release clears the session and
+ * the selection overlay — clear-on-release, the highlight is transient and
+ * lives only while the mouse button is held. Returns the selection rect at
+ * release, or `null` when no session was active (or the event is not an
+ * `up_*` release). A host that wants the release-time text on the clipboard
+ * calls {@link copySelection} before `endSelection` (copy-on-release).
+ */
+export function endSelection(renderer: Renderer, event: MouseEventJs): SelectionRange | null {
+  const session = selectionSessions.get(renderer);
+  if (session === undefined || !event.kind.startsWith("up")) return null;
+  selectionSessions.delete(renderer);
+  renderer.clearSelection();
+  return {
+    col1: session.anchor.col,
+    row1: session.anchor.row,
+    col2: session.active.col,
+    row2: session.active.row,
+  };
+}
+
+/**
+ * Copy the renderer's current selection text to the system clipboard (OSC 52
+ * via {@link Renderer.setClipboard}): `setClipboard(selectionText())`. With
+ * the v1 clear-on-release contract the copy must happen while the selection
+ * is active — during the press-drag-release gesture, or in the host's
+ * `up_*` handler before it calls {@link endSelection} (copy-on-release).
+ */
+export function copySelection(renderer: Renderer): void {
+  renderer.setClipboard(renderer.selectionText());
+}
+
+/**
+ * The selection key handler: maps the copy key — `ctrl+shift+c` — to
+ * {@link copySelection}, returning whether the key was consumed. Plain
+ * `ctrl+c` (the app's exit convention) is deliberately not handled and
+ * returns `false`, so it falls through to the exit binding. Note that some
+ * terminal emulators intercept `ctrl+shift+c` for their own copy before the
+ * app sees it; hosts that want a different copy key can pass a different
+ * mapping.
+ */
+export function selectionKey(renderer: Renderer, event: KeyEvent): boolean {
+  if (event.name === "char" && event.char === "c" && event.ctrl && event.shift && !event.alt) {
+    copySelection(renderer);
+    return true;
+  }
+  return false;
+}
+
 /**
  * An async event queue fed by the native push stream. `push` enqueues an
  * event on the JS thread (called by the native `ThreadsafeFunction`
@@ -5096,10 +5447,99 @@ export class Renderer {
   }
 
   /**
+   * The number of bytes the most recent `render()` flush wrote to the
+   * terminal: the ANSI escape-sequence stream for that frame's diff (0 for
+   * a fully suppressed empty-diff frame). Fed by the backend queue on the
+   * native side; a no-op fast-path render (scene unchanged) never flushes,
+   * so the counter keeps the previous flush's value until the next real
+   * flush. The byte-cost measure behind the bench's flushed-bytes-per-frame
+   * numbers.
+   */
+  get lastFlushBytes(): number {
+    // The native counter is a u64 surfaced as bigint; the byte counts are
+    // frame-sized (~KB per flush), far inside number's safe range.
+    return Number(this.#native.last_flush_bytes);
+  }
+
+  /**
    * Set the terminal window title (OSC 0). Throws on a destroyed renderer.
    */
   setTitle(title: string): void {
     this.#native.set_title(title);
+  }
+
+  /**
+   * The terminal size as `{ width, height }` in cells: the viewport the most
+   * recent `render()` or `snapshotFrame()` painted at (80×24 before any
+   * paint). Before the first paint the native side reports the current
+   * terminal size (one probe through its cached-size machinery), so a fresh
+   * renderer never surfaces the synthetic fallback. Equivalent to the
+   * `width`/`height` the native layer paints the next frame at — a resize
+   * event's `{ width, height }` lands here once the next render paints at
+   * it. Throws on a destroyed renderer.
+   */
+  get size(): { width: number; height: number } {
+    return this.#native.size;
+  }
+
+  /**
+   * Copy `text` to the system clipboard (OSC 52: `ESC ] 52 ; c ; <base64>
+   * BEL`, the payload being the text's UTF-8 bytes base64-encoded per
+   * RFC 4648). The terminal emulator must support OSC 52 (xterm, kitty,
+   * foot, WezTerm, iTerm2, ...; tmux forwards it when `set-clipboard` is
+   * enabled). Throws on a destroyed renderer.
+   */
+  setClipboard(text: string): void {
+    this.#native.set_clipboard(text);
+  }
+
+  /**
+   * Set the selection overlay to the inclusive rectangle spanned by
+   * (`col1`, `row1`) and (`col2`, `row2`) in viewport cells. The endpoints
+   * are normalized by the compositor, so either may be the top-left. The
+   * overlay is applied at the next `render()` (which the selection edit
+   * forces) and to the next `snapshotFrame()`. Per-renderer state — the
+   * shared scene never carries the selection. Throws on a destroyed
+   * renderer.
+   */
+  setSelection(col1: number, row1: number, col2: number, row2: number): void {
+    this.#native.set_selection(col1, row1, col2, row2);
+  }
+
+  /**
+   * Clear the selection overlay: the next render paints without any
+   * reversed selection cells (and the next snapshot omits the overlay).
+   * Throws on a destroyed renderer.
+   */
+  clearSelection(): void {
+    this.#native.clear_selection();
+  }
+
+  /**
+   * The text of the renderer's current selection, extracted from the last
+   * painted frame (the frame the most recent `render()` produced):
+   * row-major and cluster/mask-aware — a multi-char cluster (ZWJ emoji,
+   * combining sequence, flag) contributes its whole symbol, a masked
+   * continuation cell contributes nothing, and rows are joined with
+   * `'\n'`. An empty string when no selection is set or nothing has been
+   * rendered yet. Throws on a destroyed renderer.
+   */
+  selectionText(): string {
+    return this.#native.selection_text();
+  }
+
+  /**
+   * The inclusive cell range of the contiguous non-whitespace run (word)
+   * containing (`col`, `row`) in the last painted frame, or `null` when
+   * the cell is blank/whitespace (or out of bounds, or nothing has been
+   * rendered yet). Cluster-aware: a masked continuation cell (the right
+   * half of a wide glyph) is treated as part of its glyph's run — never as
+   * whitespace — so a click on a wide character's second column still
+   * returns the word that contains the glyph. Throws on a destroyed
+   * renderer.
+   */
+  selectionWordRange(col: number, row: number): SelectionRange | null {
+    return this.#native.selection_word_range(col, row);
   }
 
   /**

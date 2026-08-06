@@ -1,6 +1,6 @@
 //! Baseline render-performance benchmarks for the compositor pipeline.
 //!
-//! Two `#[ignore]`d integration tests time the full per-frame pipeline the
+//! Three `#[ignore]`d integration tests time the full per-frame pipeline the
 //! renderer runs on every frame — [`Compositor::paint_scene`] (layout +
 //! paint) → [`Buffer::diff_from`] (minimal diff vs the previous frame) →
 //! `tern-terminal::flush_diff_to` (ANSI queue + flush into an in-memory
@@ -19,6 +19,12 @@
 //!   content cycles a single digit, keeping the string and layout the same
 //!   width) before painting. Today the compositor repaints the whole scene,
 //!   so this is the per-frame cost an incremental layout would cut.
+//! - `bench_scroll_churn_frame` — the round-4 large-dirty target: every
+//!   iteration pans the whole content by one row (`scroll_y`), so the diff
+//!   covers (nearly) the whole viewport and the dirty union trips the
+//!   full-repaint threshold. Times the frame AND records the flushed bytes
+//!   per frame into the sink — the large-dirty scenario the one-cell benches
+//!   never exercise.
 //!
 //! Both tests are `#[ignore]`d so `cargo test --workspace` skips them by
 //! default; run them explicitly with:
@@ -133,7 +139,10 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 }
 
 /// Print a bench report block (bounded by the `=== <header> ===` / `=== end
-/// bench ===` markers run.sh parses) from a finished timing run.
+/// bench ===` markers run.sh parses) from a finished timing run. When
+/// `bytes_per_frame` is `Some`, the per-frame flush byte counts are averaged
+/// into a `bytes/frame:` line (the ANSI escape-sequence bytes a frame's diff
+/// writes into the sink).
 fn report(
     header: &str,
     iterations: usize,
@@ -141,6 +150,7 @@ fn report(
     node_count: usize,
     per_frame_ms: &[f64],
     total_secs: f64,
+    bytes_per_frame: Option<&[usize]>,
 ) -> (f64, f64, f64) {
     let mut sorted = per_frame_ms.to_vec();
     sorted.sort_by(|a, b| a.total_cmp(b));
@@ -167,6 +177,10 @@ fn report(
         "cells/sec: {cells_per_sec:.0} cells/sec ({:.1} fps at {cells_per_frame:.0} cells/frame)",
         cells_per_sec / cells_per_frame
     );
+    if let Some(bytes) = bytes_per_frame {
+        let bytes_mean = bytes.iter().sum::<usize>() as f64 / bytes.len() as f64;
+        println!("bytes/frame: {bytes_mean:.0} bytes");
+    }
     println!("=== end bench ===");
     println!();
 
@@ -224,6 +238,7 @@ fn bench_paint_diff_flush_frame() {
         scene.len(),
         &per_frame_ms,
         total_secs,
+        None,
     );
     assert_sane(&prev, &per_frame_ms);
 }
@@ -272,6 +287,65 @@ fn bench_paint_single_cell_change_frame() {
         scene.len(),
         &per_frame_ms,
         total_secs,
+        None,
     );
     assert_sane(&prev, &per_frame_ms);
 }
+
+#[test]
+#[ignore = "performance benchmark — run explicitly with -- --ignored --nocapture"]
+fn bench_scroll_churn_frame() {
+    // The round-4 large-dirty target: every iteration shifts the whole
+    // content by one row — the root box's `scroll_y` pans its ~200
+    // overflowing rows up by one inside the 40-row viewport (cycling within
+    // the range that keeps every visible row filled) — so the diff covers
+    // (nearly) the whole 4800-cell viewport and the mutated node's bounds
+    // (the root box spans the full viewport) push the dirty union past the
+    // half-viewport threshold: the full-repaint path the one-cell benches
+    // never exercise. Time AND flushed bytes per frame are recorded into the
+    // Vec<u8> sink (the exact seam the real backend writes through), so the
+    // block quantifies both the time and the ANSI byte cost of a
+    // large-dirty frame.
+    let (mut scene, _leaf) = synthetic_scene();
+    let cells_per_frame = VIEWPORT.width as f64 * VIEWPORT.height as f64;
+    let mut compositor = Compositor::new();
+    let mut sink: Vec<u8> = Vec::with_capacity(256 * 1024);
+    let mut prev = Buffer::new(VIEWPORT.width, VIEWPORT.height);
+
+    let mut per_frame_ms: Vec<f64> = Vec::with_capacity(ITERATIONS);
+    let mut bytes_per_frame: Vec<usize> = Vec::with_capacity(ITERATIONS);
+    let mut last_flush_pos = None;
+    // The root box — the root's first child — is the overflowing content
+    // pane the scroll pans (200 nested boxes + stream + caret ≈ 204 rows).
+    let root_box = scene.children(scene.root_id()).expect("root has children")[0];
+    let started = Instant::now();
+    for i in 0..ITERATIONS {
+        let t0 = Instant::now();
+        // One-row viewport scroll: `scroll_y` pans the content up by `i`
+        // rows, cycling within 0..160 so the viewport never scrolls past the
+        // content tail (204 rows minus a 40-row window). Every visible cell
+        // changes between frames.
+        scene.set_scroll_offset(root_box, 0, (i % 160) as i32);
+        let buffer = compositor.paint_scene(&scene, VIEWPORT);
+        let updates = buffer.diff_from(&prev);
+        sink.clear();
+        flush_diff_to(&mut sink, &updates, (0, 0), &mut last_flush_pos)
+            .expect("flush into a Vec<u8> sink");
+        bytes_per_frame.push(sink.len());
+        prev = buffer;
+        per_frame_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+    }
+    let total_secs = started.elapsed().as_secs_f64();
+
+    report(
+        "tern-components scroll-churn bench",
+        ITERATIONS,
+        cells_per_frame,
+        scene.len(),
+        &per_frame_ms,
+        total_secs,
+        Some(&bytes_per_frame),
+    );
+    assert_sane(&prev, &per_frame_ms);
+}
+

@@ -19,7 +19,15 @@ set landed — the per-frame whole-scene paint-signature walk replaced by an
 O(mutated) one) are in the
 [Round 3 after](#round-3-after--pushed-dirty-set-2026-08-05)
 section after that; its before column is the round-2 after numbers, so the
-rounds chain: round 2 before → round 2 after → round 3 after.
+rounds chain: round 2 before → round 2 after → round 3 after. The round-4
+**before** numbers — the first large-dirty coverage (viewport scroll,
+alternating full screens, scroll-churn with flushed bytes per frame),
+recorded when the extended harness landed — are in the
+[Round 4 before](#round-4-before--large-dirty-frames-2026-08-05)
+section, and the **after** numbers (scratch-frame pooling, retained-buffer
+reuse, single-layout full-repaint fallback) in the
+[Round 4 after](#round-4-after--large-dirty-frames-2026-08-05)
+section at the very end.
 
 Both benches drive the **same synthetic scene**: a root box (120x40 viewport)
 holding ~200 nested boxes (3-5 text leaves each, ~800 leaves total), one
@@ -678,3 +686,337 @@ which holds; the wall-time movement is not claimed as a round-3 gain.**
   so the real-world gain on big repaints is smaller than the one-cell number
   suggests. No thresholds were adjusted; every number above is as measured.
 
+
+---
+
+# Round 4 after — grapheme-cluster semantics (2026-08-05)
+
+Recorded after the round-4 (grapheme-cluster) work landed in the working tree:
+`unicode-segmentation` promoted to a direct dependency of tern-core; the
+grapheme cluster became the indivisible text unit across measurement,
+wrapping/truncation, painting, diffing, and flushing (ZWJ emoji, flags, and
+combining sequences render as single logical glyphs; the `Cell`/`CellUpdate`
+model gained a `symbol: Option<Box<str>>` and dropped `Copy`).
+
+Same environment as the round-3 after recording: same machine, same session,
+Rust release profile, Deno 2.9.3. Two runs of the Rust single-cell bench
+(`bench_paint_single_cell_change_frame`); the round-3 **before** numbers are
+the round-3 **after** numbers — the state the unicode work had to not regress.
+
+| metric | before (round-3 after, 2026-08-05) | after (round-4, 2 runs) | delta |
+|--------|------------------------------------|-------------------------|-------|
+| Rust single-cell mean | 0.688 ms (0.662–0.732) | 0.685 / 0.675 ms | −0.4% / −1.9% (noise) |
+| **Rust single-cell p50** | **0.662 ms (0.654–0.673)** | **0.663 / 0.668 ms** | **+0.1% / +0.9% (noise)** |
+| Rust single-cell p95 | 0.739 ms | 0.729 / 0.724 ms | within noise |
+
+Representative after run:
+
+```text
+=== tern-components incremental-layout target bench ===
+viewport: 120x40 (4800 cells/frame)
+scene: root box + 200 nested boxes (3-5 text leaves each) + streaming_text (50 spans) + caret node, ~1003 nodes
+iterations: 2000
+mean: 0.685 ms/frame
+p50:  0.663 ms/frame
+p95:  0.729 ms/frame
+cells/sec: 7005669 cells/sec (1459.5 fps at 4800 cells/frame)
+```
+
+**Reading:** the single-cell frame is flat vs the round-3 baseline — both runs'
+p50 (0.663 / 0.668) land inside the round-3 recorded range (0.654–0.673), and
+the means are inside the round-3 mean range (0.662–0.732). **No regression.**
+The cluster work adds no measurable per-frame cost on the one-cell scenario:
+the scene's text is ASCII (one char per cluster), so `Cell.symbol` stays
+`None` for every cell (no allocation), and the diff row-slice fast path still
+skips unchanged rows. The honest record: delta = +0.1% / +0.9% p50, i.e.
+run-to-run noise, not a change. No thresholds were adjusted.
+
+---
+
+# Round 4 before — large-dirty frames (2026-08-05)
+
+Recorded when the large-dirty bench coverage landed in the working tree: the
+current state (round-4 grapheme-cluster round landed; **no large-dirty
+optimization yet**) with the harness extended to exercise the frames the
+round-3 caveat called out — *"large dirty frames still pay the rect walk +
+repaint region (and past the >half-viewport threshold a full repaint), so
+real-world gains on big repaints are smaller than the one-cell number"*.
+This is the before column the round-4 large-dirty work must beat.
+
+The harness gained:
+
+1. **TS scenario 4 — viewport scroll** (`tools/bench/render.bench.ts`): N =
+   500 frames, each panning the whole ~204-row content pane UP by ONE row
+   (`scroll_y` on the root box, cycling 0..159 so the viewport never scrolls
+   past the content tail). The diff covers (nearly) the whole 4800-cell
+   viewport, and the mutated node's bounds span the viewport, so the dirty
+   union trips the >half-viewport **full-repaint** threshold — the path the
+   one-cell scenarios never hit.
+2. **TS scenario 5 — alternating full screens**: N = 500 frames, each
+   flipping the visibility (`display: flex`/`none`, one `setProps` per leaf)
+   of two full-screen `streaming_text` leaves (40 rows of a repeated
+   character each — every cell differs between screens), so the diff is the
+   whole viewport every frame. Per frame the flushed bytes are read from the
+   new native `last_flush_bytes` counter (fed by the backend queue —
+   `Backend::flush_diff` now reports the bytes it wrote; the counter lives on
+   `TuiRenderer` and is surfaced as `Renderer.lastFlushBytes`) and averaged
+   into a bytes-per-frame number.
+3. **Rust scroll-churn block** (`bench_scroll_churn_frame` in
+   `src/core/tern-components/tests/bench_timing.rs`): 2000 iterations of the
+   same one-row scroll mutation through the full `paint_scene` → `diff_from`
+   → `flush_diff_to` pipeline, timing each frame AND recording the flushed
+   bytes into the `Vec<u8>` sink (`bytes/frame`).
+
+The byte metrics quantify what a full-repaint frame costs to push through the
+terminal — the seam the diff fast paths short-circuit (the one-cell scenarios
+flush a handful of runs; the large-dirty scenarios flush ~40 full-width runs).
+
+Environment: same machine and session as the round-3/4 recordings, **release**
+addon (`npm run build:release`), Rust release profile, Deno 2.9.3, PTY sized
+120x40. Three runs of the TS bench and three runs of the Rust bench;
+representative run shown (first of the three TS runs), averages in the table.
+
+## TS scenario 4 — viewport scroll (full-repaint threshold)
+
+| metric | value (3 runs) |
+|--------|----------------|
+| mean frame | 1.937 ms (1.900–1.998) |
+| **p50 frame** | **1.908 ms (1.880–1.955)** |
+| fps | ~517 (500–526) |
+
+Representative run:
+
+```text
+render.bench: scenario 4 — viewport scroll (500 frames, one-row shift, full-repaint threshold)
+  mean: 1.913 ms/frame
+  p50:  1.890 ms/frame
+  fps:  522.8
+```
+
+**Reading:** ~2.9x the one-cell dirty frame (~0.66 ms p50). A one-row scroll
+mutates the root box — whose bounds span the whole viewport — so the dirty
+union (4800 cells) exceeds the >half-viewport threshold and every frame takes
+the full-repaint path: whole-scene layout reconcile + full paint + ~full
+viewport diff + flush. The one-cell numbers never exercised this path; this
+is its honest before cost.
+
+## TS scenario 5 — alternating full screens (whole-viewport diff + bytes)
+
+| metric | value (3 runs) |
+|--------|----------------|
+| mean frame | 0.392 ms (0.391–0.392) |
+| **p50 frame** | **0.389 ms (0.384–0.392)** |
+| fps | ~2551 (2548–2556) |
+| **flushed bytes/frame** | **5009 B** |
+
+Representative run:
+
+```text
+render.bench: scenario 5 — alternating full screens (500 frames)
+  mean: 0.392 ms/frame
+  p50:  0.392 ms/frame
+  fps:  2548.7
+  bytes per frame: 5009 (mean ANSI bytes flushed per frame)
+```
+
+**Reading:** alternating two full-screen leaves costs *less* than the scroll
+case (~0.39 ms vs ~1.91 ms p50) despite a full-viewport diff, because the
+mutation surface is tiny (two `display` toggles → two pushed ids → full
+repaint of two big leaves) and the rect walk + layout reconcile stay cheap —
+the screen content is one repeating character, so the paint is trivial and the
+run-batched flush compresses 4800 changed cells into ~40 full-width runs
+(5009 bytes ≈ 40 rows × ~125 B/row). The bytes number is the byte cost of a
+full-repaint frame: ~5 KB of ANSI for 4720 cells.
+
+## Rust scroll-churn bench (time + bytes into the sink)
+
+`bench_scroll_churn_frame` — 2000 iterations, one-row `scroll_y` pan per
+frame, then the full `paint_scene` → `diff_from` → `flush_diff_to` pipeline
+into an in-memory sink; per-frame flushed bytes recorded from the sink length.
+
+| metric | value (3 runs) |
+|--------|----------------|
+| mean frame | 2.066 ms (1.966–2.135) |
+| **p50 frame** | **1.957 ms (1.927–2.008)** |
+| p95 frame | 2.125–2.864 ms |
+| **bytes/frame** | **4904 B** |
+
+Representative run:
+
+```text
+=== tern-components scroll-churn bench ===
+viewport: 120x40 (4800 cells/frame)
+scene: root box + 200 nested boxes (3-5 text leaves each) + streaming_text (50 spans) + caret node, ~1003 nodes
+iterations: 2000
+mean: 1.966 ms/frame
+p50:  1.927 ms/frame
+p95:  2.125 ms/frame
+cells/sec: 2441470 cells/sec (508.6 fps at 4800 cells/frame)
+bytes/frame: 4904 bytes
+```
+
+**Reading:** the compositor-level full-repaint scroll frame is ~1.96 ms p50 —
+~2.8x the single-cell dirty frame (~0.66 ms p50) and ~2.6x the TS scroll
+round-trip's native share. The sink sees ~4904 bytes/frame (the TS number is
+5009 — the same run-batched ANSI stream plus the JS/napi path's park/restore
+overhead). This is the honest before cost of a large-dirty frame at the
+pipeline seam.
+
+## Fast-path coverage (what the new scenarios exercise)
+
+| fast path | code | exercised by |
+|-----------|------|--------------|
+| Full-repaint fallback (>half viewport dirty, cold cache, resize) | `paint_dirty` coverage check → `paint_full` (`compositor.rs`) | **s4, s5, Rust scroll-churn** (previously never hit: the one-cell scenarios stay under the threshold) |
+| Whole-viewport diff (`diff_from`) | `buffer.rs` | s4, s5, Rust scroll-churn |
+| Flushed-bytes accounting (backend queue) | `Backend::flush_diff` → `flush_diff_to` counting writer; `TuiRenderer.last_flush_bytes` | s5 (per-frame bytes), Rust scroll-churn (`sink.len()`) |
+| One-cell dirty path (unchanged) | `paint_dirty` | s2, s0 (regression guard) |
+
+## Conclusion — honest verdict
+
+- **The large-dirty frames cost ~3x the one-cell frame.** Full-repaint
+  threshold: TS scroll p50 ~1.91 ms and Rust scroll p50 ~1.96 ms vs the
+  one-cell ~0.66 ms — the number the round-4 large-dirty work must cut. The
+  alternating-full-screen case is cheaper (~0.39 ms) because its mutation
+  surface is minimal and its paint trivial, but it still flushes the whole
+  viewport: ~5000 bytes/frame is the byte cost of a full repaint at 120x40.
+- **The one-cell wins still hold in this session** (s0 ~0.68 / s2 ~0.68 ms
+  p50, ratio ~1.0) — no regression from the harness extension.
+- These are **before** numbers for the large-dirty optimization work; the
+  recorded bytes/frame (5009 TS / 4904 Rust) give that work a byte-cost
+  target too, not just a time target. No thresholds were adjusted; every
+  number above is as measured.
+
+---
+
+# Round 4 after — large-dirty frames (2026-08-05)
+
+Recorded after the round-4 large-dirty optimization work landed in the working
+tree, attacking the large-dirty-frame floor the round-4 before recording
+established. The changes (all in `src/core/tern-components/src/compositor.rs`
+plus the two buffer helpers in `src/core/tern-core/src/buffer.rs`):
+
+1. **Scratch-frame pooling** — the dirty path's scratch frame is a pooled
+   `Compositor` field (sized on demand, grown when the viewport grows): no
+   per-frame viewport-sized allocation. Only the dirty-union region is cleared
+   before repainting (`Buffer::clear_rect`) — a cheap clear instead of
+   blanking the whole viewport.
+2. **Retained-buffer reuse** — the dirty path moves the retained buffer out
+   and patches the union in place, cloning once for the new retained frame
+   (was: two full clones + a fresh scratch allocation per frame). The
+   paint-order list is pooled too (rebuilt, never re-allocated).
+3. **Dirty-union walk without an id list** — the union is computed in two
+   passes over the retained and current rect maps (ids that had geometry last
+   frame, then ids that gained geometry this frame): no per-frame id-list
+   allocation, sort or dedup. The all-node old-vs-new rect comparison is
+   unchanged — it remains the repaint region's correctness backbone.
+4. **`Buffer::copy_region` hot path** — the union copy is now row-major slice
+   copies (`clone_from_slice`) instead of per-cell bounds-checked clones.
+5. **Full-repaint path** — `paint_full` reuses the retained buffer as its
+   paint target (cleared in place, one clone for the caller), and — the
+   measured dominant win — the `>half-viewport` fallback passes the rects
+   `paint_dirty` already computed through to the full paint, so a large-dirty
+   frame runs the layout reconcile walk ONCE instead of twice. The full path
+   also rebuilds the retained paint signatures only for the mutation-site
+   pushed ids (or every id on a force scan) instead of the whole-tree walk —
+   a later dirty pass treats a missing baseline conservatively as a change, so
+   no repaint is ever lost (the rect backbone decides).
+
+Same environment as the round-4 before recording: same machine and session,
+**release** addon (`npm run build:release`), Rust release profile, Deno 2.9.3,
+PTY sized 120x40. The **before** numbers are the round-4 **before** numbers
+(recorded 2026-08-05); the after numbers are three fresh runs (representative
+run shown, averages in the table).
+
+## Before / after comparison (round 4: recorded before vs after, avg of 3)
+
+| metric | before (2026-08-05, recorded) | after (avg of 3) | delta |
+|--------|-------------------------------|------------------|-------|
+| TS scroll mean (s4) | 1.937 ms (1.900–1.998) | 1.185 ms (1.17–1.19) | **−38.8%** |
+| **TS scroll p50 (s4)** | **1.908 ms (1.880–1.955)** | **1.154 ms (1.148–1.159)** | **−39.5%** |
+| TS scroll fps (s4) | ~517 (500–526) | ~846 (840–852) | **×1.63** |
+| TS full-screen mean (s5) | 0.392 ms | 0.380 ms (0.38–0.39) | −3% (noise) |
+| TS full-screen p50 (s5) | 0.389 ms | 0.381 ms (0.380–0.385) | −2% (noise) |
+| TS flushed bytes/frame (s5) | 5009 B | 5009 B | 0 (unchanged) |
+| TS round-trip p50 (s0) | 0.664 ms (round-3 after) | 0.636 ms (0.634–0.639) | −4.2% |
+| TS no-change p50 (s1) | 0.000 ms | 0.000 ms | n/a (holds) |
+| TS single-cell p50 (s2) | 0.660 ms (round-3 after) | 0.638 ms (0.636–0.642) | −3.3% |
+| TS burst/single ratio (s3) | ~1.00 (recorded) | 1.07–1.17 (1 native render per burst) | holds (noise) |
+| Rust scroll mean | 2.066 ms (1.966–2.135) | 1.324 ms (1.319–1.333) | **−35.9%** |
+| **Rust scroll p50** | **1.957 ms (1.927–2.008)** | **1.317 ms (1.313–1.323)** | **−32.7%** |
+| Rust scroll p95 | 2.125–2.864 ms | ~1.41 ms | **−34%** |
+| Rust scroll bytes/frame | 4904 B | 4904 B | 0 (unchanged) |
+| Rust single-cell mean | 0.688 ms (round-3 after) | 0.661 ms (0.656–0.670) | −3.9% |
+| Rust single-cell p50 | 0.662 ms (round-3 after) | 0.653 ms (0.651–0.654) | −1.4% |
+
+Representative after run (first of three):
+
+```text
+=== tern-components scroll-churn bench ===
+viewport: 120x40 (4800 cells/frame)
+scene: root box + 200 nested boxes (3-5 text leaves each) + streaming_text (50 spans) + caret node, ~1003 nodes
+iterations: 2000
+mean: 1.321 ms/frame
+p50:  1.315 ms/frame
+p95:  1.406 ms/frame
+cells/sec: 3633040 cells/sec (756.9 fps at 4800 cells/frame)
+bytes/frame: 4904 bytes
+=== tern-components incremental-layout target bench ===
+mean: 0.658 ms/frame
+p50:  0.654 ms/frame
+p95:  0.740 ms/frame
+cells/sec: 7296601 cells/sec (1520.1 fps at 4800 cells/frame)
+render.bench: summary — round-trip p50 0.636 ms | no-change p50 0.000 ms |
+single-cell p50 0.638 ms | burst ratio 1.11 (1 native render(s) per 1000-call
+burst) | scroll p50 1.154 ms | full-screen p50 0.381 ms (5009 bytes/frame)
+```
+
+## Scenario-by-scenario reading
+
+### Scenario 4 — viewport scroll: the large-dirty win
+
+TS p50 **1.908 → 1.154 ms (−39.5%)**, mean −38.8%, fps ~517 → ~846; Rust p50
+**1.957 → 1.317 ms (−32.7%)**, mean −35.9%, p95 −34%. Every scroll frame takes
+the `>half-viewport` full-repaint fallback, and the measured dominant cost was
+**not** the paint, the diff or the flush — it was the **layout reconcile walk
+running twice** (once in `paint_dirty` to compute the dirty union, once inside
+`paint_full`). Passing the already-computed rects through the fallback removes
+the second walk, which is where most of the ~40% comes from. The rest
+(scratch pooling, one clone instead of two, pushed-only signature rebuild,
+row-slice union copy) shaves the remaining per-frame buffer and signature
+allocations.
+
+### Scenario 5 — alternating full screens: unchanged (honest)
+
+~0.39 → ~0.38 ms p50, bytes 5009 → 5009. The full-screen frame was already
+cheap before this round (its cost is dominated by painting 4720 cells of two
+streaming leaves plus the full-viewport flush — the layout and signature work
+this round removed was never a large share of it), so the honest record is
+"flat, no regression, byte cost unchanged". A single-digit-percent movement
+here is legitimate; the measured movement is −2% (noise).
+
+### One-cell and no-change scenarios: no regression (small bonus)
+
+TS single-cell p50 0.660 → 0.638 ms (−3.3%), Rust single-cell p50 0.662 →
+0.653 ms (−1.4%) — the pooled scratch (union-only clear) and single-clone
+dirty path shave a little off the one-cell floor. No-change frames hold at
+0.000 ms. The s3 burst ratio measured 1.07–1.17 in this session (1 native
+render per 1000-call burst — the coalescing signal holds); the session's
+before-run already measured 1.11, so the movement is macrotask-latency noise,
+not a regression.
+
+## Honest verdict
+
+- **The large-dirty floor is cut by roughly a third to two-fifths.** TS scroll
+  p50 −39.5%, Rust scroll p50 −32.7% (vs the round-4 before recording) on the
+  same release profile both sides; the alternating-full-screen case was
+  already cheap and is unchanged. The byte cost of a full repaint (5009/4904 B
+  per frame) is unchanged — this round attacked per-frame *time*, not output.
+- **The one-cell wins hold and improve slightly** (−3.3% TS / −1.4% Rust p50);
+  no-change frames stay at ~0; coalescing still collapses 1000 requestFrames
+  into 1 native render.
+- **Honesty note (where the win came from):** the dominant factor was
+  eliminating the duplicated layout reconcile in the >half-viewport fallback —
+  a pre-existing inefficiency the round-4 before coverage exposed, not a new
+  fast path. The scratch pooling, retained-buffer reuse and signature cuts are
+  real but smaller. No thresholds were adjusted; every number above is as
+  measured.
