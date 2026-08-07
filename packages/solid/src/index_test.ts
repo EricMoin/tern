@@ -98,7 +98,7 @@ import {
   setSelectionClockForTesting,
   type SelectionRange,
   type TernEventJs,
-} from "@tern/core";
+} from "@tern-tui/core";
 import { setAddonForTesting } from "../../core/src/addon.ts";
 import type { TernAddon } from "../../core/src/addon.ts";
 
@@ -106,7 +106,7 @@ import type { TernAddon } from "../../core/src/addon.ts";
 import { createSignal } from "solid-js";
 
 Deno.test("solid exports package metadata", () => {
-  if (name !== "@tern/solid") {
+  if (name !== "@tern-tui/solid") {
     throw new Error(`unexpected name: ${name}`);
   }
   if (version !== "0.1.0") {
@@ -480,7 +480,7 @@ Deno.test("subscribeStream disposer stops further appends", async () => {
 // the `clip_height` viewport) while following; a manual scroll above the tail
 // detaches (pins the view); `followTail` re-attaches and snaps back. The node
 // attaches under a real core `Renderer` over a *size-aware fake addon* (the
-// `setAddonForTesting` seam — same approach as the @tern/core tests), so
+// `setAddonForTesting` seam — same approach as the @tern-tui/core tests), so
 // `Node.contentSize()` measures the streamed spans and the scroll offsets are
 // observable as scene props.
 // ---------------------------------------------------------------------------
@@ -722,7 +722,7 @@ Deno.test("StreamingText with autoScroll: false keeps the view pinned under subs
 // indicator leaf at the clip region's bottom-right (the core
 // `STREAM_AFFORDANCE_CHAR`); `followTail` (re-attach) and `scrollToBottom`
 // (one-shot jump to the tail) dismiss it. The appear/dismiss mechanics live
-// in @tern/core — the framework layers surface the helpers (re-exported by
+// in @tern-tui/core — the framework layers surface the helpers (re-exported by
 // this package) so an app can wire the affordance's activation.
 // ---------------------------------------------------------------------------
 
@@ -787,7 +787,7 @@ Deno.test("subscribeStream stamps the scroll-to-bottom affordance on detach and 
 
 // ---------------------------------------------------------------------------
 // Reactive integration: signal -> targeted scene update (Phase-1 exit
-// criterion at the @tern/core level)
+// criterion at the @tern-tui/core level)
 // ---------------------------------------------------------------------------
 
 /**
@@ -802,7 +802,7 @@ Deno.test("subscribeStream stamps the scroll-to-bottom affordance on detach and 
  * (c) every node keeps its object identity and only the affected node's
  *     props change.
  *
- * The root is a detached @tern/core `Node` (never attached to a native
+ * The root is a detached @tern-tui/core `Node` (never attached to a native
  * renderer), so no native addon is loaded: every mutation flows through pure
  * `Node` bookkeeping (`setProps`, `addChild`, `remove`) — exactly the
  * scene-op surface the native binding applies on attach.
@@ -951,7 +951,7 @@ Deno.test("reactive signal drives targeted text and conditional-box scene update
   if (condRemoves !== 1) {
     throw new Error(`expected exactly one remove() call on the conditional, got ${condRemoves}`);
   }
-  // @tern/core `Node.remove()` splices the node out of its parent's children
+  // @tern-tui/core `Node.remove()` splices the node out of its parent's children
   // list, so the JS tree mirrors the removal: the conditional is gone from
   // treeRoot.children and only [staticLabel, textNode] remain.
   if (treeRoot.children.length !== 2) {
@@ -973,7 +973,7 @@ Deno.test("reactive signal drives targeted text and conditional-box scene update
 });
 
 // ---------------------------------------------------------------------------
-// Roadmap element factories (feature parity with @tern/react)
+// Roadmap element factories (feature parity with @tern-tui/react)
 // ---------------------------------------------------------------------------
 
 /**
@@ -1371,7 +1371,7 @@ function snapshotsEqual(a: unknown, b: unknown): boolean {
  *
  * The React side materializes its host elements through
  * `hostConfig.createInstance(type, props)` -> `toNodeProps(props, type)` ->
- * the @tern/core factory of the same name (packages/react/src/reconciler.ts).
+ * the @tern-tui/core factory of the same name (packages/react/src/reconciler.ts).
  * `toNodeProps` strips the React-only keys (`children`/`key`/`ref` and the
  * component-consumed keys), so for a props object carrying only tern node
  * props the React-rendered node is exactly the core factory output. Asserting
@@ -1391,7 +1391,7 @@ Deno.test("parity: solid renders the same scene structure as react's materializa
     { kind: "add" as const, old_line: 0, new_line: 2, text: "  c" },
   ];
 
-  // The React baseline: the @tern/core factories (what React's hostConfig
+  // The React baseline: the @tern-tui/core factories (what React's hostConfig
   // materializes) built into the same tree shape.
   const coreRoot = CoreBox();
   coreRoot.addChild(

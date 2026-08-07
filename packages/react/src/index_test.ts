@@ -1,5 +1,5 @@
 /**
- * Unit tests for the @tern/react renderer.
+ * Unit tests for the @tern-tui/react renderer.
  *
  * These exercise the renderer without the native addon or a real terminal:
  * the scene root is a *detached* core `Node` (a `Box()` template), so
@@ -35,7 +35,7 @@ import {
   type SelectionRange,
   type Span,
   type TernEventJs,
-} from "@tern/core";
+} from "@tern-tui/core";
 import { setAddonForTesting } from "../../core/src/addon.ts";
 import type { TernAddon } from "../../core/src/addon.ts";
 
@@ -143,7 +143,7 @@ function keyEvent(over: Partial<KeyEvent> = {}): KeyEvent {
 // ---------------------------------------------------------------------------
 
 Deno.test("react exports package metadata", () => {
-  if (name !== "@tern/react") {
+  if (name !== "@tern-tui/react") {
     throw new Error(`unexpected name: ${name}`);
   }
   if (version !== "0.1.0") {
@@ -1321,7 +1321,7 @@ Deno.test("StreamingText invokes render() after stream appends", async () => {
 // the `clip_height` viewport) while following; a manual scroll above the tail
 // detaches (pins the view); `followTail` re-attaches and snaps back. The
 // tree mounts onto a real core `Renderer` over a *size-aware fake addon*
-// (the `setAddonForTesting` seam — same approach as the @tern/core tests), so
+// (the `setAddonForTesting` seam — same approach as the @tern-tui/core tests), so
 // `Node.contentSize()` measures the streamed spans and the scroll offsets are
 // observable as scene props.
 // ---------------------------------------------------------------------------
@@ -1655,7 +1655,7 @@ Deno.test("StreamingText with autoScroll: false keeps the view pinned", async ()
 // indicator leaf at the clip region's bottom-right (the core
 // `STREAM_AFFORDANCE_CHAR`); `followTail` (re-attach) and `scrollToBottom`
 // (one-shot jump to the tail) dismiss it. The appear/dismiss mechanics live
-// in @tern/core — the framework layers surface the helpers so an app can
+// in @tern-tui/core — the framework layers surface the helpers so an app can
 // wire the affordance's activation.
 // ---------------------------------------------------------------------------
 

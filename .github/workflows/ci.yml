@@ -114,11 +114,11 @@ jobs:
         run: npm install
 
       # Emit dist/ for each published package (core first — react/solid
-      # resolve @tern/core types from its dist via the workspace symlink).
+      # resolve @tern-tui/core types from its dist via the workspace symlink).
       # The tsc type-check step below runs against src with noEmit, so the
       # build must run first to produce the dist the dev checks resolve.
       - name: Build JS packages (tsc emit)
-        run: npm run build -w @tern/core && npm run build -w @tern/react && npm run build -w @tern/solid
+        run: npm run build -w @tern-tui/core && npm run build -w @tern-tui/react && npm run build -w @tern-tui/solid
 
       - name: Lint (deno lint)
         run: deno lint
@@ -136,7 +136,7 @@ jobs:
         run: npm test
 
   smoke:
-    # PTY smoke for the @tern/examples demos. The run-smoke.sh harness pipes
+    # PTY smoke for the @tern-tui/examples demos. The run-smoke.sh harness pipes
     # 'q' into each demo inside a pseudo-TTY via the macOS `script` utility
     # (the demos only exit 0 when their scene rendered AND the event loop quit
     # on 'q'), so this job must run on macOS. The native tern-node addon is

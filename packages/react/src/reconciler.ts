@@ -1,5 +1,5 @@
 /**
- * @tern/react — mutation-mode react-reconciler HostConfig for tern.
+ * @tern-tui/react — mutation-mode react-reconciler HostConfig for tern.
  *
  * Maps React host components onto tern scene nodes through the `packages/core`
  * factories (`Box` / `Text` / `StreamingText` / `Node`). The tree lives in the
@@ -79,7 +79,7 @@ import {
   type TableProps,
   type TabsProps,
   type TextareaProps,
-} from "@tern/core";
+} from "@tern-tui/core";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -391,7 +391,7 @@ export const hostConfig: HostConfig = {
           ? CoreModal(nodeProps as ModalProps)
           : CoreModal({ ...nodeProps, content: (props as ModalProps).content } as ModalProps);
       default:
-        throw new Error(`@tern/react: unknown host element type "${type}"`);
+        throw new Error(`@tern-tui/react: unknown host element type "${type}"`);
     }
   },
 
@@ -606,7 +606,7 @@ const ReconcilerInstance = Reconciler(hostConfig);
 
 /** Default error reporters when no error boundary catches an error. */
 function reportError(error: unknown): void {
-  console.error("[@tern/react]", error);
+  console.error("[@tern-tui/react]", error);
 }
 
 /**
@@ -706,7 +706,7 @@ export function useApp(): AppHandle {
   const app = useContext(AppContext);
   if (app === null) {
     throw new Error(
-      "useApp() must be called inside a tern tree rendered with @tern/react render()/createRoot()",
+      "useApp() must be called inside a tern tree rendered with @tern-tui/react render()/createRoot()",
     );
   }
   return app;

@@ -1,10 +1,10 @@
 /**
- * react-demo — @tern/react example scene for the tern TUI engine.
+ * react-demo — @tern-tui/react example scene for the tern TUI engine.
  *
  * Renders a flex-column `Box` with a rounded border and 1-cell padding
  * holding two `Text` leaves ("Hello React" / "Press q to quit") and a
  * `<StreamingText>` node fed by an async stream of 3 spans through the
- * `@tern/react` custom renderer (`render` + the `useApp` / `useInput`
+ * `@tern-tui/react` custom renderer (`render` + the `useApp` / `useInput`
  * hooks), then runs an event loop that quits when the user presses `q`
  * (`useInput` → `useApp().exit()`). The stream is consumed on mount by the
  * `<StreamingText>` component (a timer/loop before the event loop); the demo
@@ -13,7 +13,7 @@
  *
  * Runtime: Deno-first per the project preference. The demo prefers
  * `deno run --allow-all`; if Deno cannot load the native Node-API addon
- * (see @tern/core `loadAddon`), the demo re-runs itself under `node` and
+ * (see @tern-tui/core `loadAddon`), the demo re-runs itself under `node` and
  * reports the limitation clearly. The smoke harness (`run-smoke.sh`) drives
  * this file under a macOS `script` PTY with 'q' piped in and asserts exit 0.
  */
@@ -27,8 +27,8 @@ import {
   type Renderer,
   type Span,
   type TernEventJs,
-} from "@tern/core";
-import { Box, StreamingText, Text, render, useApp, useInput } from "@tern/react";
+} from "@tern-tui/core";
+import { Box, StreamingText, Text, render, useApp, useInput } from "@tern-tui/react";
 import process from "node:process";
 
 const isDeno = typeof Deno !== "undefined";
