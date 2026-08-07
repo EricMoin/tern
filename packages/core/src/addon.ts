@@ -6,7 +6,7 @@
  * imported from ESM, so it is loaded through `node:module` `createRequire` —
  * which works identically under Deno 2.x (Node-API addons are supported with
  * `--allow-ffi`) and Node.js. The exported type surface is re-exported from
- * the binding's generated `index.d.ts` so `@tern/core` consumers get the
+ * the binding's generated `index.d.ts` so `@tern-tui/core` consumers get the
  * canonical napi types without duplication.
  */
 
@@ -21,7 +21,7 @@ import type {
   HighlightSpanJs,
   NodeHandle as NativeNodeHandle,
   TuiRenderer as NativeTuiRenderer,
-} from "tern-node";
+} from "@tern-tui/node";
 
 export type {
   ContentSize,
@@ -30,7 +30,7 @@ export type {
   NodeHandle,
   TuiRenderer,
   TuiRendererOptions,
-} from "tern-node";
+} from "@tern-tui/node";
 
 /** The runtime surface of the loaded napi addon. */
 export interface TernAddon {

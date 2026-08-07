@@ -1,5 +1,5 @@
 /**
- * Unit tests for the @tern/core factory API.
+ * Unit tests for the @tern-tui/core factory API.
  *
  * These exercise the declarative surface (`Text`/`Box`/`Node`) without
  * touching the native addon or a real terminal: `Text`/`Box` build pure
@@ -172,7 +172,7 @@ const FAKE_TERMINAL_SIZE = { width: 80, height: 24 };
  * A fake native `NodeHandle` standing in for the real addon's scene handle.
  * `content_size` returns the per-handle override set via `fakeContentSizes`
  * (used by the panel-drag geometry tests) or a fixed size, so the geometry-
- * query tests exercise the @tern/core plumbing without the native `.node`
+ * query tests exercise the @tern-tui/core plumbing without the native `.node`
  * binary. The handle also records its `kind`/`props` and materialized
  * children, so the fake `render_to_buffer` can paint the captured scene.
  */
@@ -531,7 +531,7 @@ function pushEvent(event: TernEventJs): void {
 }
 
 Deno.test("core exports package metadata", () => {
-  if (name !== "@tern/core") {
+  if (name !== "@tern-tui/core") {
     throw new Error(`unexpected name: ${name}`);
   }
   if (version !== "0.1.0") {
@@ -541,7 +541,7 @@ Deno.test("core exports package metadata", () => {
 
 Deno.test("re-exported napi types are declared", () => {
   // Compile-time contract: the generated napi declarations must be reachable
-  // through @tern/core. `KeyEvent`/`TuiRendererOptions`/`NodeHandle`/
+  // through @tern-tui/core. `KeyEvent`/`TuiRendererOptions`/`NodeHandle`/
   // `TuiRenderer` are type-only; this function body only needs to type-check.
   const ev: KeyEvent = { name: "char", char: "q", ctrl: false, alt: false, shift: false };
   const opts: TuiRendererOptions = { exit_on_ctrl_c: true };

@@ -2,7 +2,7 @@
 /**
  * render.bench.ts — render benchmarks for the tern TUI engine, JS side.
  *
- * Loads the real tern-node addon through `@tern/core` and times seven
+ * Loads the real tern-node addon through `@tern-tui/core` and times seven
  * scenarios against the same synthetic scene (see
  * `src/core/tern-components/tests/bench_timing.rs` for the Rust twin), at the
  * real terminal size under a PTY:
@@ -68,8 +68,8 @@ import {
   createRenderer,
   loadAddon,
   tick,
-} from "@tern/core";
-import type { Node } from "@tern/core";
+} from "@tern-tui/core";
+import type { Node } from "@tern-tui/core";
 
 /** The number of render round-trips to time (scenario 0). */
 const N = 1000;

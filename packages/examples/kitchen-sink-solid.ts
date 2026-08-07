@@ -1,7 +1,7 @@
 /**
- * kitchen-sink-solid — @tern/solid kitchen-sink demo.
+ * kitchen-sink-solid — @tern-tui/solid kitchen-sink demo.
  *
- * The `@tern/solid` counterpart of `kitchen-sink-react.ts`: the same widget
+ * The `@tern-tui/solid` counterpart of `kitchen-sink-react.ts`: the same widget
  * surface built through the solid element factories, exercising `Panels`
  * (with the core mouse drag-resize helpers), `ScrollView` (clip/scroll
  * region + track/thumb scrollbar, driven by `scrollTo`), `StreamingText`
@@ -18,7 +18,7 @@
  *
  * Runtime: Deno-first per the project preference. The demo prefers
  * `deno run --allow-all`; if Deno cannot load the native Node-API addon
- * (see @tern/core `loadAddon`), the demo re-runs itself under `node` and
+ * (see @tern-tui/core `loadAddon`), the demo re-runs itself under `node` and
  * reports the limitation clearly.
  */
 
@@ -29,7 +29,7 @@ import {
   SCROLLBAR_THUMB_CHAR,
   type MouseEventJs,
   type TernEventJs,
-} from "@tern/core";
+} from "@tern-tui/core";
 import {
   Box,
   DiffView,
@@ -75,7 +75,7 @@ import {
   type Node,
   type Renderer,
   type Span,
-} from "@tern/solid";
+} from "@tern-tui/solid";
 import process from "node:process";
 
 const isDeno = typeof Deno !== "undefined";
@@ -216,7 +216,7 @@ const modalOutside = Box();
 const modalOutsideFocus = useFocus("modal-outside", modalOutside, () => {});
 
 // ---------------------------------------------------------------------------
-// Scene, built through the @tern/solid factories
+// Scene, built through the @tern-tui/solid factories
 // ---------------------------------------------------------------------------
 
 /** The root box holding the kitchen-sink widgets, in assertion order. */
@@ -678,7 +678,7 @@ setProgress(progress2!, 5, 10);
 // and a rust code fence. The fence highlights through tree-sitter when the
 // native addon is available (the smoke harness runs with it); without the
 // addon it falls back to the single fence style — both shapes are asserted
-// structurally, mirroring the @tern/core unit tests.
+// structurally, mirroring the @tern-tui/core unit tests.
 assert(markdownNode2?.type === "markdown", "MarkdownView materializes in the scene");
 assert(markdownNode2?.props.flex_direction === "column", "the markdown root is a flex column");
 assert(!("source" in (markdownNode2?.props ?? {})), "the parsed source never reaches the scene props");

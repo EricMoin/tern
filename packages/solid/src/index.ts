@@ -1,8 +1,8 @@
 /**
- * @tern/solid — SolidJS custom renderer for tern.
+ * @tern-tui/solid — SolidJS custom renderer for tern.
  *
  * Wires `createRenderer` from the vendored solid-js universal renderer
- * (see `./universal.ts`) with a `RendererOptions` object over the @tern/core
+ * (see `./universal.ts`) with a `RendererOptions` object over the @tern-tui/core
  * scene API. The options literal carries exactly the canonical solid-js
  * 1.9.14 `RendererOptions` key set (see
  * node_modules/solid-js/universal/types/universal.d.ts:1-12 and the
@@ -23,7 +23,7 @@
  * - `replaceNode` (convenience)  -> position-accurate in-parent replacement
  * - `setProperty`                -> `Node.setProps` (feeds the runtime's `setProp`/`spread`)
  * - `getParentNode`/`getFirstChild`/`getNextSibling` -> tree traversal
- *   (best-effort: @tern/core `Node` exposes `children` but no parent/sibling
+ *   (best-effort: @tern-tui/core `Node` exposes `children` but no parent/sibling
  *   accessors, so a `WeakMap` registry records parents as nodes are inserted)
  *
  * Anchor-based insertion and position-accurate replacement are wired;
@@ -38,7 +38,7 @@
  * The roadmap element factories (`Input`/`Textarea`/`Spinner`/`StatusBar`/
  * `Panels`/`DiffView`/`Select`/`ScrollView`/`Table`/`Tabs`/`Progress`/`Modal`)
  * materialize
- * the @tern/core factories of the same name, matching what the `@tern/react`
+ * the @tern-tui/core factories of the same name, matching what the `@tern-tui/react`
  * host components map to (feature parity): same props -> same scene node
  * structure. The `Textarea` factory additionally mirrors the `<Textarea>`
  * host's focus wiring: a `focusId` prop registers the node with a
@@ -70,7 +70,7 @@
  * word select, copy-on-release).
  * `startSpinner` drives a spinner node's frame ticks with a focus-aware
  * timer — pausing while the terminal is unfocused, resuming on regain (the
- * `@tern/react` `<Spinner>` effect equivalent, roadmap Phase 2).
+ * `@tern-tui/react` `<Spinner>` effect equivalent, roadmap Phase 2).
  */
 
 import {
@@ -141,14 +141,14 @@ import {
   type TextareaState,
   type Theme,
   type ThemeOverrides,
-} from "@tern/core";
+} from "@tern-tui/core";
 
-export const name = "@tern/solid";
+export const name = "@tern-tui/solid";
 export const version = "0.1.0";
 
-// The @tern/core types the factories and focus wiring expose, re-exported so
+// The @tern-tui/core types the factories and focus wiring expose, re-exported so
 // consumers can type elements, props, focus handles and input handlers without
-// importing @tern/core directly (the same surface @tern/react re-exports).
+// importing @tern-tui/core directly (the same surface @tern-tui/react re-exports).
 export type {
   DiffLine,
   DiffViewProps,
@@ -183,9 +183,9 @@ export type {
   TabSpec,
   TabsState,
   TextareaState,
-} from "@tern/core";
+} from "@tern-tui/core";
 
-// The @tern/core values behind the roadmap elements and the focus wiring:
+// The @tern-tui/core values behind the roadmap elements and the focus wiring:
 // element edit/drive helpers (including the paste counterparts `pasteInto` /
 // `pasteIntoTextarea`, which a focused `Input` / `Textarea` auto-pastes
 // through), the scroll helpers (including the streaming auto-scroll
@@ -239,10 +239,10 @@ export {
   useFocus,
   visibleTableRows,
   wheelScroll,
-} from "@tern/core";
+} from "@tern-tui/core";
 
-// The @tern/core theme types, re-exported so consumers can type themes
-// without importing @tern/core directly.
+// The @tern-tui/core theme types, re-exported so consumers can type themes
+// without importing @tern-tui/core directly.
 export type {
   Theme,
   ThemeComponent,
@@ -251,7 +251,7 @@ export type {
   ThemeRole,
   ThemeRoleColors,
   ThemeStylePreset,
-} from "@tern/core";
+} from "@tern-tui/core";
 
 // ---------------------------------------------------------------------------
 // Theme
@@ -282,7 +282,7 @@ export function getTheme(): Theme {
 }
 
 /**
- * Apply a single prop to a tern scene node. @tern/core's `Node.setProps`
+ * Apply a single prop to a tern scene node. @tern-tui/core's `Node.setProps`
  * replaces the whole prop map, so each write merges over the node's current
  * props. This is the single funnel behind the options' `setProperty` and,
  * transitively, the renderer's returned `setProp`/`spread`.
@@ -292,18 +292,18 @@ function applyProp(node: Node, prop: string, value: unknown): void {
 }
 
 /**
- * Best-effort parent registry. @tern/core `Node` exposes `children` but no
+ * Best-effort parent registry. @tern-tui/core `Node` exposes `children` but no
  * parent/sibling accessors (its `#parent` link is private), so `insertNode`
  * records the parent here and the traversal callbacks read from it. Entries
  * are dropped on `removeNode`; the children lists themselves are kept in sync
- * by @tern/core's `Node.remove()`, which splices the removed node out of its
+ * by @tern-tui/core's `Node.remove()`, which splices the removed node out of its
  * parent's `children` list.
  */
 const parentMap = new WeakMap<Node, Node>();
 
 /**
  * The `RendererOptions<Node>` object handed to `createRenderer`
- * (`solid-js/universal`). Every tree mutation funnels into the @tern/core
+ * (`solid-js/universal`). Every tree mutation funnels into the @tern-tui/core
  * `Node` API.
  *
  * The literal exposes exactly the canonical solid-js 1.9.14
@@ -365,7 +365,7 @@ const options: RendererOptions<Node> = {
         return TernModal({});
       default:
         throw new Error(
-          `@tern/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "textarea", "spinner", "status_bar", "panels", "diff", "select", "scroll_view", "table", "tabs", "progress", or "modal")`,
+          `@tern-tui/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "textarea", "spinner", "status_bar", "panels", "diff", "select", "scroll_view", "table", "tabs", "progress", or "modal")`,
         );
     }
   },
@@ -397,13 +397,13 @@ const options: RendererOptions<Node> = {
    * `insertNode` -> tree op, anchor-accurate.
    *
    * With a non-null `anchor` the node is inserted immediately before it via
-   * `Node.insertBefore` (the @tern/core equivalent of the DOM
+   * `Node.insertBefore` (the @tern-tui/core equivalent of the DOM
    * `parent.insertBefore(node, anchor)` the solid-js universal docs use);
    * without an anchor the node is appended via `Node.addChild`. The parent
    * registry is updated so traversal callbacks work.
    *
    * Note: solid's array reconciliation can re-insert an already-present
-   * child (a move), which @tern/core's `insertBefore` rejects — true move
+   * child (a move), which @tern-tui/core's `insertBefore` rejects — true move
    * semantics need a native scene move op and are post-MVP.
    */
   insertNode(parent: Node, node: Node, anchor?: Node): void {
@@ -464,7 +464,7 @@ const options: RendererOptions<Node> = {
  * `node` must not already be a child of that parent (same constraint as
  * `Node.insertBefore`).
  *
- * @tern/core's `Node.remove()` splices the removed node out of its parent's
+ * @tern-tui/core's `Node.remove()` splices the removed node out of its parent's
  * `children` list, so the replacement is fully reflected in the local
  * bookkeeping: after the swap, `parent.children` holds the new node exactly
  * where the replaced node was, and the traversal callbacks
@@ -541,7 +541,7 @@ export function Text(props: NodeProps = {}): Node {
  * props at element-creation time. The node's stream is fed with
  * `subscribeStream` (or directly via `Node.appendSpan`); spans appended
  * while the node is detached are recorded and flushed to the native handle
- * in call order when the node is attached (see `@tern/core`).
+ * in call order when the node is attached (see `@tern-tui/core`).
  *
  * The `autoScroll` key is a component behavior flag (default `true`): the
  * node registers itself as following its content tail, and each appended
@@ -566,9 +566,9 @@ export function StreamingText(props: NodeProps = {}): Node {
 // ---------------------------------------------------------------------------
 // Roadmap element factories
 //
-// These materialize the @tern/core roadmap factories (subtask 3) with the same
-// props, giving @tern/solid feature parity with the @tern/react host
-// components: same props -> same scene node structure (the @tern/react
+// These materialize the @tern-tui/core roadmap factories (subtask 3) with the same
+// props, giving @tern-tui/solid feature parity with the @tern-tui/react host
+// components: same props -> same scene node structure (the @tern-tui/react
 // `hostConfig.createInstance` maps the host tags to these same core factories
 // — see packages/react/src/reconciler.ts). Unlike the primitives above, they
 // call the core factories directly with the full props rather than
@@ -595,7 +595,7 @@ export function Input(props: InputProps = {}): Node {
 
 /**
  * Props for the solid `Textarea` factory: the core textarea props plus the
- * focus/callback wiring, mirroring the `@tern/react` `<Textarea>` host
+ * focus/callback wiring, mirroring the `@tern-tui/react` `<Textarea>` host
  * component. `focusId` / `focusManager` / `onChange` / `onSubmit` are
  * consumed by the factory — they never reach the scene node; the remaining
  * keys flow to the core `Textarea` factory (the `lines` / `row` / `col` /
@@ -647,7 +647,7 @@ export function disposeTextareaFocus(node: Node): void {
  *
  * When `focusId` is given, the textarea registers with the `FocusManager`
  * (the `focusManager` prop, defaulting to the core `focusManager`) — the
- * Solid-flavored equivalent of the `@tern/react` `<Textarea focusId>`
+ * Solid-flavored equivalent of the `@tern-tui/react` `<Textarea focusId>`
  * registration. Routed keys (via `subscribeInput`) edit it through the core
  * `editTextareaKey`: `onChange` fires after the lines/row/col change and
  * `onSubmit` on Enter (which splits the line). Routed paste events (via
@@ -658,7 +658,7 @@ export function disposeTextareaFocus(node: Node): void {
  * node leaves the scene.
  */
 export function Textarea(props: TextareaProps = {}): Node {
-  // The focus/callback keys are component-consumed (mirroring `@tern/react`'s
+  // The focus/callback keys are component-consumed (mirroring `@tern-tui/react`'s
   // `TEXTAREA_PROPS` stripping): they must never reach the core factory, or
   // they would leak onto the scene node's props.
   const { focusId, focusManager: manager, onChange, onSubmit, ...nodeProps } = props;
@@ -792,7 +792,7 @@ export function Modal(props: ModalProps = {}): Node {
 
 /**
  * Props for the solid `Tabs` factory: the core tabs props plus the
- * focus/callback wiring, mirroring the `@tern/react` `<Tabs>` host component.
+ * focus/callback wiring, mirroring the `@tern-tui/react` `<Tabs>` host component.
  * `focusId` / `focusManager` / `onChange` / `onClose` are consumed by the
  * factory — they never reach the scene node; the remaining keys flow to the
  * core `Tabs` factory (the `tabs` spec list and the `active` / `closable`
@@ -843,7 +843,7 @@ export function disposeTabsFocus(node: Node): void {
  *
  * When `focusId` is given, the tabs register with the `FocusManager` (the
  * `focusManager` prop, defaulting to the core `focusManager`) — the
- * Solid-flavored equivalent of the `@tern/react` `<Tabs focusId>`
+ * Solid-flavored equivalent of the `@tern-tui/react` `<Tabs focusId>`
  * registration. Routed keys (via `subscribeInput`) drive it through the core
  * `tabsKey`: `left` / `right` move the active tab (clamped), `ctrl+tab` /
  * `ctrl+shift+tab` wrap to the next / previous tab, and `ctrl+w` closes the
@@ -852,7 +852,7 @@ export function disposeTabsFocus(node: Node): void {
  * node leaves the scene.
  */
 export function Tabs(props: TabsProps): Node {
-  // The focus/callback keys are component-consumed (mirroring `@tern/react`'s
+  // The focus/callback keys are component-consumed (mirroring `@tern-tui/react`'s
   // `TABS_PROPS` stripping): they must never reach the core factory, or they
   // would leak onto the scene node's props.
   const { focusId, focusManager: manager, onChange, onClose, ...nodeProps } = props;
@@ -973,7 +973,7 @@ export interface SubscribeInputOptions {
  * Subscribe `handler` to a renderer's key events, routing each key through
  * the core `FocusManager` first — the Solid-flavored `useInput` equivalent.
  * Solid has no React-style context, so the renderer is an explicit argument
- * (the `@tern/react` `useInput` reads it from the tree context instead).
+ * (the `@tern-tui/react` `useInput` reads it from the tree context instead).
  *
  * Each key is first routed via `manager.routeKey(event)`: when the manager
  * dispatches it to a focused element's handler (an element registered with
@@ -1115,7 +1115,7 @@ export function subscribePaste(
 /**
  * Subscribe `handler` to a renderer's terminal resize events — the
  * Solid-flavored `useResize` equivalent. Solid has no React-style context, so
- * the renderer is an explicit argument (the `@tern/react` `useResize` reads
+ * the renderer is an explicit argument (the `@tern-tui/react` `useResize` reads
  * it from the tree context instead).
  *
  * Each resize event is delivered as `{ width, height }` (the core
@@ -1146,7 +1146,7 @@ export function subscribeResize(
  * Subscribe `handler` to a renderer's terminal focus events — the
  * Solid-flavored `onFocus` subscription helper (the focus counterpart of
  * `subscribeInput` / `subscribeResize`). Solid has no React-style context, so
- * the renderer is an explicit argument (the `@tern/react` `useResize`-style
+ * the renderer is an explicit argument (the `@tern-tui/react` `useResize`-style
  * hooks read it from the tree context instead).
  *
  * Each focus event is delivered as `{ focus_gained }` — `true` when the
@@ -1282,7 +1282,7 @@ export interface StartSpinnerOptions {
 
 /**
  * Start a focus-aware tick driver on a `spinner` scene node — the
- * Solid-flavored equivalent of the `@tern/react` `<Spinner>` mount effect
+ * Solid-flavored equivalent of the `@tern-tui/react` `<Spinner>` mount effect
  * (roadmap Phase 2 "focus-aware redraw").
  *
  * While the terminal is focused, every `interval` ms the driver advances the
