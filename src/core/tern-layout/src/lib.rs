@@ -21,7 +21,12 @@
 //! | `align_content`   | `Str("flex-start"\|"flex-end"\|"center"\|"stretch"\|"space-between"\|"space-around"\|"space-evenly")` | unset (stretch) |
 //! | `gap`             | `Int` \| `Float` (cells, uniform on both axes)                       | 0      |
 //! | `row_gap` / `column_gap` | `Int` \| `Float` (cells; per-axis override of `gap`)          | `gap` / 0 |
+//! | `margin`          | `Int` \| `Float` (cells, uniform on all four sides)                  | 0      |
+//! | `margin_x` / `margin_y` | `Int` \| `Float` (cells; per-axis override of `margin`)        | `margin` / 0 |
+//! | `margin_top` / `margin_right` / `margin_bottom` / `margin_left` | `Int` \| `Float` (cells; per-side override of the axis/uniform margin) | `margin_x` / `margin_y` / `margin` / 0 |
 //! | `padding`         | `Int` \| `Float` (cells, uniform)                                    | 0      |
+//! | `padding_x` / `padding_y` | `Int` \| `Float` (cells; per-axis override of `padding`)      | `padding` / 0 |
+//! | `padding_top` / `padding_right` / `padding_bottom` / `padding_left` | `Int` \| `Float` (cells; per-side override of the axis/uniform padding) | `padding_x` / `padding_y` / `padding` / 0 |
 //! | `border`          | `Int` \| `Float` (cells, uniform border width)                       | 0      |
 //! | `width` / `height`| `Int` \| `Float` (cells)                                             | auto   |
 //! | `min_width` / `min_height` | `Int` \| `Float` (cells)                                      | auto   |
@@ -887,6 +892,32 @@ fn props_to_style(props: &PropMap) -> TaffyStyle {
         (prop_number(props, "width"), prop_number(props, "height")),
     );
 
+    // Per-side spacing overrides the per-axis prop, which overrides the
+    // uniform prop on that side — the same cascade `gap` /
+    // `row_gap` / `column_gap` use, one level deeper. Each side falls back
+    // to 0 when nothing is set.
+    let (padding_x, padding_y) = (
+        prop_number(props, "padding_x"),
+        prop_number(props, "padding_y"),
+    );
+    let (padding_top, padding_right, padding_bottom, padding_left) = (
+        prop_number(props, "padding_top"),
+        prop_number(props, "padding_right"),
+        prop_number(props, "padding_bottom"),
+        prop_number(props, "padding_left"),
+    );
+    let (margin, margin_x, margin_y) = (
+        prop_number(props, "margin"),
+        prop_number(props, "margin_x"),
+        prop_number(props, "margin_y"),
+    );
+    let (margin_top, margin_right, margin_bottom, margin_left) = (
+        prop_number(props, "margin_top"),
+        prop_number(props, "margin_right"),
+        prop_number(props, "margin_bottom"),
+        prop_number(props, "margin_left"),
+    );
+
     TaffyStyle {
         display: Display::Flex,
         flex_direction,
@@ -903,14 +934,11 @@ fn props_to_style(props: &PropMap) -> TaffyStyle {
                 .map(length)
                 .unwrap_or(LengthPercentage::Length(0.0)),
         },
-        padding: match padding {
-            Some(p) => taffy::geometry::Rect {
-                left: length(p),
-                right: length(p),
-                top: length(p),
-                bottom: length(p),
-            },
-            None => taffy::geometry::Rect::zero(),
+        padding: TaffyRect {
+            top: length(padding_top.or(padding_y).or(padding).unwrap_or(0.0)),
+            right: length(padding_right.or(padding_x).or(padding).unwrap_or(0.0)),
+            bottom: length(padding_bottom.or(padding_y).or(padding).unwrap_or(0.0)),
+            left: length(padding_left.or(padding_x).or(padding).unwrap_or(0.0)),
         },
         border: match border {
             Some(b) => taffy::geometry::Rect {
@@ -920,6 +948,14 @@ fn props_to_style(props: &PropMap) -> TaffyStyle {
                 bottom: length(b),
             },
             None => taffy::geometry::Rect::zero(),
+        },
+        // Margin offsets the node's laid-out position within its parent's
+        // content box; it does not change the node's own size.
+        margin: TaffyRect {
+            top: length_auto(margin_top.or(margin_y).or(margin).unwrap_or(0.0)),
+            right: length_auto(margin_right.or(margin_x).or(margin).unwrap_or(0.0)),
+            bottom: length_auto(margin_bottom.or(margin_y).or(margin).unwrap_or(0.0)),
+            left: length_auto(margin_left.or(margin_x).or(margin).unwrap_or(0.0)),
         },
         size: TaffySize {
             width: size.0.map(dimension).unwrap_or(Dimension::Auto),
@@ -1104,6 +1140,63 @@ mod tests {
         let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 50));
         assert_eq!(rect_of(&out, outer), Rect::new(0, 0, 30, 30));
         assert_eq!(rect_of(&out, inner), Rect::new(3, 3, 10, 10));
+    }
+
+    #[test]
+    fn margin_offsets_a_child() {
+        // A uniform margin pushes the child away from the parent's edges
+        // without growing the child itself.
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        let outer = add_box(&mut scene, root);
+        set_prop(&mut scene, outer, "width", PropValue::Int(40));
+        set_prop(&mut scene, outer, "height", PropValue::Int(20));
+        let inner = add_box(&mut scene, outer);
+        set_prop(&mut scene, inner, "width", PropValue::Int(10));
+        set_prop(&mut scene, inner, "height", PropValue::Int(10));
+        set_prop(&mut scene, inner, "margin", PropValue::Int(2));
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 50));
+        assert_eq!(rect_of(&out, outer), Rect::new(0, 0, 40, 20));
+        assert_eq!(rect_of(&out, inner), Rect::new(2, 2, 10, 10));
+    }
+
+    #[test]
+    fn margin_top_overrides_uniform_margin() {
+        // Per-side margin overrides the uniform margin on that side; the
+        // other sides keep the uniform value.
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        let outer = add_box(&mut scene, root);
+        set_prop(&mut scene, outer, "width", PropValue::Int(40));
+        set_prop(&mut scene, outer, "height", PropValue::Int(30));
+        let inner = add_box(&mut scene, outer);
+        set_prop(&mut scene, inner, "width", PropValue::Int(10));
+        set_prop(&mut scene, inner, "height", PropValue::Int(10));
+        set_prop(&mut scene, inner, "margin", PropValue::Int(2));
+        set_prop(&mut scene, inner, "margin_top", PropValue::Int(5));
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 50));
+        assert_eq!(rect_of(&out, inner), Rect::new(2, 5, 10, 10));
+    }
+
+    #[test]
+    fn padding_x_insets_content_horizontally_only() {
+        // Per-axis padding applies to both horizontal edges and leaves the
+        // vertical axis untouched.
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        let outer = add_box(&mut scene, root);
+        set_prop(&mut scene, outer, "width", PropValue::Int(30));
+        set_prop(&mut scene, outer, "height", PropValue::Int(30));
+        set_prop(&mut scene, outer, "padding_x", PropValue::Int(3));
+        let inner = add_box(&mut scene, outer);
+        set_prop(&mut scene, inner, "width", PropValue::Int(10));
+        set_prop(&mut scene, inner, "height", PropValue::Int(10));
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 50));
+        assert_eq!(rect_of(&out, outer), Rect::new(0, 0, 30, 30));
+        assert_eq!(rect_of(&out, inner), Rect::new(3, 0, 10, 10));
     }
 
     #[test]
