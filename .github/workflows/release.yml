@@ -14,7 +14,7 @@
 #     packages (napi create-npm-dirs + napi artifacts), publish the tern-node
 #     root package (prepublishOnly runs `napi prepublish -t npm`, publishing
 #     the tern-node-<platform> packages first), then build and publish the
-#     three JS packages (@tern/core, @tern/react, @tern/solid) in dependency
+#     three JS packages (@tern-tui/core, @tern-tui/react, @tern-tui/solid) in dependency
 #     order (core first; react/solid depend on it).
 #
 # Dormant until a v* tag is pushed (or a manual dispatch) — never runs on
@@ -170,7 +170,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # Root install must come after tern-node is published: @tern/core
+      # Root install must come after tern-node is published: @tern-tui/core
       # depends on tern-node@0.1.0, which resolves from the registry only
       # once the addon root package exists.
       - name: Install JS workspace dependencies
@@ -183,21 +183,21 @@ jobs:
           cache: true
 
       # Build in dependency order — core first, then react and solid.
-      - name: Build JS packages (@tern/core, @tern/react, @tern/solid)
-        run: npm run build -w @tern/core && npm run build -w @tern/react && npm run build -w @tern/solid
+      - name: Build JS packages (@tern-tui/core, @tern-tui/react, @tern-tui/solid)
+        run: npm run build -w @tern-tui/core && npm run build -w @tern-tui/react && npm run build -w @tern-tui/solid
 
       # Publish in dependency order — core first, then react and solid.
-      - name: Publish @tern/core
-        run: npm publish --access public -w @tern/core
+      - name: Publish @tern-tui/core
+        run: npm publish --access public -w @tern-tui/core
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish @tern/react
-        run: npm publish --access public -w @tern/react
+      - name: Publish @tern-tui/react
+        run: npm publish --access public -w @tern-tui/react
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish @tern/solid
-        run: npm publish --access public -w @tern/solid
+      - name: Publish @tern-tui/solid
+        run: npm publish --access public -w @tern-tui/solid
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

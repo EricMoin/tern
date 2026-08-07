@@ -1,5 +1,5 @@
 /**
- * @tern/react — react-reconciler custom renderer for tern.
+ * @tern-tui/react — react-reconciler custom renderer for tern.
  *
  * A mutation-mode custom renderer that drives the tern scene through
  * `packages/core`:
@@ -114,10 +114,10 @@ import {
   type ThemeComponent,
   type ThemeOverrides,
   type ThemeRole,
-} from "@tern/core";
+} from "@tern-tui/core";
 import { useApp } from "./reconciler.ts";
 
-export const name = "@tern/react";
+export const name = "@tern-tui/react";
 export const version = "0.1.0";
 
 // ---------------------------------------------------------------------------
@@ -126,7 +126,7 @@ export const version = "0.1.0";
 
 /**
  * Props accepted by the tern host components: the tern node props (style +
- * layout keys, see `@tern/core` `NodeProps`) plus React `children` and the
+ * layout keys, see `@tern-tui/core` `NodeProps`) plus React `children` and the
  * semantic theme hints `role` / `component` (consumed by the host component
  * via `resolveTheme` — never scene props).
  */
@@ -157,10 +157,10 @@ export interface StreamingTextProps extends TernNodeProps {
    * Follow the stream tail as it grows (default `true`). While following,
    * each appended span pins the node's `scroll_y` to the content tail — the
    * stream's `Node.contentSize()` height vs the `clip_height` viewport (see
-   * `@tern/core` `syncStreamTail` / `followTail`). A manual scroll above the
+   * `@tern-tui/core` `syncStreamTail` / `followTail`). A manual scroll above the
    * tail (via `scrollTo` / `scrollBy` / `scrollTop`) detaches the follow,
    * pins the view where the user left it, and stamps the `▼` scroll-to-bottom
-   * affordance at the clip region's bottom-right (`@tern/core`
+   * affordance at the clip region's bottom-right (`@tern-tui/core`
    * `STREAM_AFFORDANCE_CHAR`); `followTail` re-attaches and `scrollToBottom`
    * jumps to the tail, both dismissing it.
    */
@@ -332,7 +332,7 @@ export function StreamingText(props: StreamingTextProps): ReactElement<Streaming
 // ---------------------------------------------------------------------------
 // Roadmap host components
 //
-// These materialize the @tern/core roadmap factories (subtask 3) as React
+// These materialize the @tern-tui/core roadmap factories (subtask 3) as React
 // host elements. The React-only wiring lives in the component functions below
 // (effects, refs, focus registration); the reconciler's `createInstance`
 // maps the host tags to the core factories (see `./reconciler.ts`).
@@ -1345,7 +1345,7 @@ export type {
 export { hostConfig, toNodeProps } from "./reconciler.ts";
 
 // Core types re-exported so consumers can type props, focus handles and
-// input handlers without importing @tern/core directly. (`FocusManager` is a
+// input handlers without importing @tern-tui/core directly. (`FocusManager` is a
 // class — it is exported as a value below, which carries its type.)
 export type {
   DiffLine,
@@ -1370,7 +1370,7 @@ export type {
   TableState,
   TabsState,
   TextareaState,
-} from "@tern/core";
+} from "@tern-tui/core";
 // Core values re-exported: the focus machinery, the element edit helpers
 // used by the roadmap host components (including the paste counterparts
 // `pasteInto` / `pasteIntoTextarea`, which the focused `<Input>` / `<Textarea>`
@@ -1419,9 +1419,9 @@ export {
   tick,
   visibleTableRows,
   wheelScroll,
-} from "@tern/core";
+} from "@tern-tui/core";
 // Core theme types re-exported so consumers can type themes without
-// importing @tern/core directly.
+// importing @tern-tui/core directly.
 export type {
   Theme,
   ThemeComponent,
@@ -1430,4 +1430,4 @@ export type {
   ThemeRole,
   ThemeRoleColors,
   ThemeStylePreset,
-} from "@tern/core";
+} from "@tern-tui/core";

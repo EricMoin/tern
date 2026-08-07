@@ -9,7 +9,7 @@
 //
 // This script rewrites relative `*.ts` specifiers to `*.js` in every
 // `*.d.ts` under the given directory. Bare specifiers (`"tern-node"`,
-// `"@tern/core"`) and doc-comment backtick text are untouched — only quoted
+// `"@tern-tui/core"`) and doc-comment backtick text are untouched — only quoted
 // strings beginning with `./` or `../` and ending in `.ts` are rewritten.
 //
 // Idempotent: runs after every `tsc -p tsconfig.build.json`; rewriting an

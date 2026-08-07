@@ -1,18 +1,18 @@
 /**
- * solid-demo — @tern/solid example scene for the tern TUI engine.
+ * solid-demo — @tern-tui/solid example scene for the tern TUI engine.
  *
  * Builds the same scene as react-demo — a flex-column `Box` with a rounded
  * border and 1-cell padding holding two `Text` leaves ("Hello Solid" /
  * "Press q to quit") plus a `StreamingText` node fed with an async stream
- * of 3 spans — through the `@tern/solid` custom renderer, mounts it with
+ * of 3 spans — through the `@tern-tui/solid` custom renderer, mounts it with
  * the renderer's universal `render()`, feeds the stream via the solid
  * `subscribeStream` helper (a timer/loop before the event loop), then runs
  * an event loop that quits on 'q' (via the core renderer's `onKey`;
- * @tern/solid ships no input hook yet in the MVP).
+ * @tern-tui/solid ships no input hook yet in the MVP).
  *
  * Runtime: Deno-first per the project preference. The demo prefers
  * `deno run --allow-all`; if Deno cannot load the native Node-API addon
- * (see @tern/core `loadAddon`), the demo re-runs itself under `node` and
+ * (see @tern-tui/core `loadAddon`), the demo re-runs itself under `node` and
  * reports the limitation clearly. The smoke harness (`run-smoke.sh`) drives
  * this file under a macOS `script` PTY with 'q' piped in and asserts exit 0.
  */
@@ -24,8 +24,8 @@ import {
   type Renderer,
   type Span,
   type TernEventJs,
-} from "@tern/core";
-import { Box, StreamingText, Text, render as solidRender, subscribeStream } from "@tern/solid";
+} from "@tern-tui/core";
+import { Box, StreamingText, Text, render as solidRender, subscribeStream } from "@tern-tui/solid";
 import process from "node:process";
 
 const isDeno = typeof Deno !== "undefined";
@@ -83,7 +83,7 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// Scene, built through the @tern/solid factories (createElement + spread)
+// Scene, built through the @tern-tui/solid factories (createElement + spread)
 // ---------------------------------------------------------------------------
 
 const box = Box({
@@ -99,7 +99,7 @@ const streamingNode = StreamingText();
 box.addChild(streamingNode);
 
 // Mount the scene through the solid renderer's universal `render()` (its
-// insert path funnels into @tern/core `Node.addChild`). The returned
+// insert path funnels into @tern-tui/core `Node.addChild`). The returned
 // disposer releases the solid root; for this static scene it is a no-op.
 const dispose = solidRender(() => box, renderer.root);
 renderer.render();

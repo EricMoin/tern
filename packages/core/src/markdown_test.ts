@@ -1,5 +1,5 @@
 /**
- * Unit tests for the @tern/core MarkdownView element.
+ * Unit tests for the @tern-tui/core MarkdownView element.
  *
  * Like the factory tests in `index_test.ts`, these exercise the declarative
  * composition surface without touching the native addon or a real terminal:

@@ -1,5 +1,5 @@
 {
-  "name": "@tern/core",
+  "name": "@tern-tui/core",
   "version": "0.1.0",
   "exports": "./src/index.ts",
   "tasks": {

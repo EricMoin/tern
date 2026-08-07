@@ -1,5 +1,5 @@
 {
-  "name": "@tern/solid",
+  "name": "@tern-tui/solid",
   "version": "0.1.0",
   "exports": "./src/index.ts",
   "imports": {

@@ -4,6 +4,7 @@
   "private": true,
   "description": "tern — a Rust-native TUI engine with React/Solid renderers (JS workspace)",
   "type": "module",
+  "private": true,
   "workspaces": [
     "packages/*",
     "src/bindings/tern-node"

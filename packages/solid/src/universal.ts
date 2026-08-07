@@ -1,5 +1,5 @@
 /**
- * Vendored solid-js universal renderer for @tern/solid.
+ * Vendored solid-js universal renderer for @tern-tui/solid.
  *
  * Faithful TypeScript port of `solid-js/universal`'s `createRenderer`
  * (node_modules/solid-js/universal/dist/universal.js, MIT — the logic and the

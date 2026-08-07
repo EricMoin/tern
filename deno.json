@@ -6,7 +6,7 @@
     "./packages/examples"
   ],
   "imports": {
-    "@tern/core": "./packages/core/src/index.ts"
+    "@tern-tui/core": "./packages/core/src/index.ts"
   },
   "lint": {
     "exclude": ["src/bindings/tern-node/index.js", "src/bindings/tern-node/index.d.ts"]

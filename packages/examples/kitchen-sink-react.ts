@@ -1,8 +1,8 @@
 /**
- * kitchen-sink-react — @tern/react kitchen-sink demo.
+ * kitchen-sink-react — @tern-tui/react kitchen-sink demo.
  *
  * Exercises the post-MVP widget surface in one scene, through the
- * `@tern/react` host components: `Panels` (with the mouse drag-resize
+ * `@tern-tui/react` host components: `Panels` (with the mouse drag-resize
  * helpers `startPanelDrag` / `dragPanels` / `endPanelDrag`), `ScrollView`
  * (clip/scroll region + track/thumb scrollbar, driven by `scrollTo`),
  * `StreamingText` auto-scroll (`syncStreamTail` pinning `scroll_y` to the
@@ -12,7 +12,7 @@
  * (`role` / `component` hints resolved onto plain node props).
  *
  * Every widget is asserted against its scene node after driving it (the
- * same assertion style as the @tern/core unit tests): a failing assertion
+ * same assertion style as the @tern-tui/core unit tests): a failing assertion
  * prints a `FAIL` line, tears the renderer down and exits 1 — so the PTY
  * smoke harness (`run-smoke.sh`) only sees exit 0 when every scene
  * assertion holds. The event loop then quits on 'q' (via `useInput` ->
@@ -20,7 +20,7 @@
  *
  * Runtime: Deno-first per the project preference. The demo prefers
  * `deno run --allow-all`; if Deno cannot load the native Node-API addon
- * (see @tern/core `loadAddon`), the demo re-runs itself under `node` and
+ * (see @tern-tui/core `loadAddon`), the demo re-runs itself under `node` and
  * reports the limitation clearly.
  */
 
@@ -37,7 +37,7 @@ import {
   SCROLLBAR_THUMB_CHAR,
   type MouseEventJs,
   type TernEventJs,
-} from "@tern/core";
+} from "@tern-tui/core";
 import {
   Box,
   DiffView,
@@ -81,7 +81,7 @@ import {
   type Node,
   type Renderer,
   type Span,
-} from "@tern/react";
+} from "@tern-tui/react";
 import process from "node:process";
 
 const isDeno = typeof Deno !== "undefined";
@@ -711,7 +711,7 @@ setProgress(progress!, 5, 10);
 // and a rust code fence. The fence highlights through tree-sitter when the
 // native addon is available (the smoke harness runs with it); without the
 // addon it falls back to the single fence style — both shapes are asserted
-// structurally, mirroring the @tern/core unit tests.
+// structurally, mirroring the @tern-tui/core unit tests.
 const markdownNode2 = renderer.root.children[2];
 assert(markdownNode2?.type === "markdown", "MarkdownView materializes as a scene-root sibling");
 assert(markdownNode2?.props.flex_direction === "column", "the markdown root is a flex column");

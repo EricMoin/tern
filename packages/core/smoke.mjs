@@ -1,4 +1,4 @@
-// @tern/core smoke test.
+// @tern-tui/core smoke test.
 //
 // Deno-first: the core binding loads the native addon through `node:module`
 // createRequire (Deno 2.x supports Node-API addons with --allow-all /
@@ -22,10 +22,10 @@ try {
   renderer = createRenderer({ exitOnCtrlC: true });
 } catch (err) {
   if (isDeno) {
-    console.error("[@tern/core smoke] Deno failed to load the Node-API addon:");
+    console.error("[@tern-tui/core smoke] Deno failed to load the Node-API addon:");
     console.error(err.message);
     console.error(
-      "[@tern/core smoke] Limitation: falling back to `node` for this smoke run " +
+      "[@tern-tui/core smoke] Limitation: falling back to `node` for this smoke run " +
         "(Deno native addon loading failed; see the error above).",
     );
     const { spawnSync } = await import("node:child_process");

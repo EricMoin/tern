@@ -1,9 +1,9 @@
 {
-  "name": "@tern/solid",
+  "name": "@tern-tui/solid",
   "version": "0.1.0",
   "private": false,
   "license": "MIT",
-  "description": "tern solid — SolidJS custom renderer for tern",
+  "description": "tern solid \u2014 SolidJS custom renderer for tern",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -33,7 +33,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@tern/core": "^0.1.0",
-    "solid-js": "^1.9.14"
+    "solid-js": "^1.9.14",
+    "@tern-tui/core": "^0.1.0"
   }
 }

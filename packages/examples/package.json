@@ -1,5 +1,5 @@
 {
-  "name": "@tern/examples",
+  "name": "@tern-tui/examples",
   "version": "0.1.0",
   "private": true,
   "license": "MIT",

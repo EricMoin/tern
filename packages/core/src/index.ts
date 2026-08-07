@@ -1,5 +1,5 @@
 /**
- * @tern/core — TypeScript bindings for the tern TUI engine.
+ * @tern-tui/core — TypeScript bindings for the tern TUI engine.
  *
  * This package wraps the `tern-node` napi addon (see `src/bindings/tern-node`)
  * behind a small declarative API:
@@ -12,8 +12,8 @@
  *   `Node.addChild`, which materializes it in the shared scene. Spans fed
  *   to a `streaming_text` node via `Node.appendSpan` while detached are
  *   flushed to the native handle on attach. A `streaming_text` node defaults
- *   to `autoScroll: true`: `syncStreamTail` (fed by the @tern/react /
- *   @tern/solid stream hosts after each span) pins `scroll_y` to the content
+ *   to `autoScroll: true`: `syncStreamTail` (fed by the @tern-tui/react /
+ *   @tern-tui/solid stream hosts after each span) pins `scroll_y` to the content
  *   tail vs the `clip_height` viewport, a manual scroll above the tail
  *   detaches, and `followTail` re-attaches.
  * - `Input` / `Spinner` / `StatusBar` / `Panels` / `DiffView` / `Select` /
@@ -56,8 +56,8 @@
  *   and `resolveTheme(theme, props)`. Resolution consumes semantic hints
  *   (`role` / `component`) from the props and stamps plain `fg` / `bg` /
  *   `border_style` onto them — the output is ordinary `NodeProps`, so no new
- *   napi surface is introduced (constitution). The `@tern/react` /
- *   `@tern/solid` hosts resolve automatically; raw `@tern/core` users call
+ *   napi surface is introduced (constitution). The `@tern-tui/react` /
+ *   `@tern-tui/solid` hosts resolve automatically; raw `@tern-tui/core` users call
  *   `resolveTheme` explicitly at element-creation time.
  * - `Renderer` owns the render/input loop: `render()` (synchronous, immediate
  *   paint), `requestFrame()` (coalesced paint on the next macrotask — several
@@ -103,9 +103,9 @@ export type {
   TernEventJs,
   TuiRenderer,
   TuiRendererOptions,
-} from "tern-node";
+} from "@tern-tui/node";
 
-export const name = "@tern/core";
+export const name = "@tern-tui/core";
 export const version = "0.1.0";
 
 import type {
@@ -118,7 +118,7 @@ import type {
   TernEventJs,
   TuiRenderer as NativeTuiRenderer,
   TuiRendererOptions,
-} from "tern-node";
+} from "@tern-tui/node";
 import { loadAddon } from "./addon.ts";
 
 /**
@@ -592,8 +592,8 @@ export function Box(props: NodeProps = {}, ...children: Node[]): Node {
  *
  * The `autoScroll` key is a component behavior flag (default `true`): the
  * node registers itself as following its content tail, and each appended
- * span (via {@link syncStreamTail}, which the @tern/react `<StreamingText>`
- * effect and the @tern/solid `subscribeStream` pump call) pins `scroll_y` to
+ * span (via {@link syncStreamTail}, which the @tern-tui/react `<StreamingText>`
+ * effect and the @tern-tui/solid `subscribeStream` pump call) pins `scroll_y` to
  * the tail offset — the node's `Node.contentSize()` height vs the clip
  * viewport (`clip_height`). A manual scroll above the tail (via
  * {@link scrollTo} / {@link scrollBy} / {@link scrollTop}) detaches the
@@ -4375,8 +4375,8 @@ export function MarkdownView(props: MarkdownViewProps): Node {
 //
 // A `streaming_text` node can pin its `scroll_y` to the content tail as the
 // stream grows: `autoScroll: true` (the default) registers the node as
-// following its tail, and `syncStreamTail` — called by the @tern/react
-// `<StreamingText>` effect and the @tern/solid `subscribeStream` pump after
+// following its tail, and `syncStreamTail` — called by the @tern-tui/react
+// `<StreamingText>` effect and the @tern-tui/solid `subscribeStream` pump after
 // each appended span — drives `scroll_y` to the tail offset: the node's
 // `Node.contentSize()` height vs its clip viewport (the `clip_height` scene
 // prop). A manual scroll above the tail (via `scrollTo` / `scrollBy` /
@@ -4404,8 +4404,8 @@ const streamScrollStates = new WeakMap<Node, StreamScrollState>();
 /**
  * @internal — register/override a streaming node's auto-scroll follow state.
  * Called by the host factories with the consumed `autoScroll` flag (the
- * `@tern/react` `<StreamingText>` syncs it from its own prop on mount/toggle;
- * the `@tern/solid` `StreamingText` factory passes its consumed flag).
+ * `@tern-tui/react` `<StreamingText>` syncs it from its own prop on mount/toggle;
+ * the `@tern-tui/solid` `StreamingText` factory passes its consumed flag).
  */
 export function setStreamAutoScroll(node: Node, enabled: boolean): void {
   const state = streamScrollStates.get(node);
@@ -4427,8 +4427,8 @@ export function isStreamFollowing(node: Node): boolean {
  * is following its tail, pin `scroll_y` to the tail offset — the content
  * height minus the clip viewport height (floored at 0). A no-op on nodes
  * that are not following, or not attached (the tail measures laid-out
- * geometry). Call after each `Node.appendSpan`; the @tern/react
- * `<StreamingText>` effect and the @tern/solid `subscribeStream` pump do
+ * geometry). Call after each `Node.appendSpan`; the @tern-tui/react
+ * `<StreamingText>` effect and the @tern-tui/solid `subscribeStream` pump do
  * exactly that.
  */
 export function syncStreamTail(node: Node): void {

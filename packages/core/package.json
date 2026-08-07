@@ -1,9 +1,9 @@
 {
-  "name": "@tern/core",
+  "name": "@tern-tui/core",
   "version": "0.1.0",
   "private": false,
   "license": "MIT",
-  "description": "tern core — TypeScript bindings for the tern TUI engine",
+  "description": "tern core \u2014 TypeScript bindings for the tern TUI engine",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -23,7 +23,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "tern-node": "0.1.0"
+    "@tern-tui/node": "0.1.0"
   },
   "scripts": {
     "check": "deno check src/index.ts",
