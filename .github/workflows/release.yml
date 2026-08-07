@@ -133,6 +133,13 @@ jobs:
           cache: npm
           cache-dependency-path: "**/package-lock.json"
 
+      # Trusted Publishing (OIDC) requires npm >= 11.5.1; Node 20 bundles
+      # npm 10, so upgrade the CLI. With a trusted publisher configured on
+      # each package, npm publish exchanges the Actions OIDC token for
+      # publish credentials — no NPM_TOKEN secret involved.
+      - name: Upgrade npm for Trusted Publishing
+        run: npm install -g npm@latest
+
       # tern-node is not a root workspace member, and its prepublishOnly
       # (`napi prepublish -t npm`) resolves the pinned @napi-rs/cli from
       # its own node_modules/.bin, so the addon package needs its own
@@ -167,8 +174,6 @@ jobs:
       - name: Publish tern-node
         working-directory: src/bindings/tern-node
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # Root install must come after tern-node is published: @tern-tui/core
       # depends on tern-node@0.1.0, which resolves from the registry only
@@ -189,15 +194,9 @@ jobs:
       # Publish in dependency order — core first, then react and solid.
       - name: Publish @tern-tui/core
         run: npm publish --access public -w @tern-tui/core
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @tern-tui/react
         run: npm publish --access public -w @tern-tui/react
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @tern-tui/solid
         run: npm publish --access public -w @tern-tui/solid
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
