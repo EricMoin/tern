@@ -188,6 +188,19 @@ export interface NodeProps {
   width?: number;
   height?: number;
   padding?: number;
+  padding_x?: number;
+  padding_y?: number;
+  padding_top?: number;
+  padding_right?: number;
+  padding_bottom?: number;
+  padding_left?: number;
+  margin?: number;
+  margin_x?: number;
+  margin_y?: number;
+  margin_top?: number;
+  margin_right?: number;
+  margin_bottom?: number;
+  margin_left?: number;
   flex_direction?: "row" | "column";
   // Style keys.
   fg?: string;
