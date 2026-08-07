@@ -72,6 +72,7 @@ import {
   focusPanel,
   framesEqual,
   isStreamFollowing,
+  measureText,
   mergeTheme,
   name,
   openModal,
@@ -99,6 +100,7 @@ import {
   visibleTableRows,
   wheelScroll,
   setProgress,
+  wrapLineWithOffsets,
 } from "./index.ts";
 import type {
   NodeProps,
@@ -2341,6 +2343,84 @@ Deno.test("Textarea with a width soft-wraps long lines into multiple leaves", ()
   const atStart = Textarea({ lines: ["hello world"], width: 5 });
   if (atStart.children[0]?.props.caret !== 0 || "caret" in (atStart.children[1]?.props ?? {})) {
     throw new Error(`default caret must ride the first line: ${JSON.stringify(atStart.children.map((c) => c.props))}`);
+  }
+});
+
+Deno.test("wrapLineWithOffsets wraps plain ASCII at the width with exact offsets", () => {
+  const wrapped = wrapLineWithOffsets("hello world", 5);
+  if (wrapped.length !== 2) throw new Error(`rows = ${wrapped.length}`);
+  if (wrapped[0]!.text !== "hello" || wrapped[0]!.start !== 0) {
+    throw new Error(`row 0 = ${JSON.stringify(wrapped[0])}`);
+  }
+  // The trailing space at the wrap point is dropped, so "world" starts at the
+  // code-unit index of 'w' (6), not after the dropped space.
+  if (wrapped[1]!.text !== "world" || wrapped[1]!.start !== 6) {
+    throw new Error(`row 1 = ${JSON.stringify(wrapped[1])}`);
+  }
+  // No wrap width: the whole line is one display row starting at 0.
+  const flat = wrapLineWithOffsets("hello world", null);
+  if (flat.length !== 1 || flat[0]!.text !== "hello world" || flat[0]!.start !== 0) {
+    throw new Error(`flat = ${JSON.stringify(flat)}`);
+  }
+});
+
+Deno.test("wrapLineWithOffsets wraps CJK wide chars by display columns", () => {
+  // コ is a 2-column char: 4 of them occupy 8 columns, wrapping at width 4
+  // into two rows of two glyphs (4 columns) each.
+  const wrapped = wrapLineWithOffsets("ココココ", 4);
+  if (wrapped.length !== 2) throw new Error(`rows = ${wrapped.length}`);
+  if (wrapped[0]!.text !== "ココ" || wrapped[0]!.start !== 0) {
+    throw new Error(`row 0 = ${JSON.stringify(wrapped[0])}`);
+  }
+  if (wrapped[1]!.text !== "ココ" || wrapped[1]!.start !== 2) {
+    throw new Error(`row 1 = ${JSON.stringify(wrapped[1])}`);
+  }
+  // Mixed ASCII + wide: "aコ" is 3 columns, so 'b' wraps to its own row.
+  const mixed = wrapLineWithOffsets("aコb", 3);
+  if (mixed.length !== 2) throw new Error(`mixed rows = ${mixed.length}`);
+  if (mixed[0]!.text !== "aコ" || mixed[0]!.start !== 0 || mixed[1]!.text !== "b" || mixed[1]!.start !== 2) {
+    throw new Error(`mixed = ${JSON.stringify(mixed)}`);
+  }
+});
+
+Deno.test("wrapLineWithOffsets hard-breaks a long unbroken token across rows", () => {
+  // 20 ASCII chars with no whitespace: the token is wider than the width and
+  // breaks every 5 columns into 4 rows.
+  const wrapped = wrapLineWithOffsets("supercalifragilistic", 5);
+  if (wrapped.length !== 4) throw new Error(`rows = ${wrapped.length}`);
+  const texts = wrapped.map((r) => r.text).join("|");
+  if (texts !== "super|calif|ragil|istic") throw new Error(`texts = ${texts}`);
+  if (wrapped[0]!.start !== 0 || wrapped[1]!.start !== 5 || wrapped[2]!.start !== 10 || wrapped[3]!.start !== 15) {
+    throw new Error(`starts = ${wrapped.map((r) => r.start).join(",")}`);
+  }
+});
+
+Deno.test("wrapLineWithOffsets and measureText treat the empty string as one empty row", () => {
+  const wrapped = wrapLineWithOffsets("", 5);
+  if (wrapped.length !== 1 || wrapped[0]!.text !== "" || wrapped[0]!.start !== 0) {
+    throw new Error(`wrapped = ${JSON.stringify(wrapped)}`);
+  }
+  const measured = measureText("", 5);
+  if (measured.rows !== 1 || measured.maxWidth !== 0) {
+    throw new Error(`measured = ${JSON.stringify(measured)}`);
+  }
+});
+
+Deno.test("measureText sums wrapped rows and reports the widest display line", () => {
+  // "hello world" wraps to 2 rows of 5; "ココココ" wraps to 2 rows of 4.
+  const measured = measureText("hello world\nココココ", 5);
+  if (measured.rows !== 4 || measured.maxWidth !== 5) {
+    throw new Error(`measured = ${JSON.stringify(measured)}`);
+  }
+  // Width <= 0 follows the "no width" convention: each logical line is one
+  // display row, and the widest display line is the widest logical line.
+  const nowrap = measureText("ab\ncde", 0);
+  if (nowrap.rows !== 2 || nowrap.maxWidth !== 3) {
+    throw new Error(`nowrap = ${JSON.stringify(nowrap)}`);
+  }
+  const negative = measureText("ab\ncde", -1);
+  if (negative.rows !== 2 || negative.maxWidth !== 3) {
+    throw new Error(`negative = ${JSON.stringify(negative)}`);
   }
 });
 
