@@ -57,17 +57,23 @@ export function setAddonForTesting(addon: TernAddon | null): void {
 }
 
 /**
- * Load the tern-node addon (cached). Tries the napi-generated loader first
- * (`index.js`), then falls back to requiring the platform `.node` directly.
+ * Load the tern-node addon (cached). Tries the npm package-name candidate
+ * first (`@tern-tui/node`, how the binding is published for npm-installed
+ * consumers), then the napi-generated loader (`index.js`), and finally
+ * falls back to requiring the platform `.node` directly.
  *
- * Throws with the combined loader errors when neither path resolves.
+ * Throws with the combined loader errors when no candidate resolves.
  */
 export function loadAddon(): TernAddon {
   if (cached !== null) return cached;
   const require = createRequire(import.meta.url);
   const errors: string[] = [];
   const candidates = [
-    // Package-name resolution first: `packages/core` declares `tern-node` as
+    // npm-installed consumers resolve the published binding package
+    // `@tern-tui/node`. In the workspace this name does not resolve and
+    // falls through to `tern-node` below.
+    "@tern-tui/node",
+    // Package-name resolution next: `packages/core` declares `tern-node` as
     // a dependency, so `createRequire` walks up to the workspace symlink at
     // the repo root (`node_modules/tern-node` -> `src/bindings/tern-node`).
     "tern-node",
