@@ -1006,16 +1006,19 @@ function textWidth(text: string): number {
 
 /**
  * Soft-wrap `line` into display lines of at most `width` columns plus the
- * code-unit index (within `line`) where each display line starts. The JS
- * mirror of the Rust `wrap_line` (token-aware greedy wrap): a whitespace-free
- * token that does not fit on the current display line wraps whole to the next
- * when it can fit there; a token wider than the width hard-breaks across
- * rows; a trailing space at a full display line is dropped (the wrap would
- * collapse it anyway); an embedded `\n` ends the display line. The offsets
- * are exact — a character dropped by the wrap belongs to no display line, so
- * caret navigation stays consistent with what is composed.
+ * code-unit index (within `line`) where each display line starts. This is
+ * the canonical pre-render measurement — the JS mirror of the Rust
+ * `wrap_line` (token-aware greedy wrap): a whitespace-free token that does
+ * not fit on the current display line wraps whole to the next when it can
+ * fit there; a token wider than the width hard-breaks across rows; a
+ * trailing space at a full display line is dropped (the wrap would collapse
+ * it anyway); an embedded `\n` ends the display line. The offsets are exact
+ * — a character dropped by the wrap belongs to no display line, so caret
+ * navigation stays consistent with what is composed. Downstream consumers
+ * count rows at a width through {@link measureText} — never a hand-written
+ * mirror — so the measurement cannot drift from what the compositor paints.
  */
-function wrapLineWithOffsets(
+export function wrapLineWithOffsets(
   line: string,
   width: number | null,
 ): Array<{ text: string; start: number }> {
@@ -1093,6 +1096,36 @@ function wrapLineWithOffsets(
  * width is set). */
 function wrapCount(line: string, width: number | null): number {
   return width === null ? 1 : wrapLineWithOffsets(line, width).length;
+}
+
+/**
+ * Pre-render measurement of `text` at wrap width `width`: how many display
+ * rows the text occupies and the widest display-line width in cells. The
+ * text is split on `\n` and each logical line is soft-wrapped through
+ * {@link wrapLineWithOffsets} — the canonical mirror of the Rust
+ * `wrap_line` — so the row count is exactly what the compositor would
+ * compose. A non-positive (or non-finite) `width` follows the file's "no
+ * width" convention (`textareaWidth` maps such widths to `null`): each
+ * logical line counts as one display row and the widest display line is the
+ * widest logical line. An empty string occupies exactly one empty display
+ * row (width 0).
+ */
+export function measureText(
+  text: string,
+  width: number,
+): { rows: number; maxWidth: number } {
+  const wrapWidth = Number.isFinite(width) && width > 0 ? width : null;
+  let rows = 0;
+  let maxWidth = 0;
+  for (const line of text.split("\n")) {
+    const wrapped = wrapLineWithOffsets(line, wrapWidth);
+    rows += wrapped.length;
+    for (const entry of wrapped) {
+      const entryWidth = textWidth(entry.text);
+      if (entryWidth > maxWidth) maxWidth = entryWidth;
+    }
+  }
+  return { rows, maxWidth };
 }
 
 /** The display row where logical line `row` begins. */
