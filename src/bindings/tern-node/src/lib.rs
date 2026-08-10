@@ -182,28 +182,144 @@ fn buffer_rows(buffer: &Buffer) -> Vec<String> {
         .collect()
 }
 
+/// The exposed style of a painted cell — the fields [`StyleRunJs`] carries:
+/// fg, bg, and the six surfaced modifiers. Two adjacent cells merge into one
+/// run exactly when their `RunStyle` keys are equal; border style and the
+/// unsurfaced blink/hidden modifiers do not split runs, so a box's border
+/// cells stay one run with its surrounding default-styled blanks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunStyle {
+    fg: Color,
+    bg: Color,
+    bold: bool,
+    dim: bool,
+    italic: bool,
+    underline: bool,
+    reversed: bool,
+    strikethrough: bool,
+}
+
+impl RunStyle {
+    /// The exposed style of a painted cell's [`Style`].
+    fn of(style: Style) -> Self {
+        Self {
+            fg: style.fg,
+            bg: style.bg,
+            bold: style.modifiers.contains(Modifiers::BOLD),
+            dim: style.modifiers.contains(Modifiers::DIM),
+            italic: style.modifiers.contains(Modifiers::ITALIC),
+            underline: style.modifiers.contains(Modifiers::UNDERLINE),
+            reversed: style.modifiers.contains(Modifiers::REVERSED),
+            strikethrough: style.modifiers.contains(Modifiers::STRIKETHROUGH),
+        }
+    }
+
+    /// Materialize a [`StyleRunJs`] carrying `text` in this style: colors as
+    /// strings, modifier keys present only when set.
+    fn to_run(self, text: String) -> StyleRunJs {
+        StyleRunJs {
+            text,
+            fg: color_to_string(self.fg),
+            bg: color_to_string(self.bg),
+            bold: self.bold.then_some(true),
+            dim: self.dim.then_some(true),
+            italic: self.italic.then_some(true),
+            underline: self.underline.then_some(true),
+            reversed: self.reversed.then_some(true),
+            strikethrough: self.strikethrough.then_some(true),
+        }
+    }
+}
+
+/// The JS-facing string form of a color: `"#rrggbb"` for truecolor,
+/// `"indexed:<n>"` for ANSI palette entries, `None` for the terminal default
+/// — the inverse of [`parse_color`].
+fn color_to_string(c: Color) -> Option<String> {
+    match c {
+        Color::Default => None,
+        Color::Rgb(r, g, b) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+        Color::Indexed(n) => Some(format!("indexed:{n}")),
+    }
+}
+
+/// Convert a painted buffer to one vector of styled runs per row: adjacent
+/// cells with identical exposed style (see [`RunStyle`]) merge into a single
+/// run. Masked continuation cells map to spaces exactly like [`buffer_rows`],
+/// so concatenating each row's run texts reconstructs the row string
+/// [`buffer_rows`] produces — the styled snapshot is the styled counterpart
+/// of the plain one, never a different text.
+fn buffer_runs(buffer: &Buffer) -> Vec<Vec<StyleRunJs>> {
+    (0..buffer.height)
+        .map(|y| {
+            let mut runs: Vec<(RunStyle, String)> = Vec::new();
+            for x in 0..buffer.width {
+                let cell = buffer.cell(x, y).expect("cell in bounds");
+                let text = if cell.is_masked() {
+                    " ".to_string()
+                } else {
+                    cell.symbol_str().into_owned()
+                };
+                let style = RunStyle::of(cell.style);
+                if let Some((last_style, last_text)) = runs.last_mut() {
+                    if *last_style == style {
+                        last_text.push_str(&text);
+                        continue;
+                    }
+                }
+                runs.push((style, text));
+            }
+            runs.into_iter()
+                .map(|(style, text)| style.to_run(text))
+                .collect()
+        })
+        .collect()
+}
+
 /// Paint `scene` at `viewport` through a fresh compositor with `selection`
 /// synced — the renderer's current selection overlay — and return the frame
-/// as one string per row. `Some((anchor, active))` applies the overlay (the
-/// compositor normalizes the endpoints); `None` paints without one (the
-/// default, so unselected snapshots are byte-identical to before the overlay
-/// existed). The overlay is style-only, so the returned rows carry the same
-/// text with or without it — the snapshot is where a styled consumer would
-/// observe the selection. Performs no terminal I/O; the pure snapshot both
-/// [`TuiRenderer::render_to_buffer`] and its unit tests use, so the tested
-/// path is the shipped path.
-fn paint_scene_rows_with_selection(
+/// buffer. `Some((anchor, active))` applies the overlay (the compositor
+/// normalizes the endpoints); `None` paints without one (the default, so
+/// unselected snapshots are byte-identical to before the overlay existed).
+/// Both snapshot conversions — [`buffer_rows`] (plain strings) and
+/// [`buffer_runs`] (styled runs) — feed from this single paint path, so the
+/// styled snapshot and the plain one always agree on what was painted.
+fn paint_scene_buffer(
     scene: &Scene,
     viewport: Size,
     selection: Option<((u16, u16), (u16, u16))>,
-) -> Vec<String> {
+) -> Buffer {
     let mut compositor = Compositor::new();
     match selection {
         Some((anchor, active)) => compositor.set_selection(anchor, active),
         None => compositor.clear_selection(),
     }
-    let buffer = compositor.paint_scene(scene, viewport);
-    buffer_rows(&buffer)
+    compositor.paint_scene(scene, viewport)
+}
+
+/// Paint `scene` at `viewport` with `selection` synced and return the frame
+/// as one string per row. The overlay is style-only, so the returned rows
+/// carry the same text with or without it — the snapshot is where a styled
+/// consumer would observe the selection. Performs no terminal I/O; the pure
+/// snapshot both [`TuiRenderer::render_to_buffer`] and its unit tests use,
+/// so the tested path is the shipped path.
+fn paint_scene_rows_with_selection(
+    scene: &Scene,
+    viewport: Size,
+    selection: Option<((u16, u16), (u16, u16))>,
+) -> Vec<String> {
+    buffer_rows(&paint_scene_buffer(scene, viewport, selection))
+}
+
+/// Paint `scene` at `viewport` with `selection` synced and return the frame
+/// as one vector of styled runs per row — the styled counterpart of
+/// [`paint_scene_rows_with_selection`], sharing its paint path and viewport
+/// semantics.
+fn paint_scene_runs_with_selection(
+    scene: &Scene,
+    viewport: Size,
+    selection: Option<((u16, u16), (u16, u16))>,
+) -> Vec<Vec<StyleRunJs>> {
+    buffer_runs(&paint_scene_buffer(scene, viewport, selection))
 }
 
 /// The laid-out content size of a scene node, in cells.
@@ -262,6 +378,38 @@ pub struct HighlightSpanJs {
     pub dim: bool,
     /// Whether the token is underlined.
     pub underline: bool,
+}
+
+/// One styled run in a [`TuiRenderer::render_to_buffer_styled`] snapshot row:
+/// the run's text plus the style keys its cells share. Adjacent cells with
+/// identical style merge into one run, so concatenating a row's run texts
+/// reconstructs the whole row (masked continuation cells as spaces, exactly
+/// like the plain [`TuiRenderer::render_to_buffer`]).
+///
+/// Colors surface as `"#rrggbb"` (truecolor) or `"indexed:<n>"` (ANSI
+/// palette) strings; every modifier key is present only when set, so an
+/// unstyled run carries just `text`.
+#[napi(object)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct StyleRunJs {
+    /// The run's text content.
+    pub text: String,
+    /// The foreground color, when the cells carry one.
+    pub fg: Option<String>,
+    /// The background color, when the cells carry one.
+    pub bg: Option<String>,
+    /// Whether the run is bold.
+    pub bold: Option<bool>,
+    /// Whether the run is dim.
+    pub dim: Option<bool>,
+    /// Whether the run is italic.
+    pub italic: Option<bool>,
+    /// Whether the run is underlined.
+    pub underline: Option<bool>,
+    /// Whether the run is reversed (fg/bg swapped).
+    pub reversed: Option<bool>,
+    /// Whether the run is struck through.
+    pub strikethrough: Option<bool>,
 }
 
 /// A key event surfaced to JS as a plain object: `{ name, char, ctrl, alt,
@@ -745,6 +893,49 @@ impl TuiRenderer {
         let rows = {
             let scene_guard = scene.lock().expect("scene poisoned");
             paint_scene_rows_with_selection(&scene_guard, viewport, selection)
+        };
+        Ok(rows)
+    }
+
+    /// Paint the shared scene into a fresh buffer at the given viewport —
+    /// `width`/`height` in cells, each defaulting to the most recent
+    /// [`render`](Self::render) terminal size — and return the frame as one
+    /// vector of styled runs per row. Each run is `{ text, fg?, bg?, bold?,
+    /// dim?, italic?, underline?, reversed?, strikethrough? }`; adjacent cells
+    /// with identical style merge into one run, and concatenating a row's run
+    /// texts reconstructs the [`render_to_buffer`](Self::render_to_buffer)
+    /// row string exactly (masked/continuation cells are spaces, multi-width
+    /// aware). Colors surface as `"#rrggbb"` (truecolor) or `"indexed:<n>"`
+    /// (palette) strings; modifier keys are present only when set. Shares
+    /// [`render_to_buffer`](Self::render_to_buffer)'s paint path and viewport
+    /// recording semantics (and its destroyed-renderer error); performs no
+    /// terminal I/O, so the result is a pure styled snapshot for JS-side
+    /// testing and golden comparisons.
+    #[napi(js_name = "render_to_buffer_styled")]
+    pub fn render_to_buffer_styled(
+        &self,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> Result<Vec<Vec<StyleRunJs>>> {
+        let mut inner = self.inner.lock().expect("renderer inner poisoned");
+        if inner.destroyed {
+            return Err(Error::from_reason("renderer is destroyed"));
+        }
+        let (vw, vh) = *shared_viewport_ref().lock().expect("viewport poisoned");
+        let w = width.map(|w| w as u16).unwrap_or(vw as u16);
+        let h = height.map(|h| h as u16).unwrap_or(vh as u16);
+        // Record the snapshot's viewport as the renderer's last painted
+        // viewport — identical to `render_to_buffer`, so a later `size()`
+        // reports the most recent render or snapshot viewport either way.
+        inner.last_painted_viewport = (w, h);
+        let viewport = Size::new(w, h);
+        let selection = inner
+            .selection
+            .map(|(x1, y1, x2, y2)| ((x1, y1), (x2, y2)));
+        let scene = inner.scene.clone();
+        let rows = {
+            let scene_guard = scene.lock().expect("scene poisoned");
+            paint_scene_runs_with_selection(&scene_guard, viewport, selection)
         };
         Ok(rows)
     }
@@ -2142,6 +2333,172 @@ mod tests {
 
         let rows = paint_scene_rows_with_selection(&scene, Size::new(6, 3), None);
         assert_eq!(rows, vec!["┌──┐  ", "│Hi│  ", "└──┘  "]);
+    }
+
+    #[test]
+    fn render_to_buffer_styled_snapshots_styled_scene_into_runs() {
+        // The styled counterpart of the golden `render_to_buffer` scene: the
+        // same rounded-border box, but the inner text is bold red. The frame
+        // is still
+        //   ┌──┐
+        //   │Hi│
+        //   └──┘
+        // and the runs merge adjacent same-style cells: the border and the
+        // trailing blanks share the default style, so row 0 and row 2 are
+        // single runs, while row 1 splits into border / bold-red "Hi" /
+        // border+blanks.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let box_id = scene
+            .add_child(
+                root,
+                NodeKind::Box,
+                Style::new().border_style(BorderStyle::Rounded),
+            )
+            .expect("add box");
+        scene.set_prop(box_id, "padding", PropValue::Int(1));
+        scene
+            .add_text(
+                box_id,
+                "Hi",
+                Style::new()
+                    .fg(_Color::Rgb(255, 0, 0))
+                    .add_modifier(Modifiers::BOLD),
+            )
+            .expect("add styled text");
+
+        let runs = paint_scene_runs_with_selection(&scene, Size::new(6, 3), None);
+        assert_eq!(
+            runs,
+            vec![
+                vec![plain_run("┌──┐  ")],
+                vec![plain_run("│"), bold_red_run("Hi"), plain_run("│  ")],
+                vec![plain_run("└──┘  ")],
+            ]
+        );
+    }
+
+    #[test]
+    fn render_to_buffer_styled_text_reconstructs_plain_rows() {
+        // The styled snapshot must never change the painted text:
+        // concatenating each row's run texts reproduces the
+        // `render_to_buffer` row string for the same scene, byte for byte —
+        // the two snapshot flavors share one paint path.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let box_id = scene
+            .add_child(
+                root,
+                NodeKind::Box,
+                Style::new().border_style(BorderStyle::Rounded),
+            )
+            .expect("add box");
+        scene.set_prop(box_id, "padding", PropValue::Int(1));
+        scene
+            .add_text(
+                box_id,
+                "Hi",
+                Style::new()
+                    .fg(_Color::Rgb(255, 0, 0))
+                    .add_modifier(Modifiers::BOLD),
+            )
+            .expect("add styled text");
+
+        let rows = paint_scene_rows_with_selection(&scene, Size::new(6, 3), None);
+        let runs = paint_scene_runs_with_selection(&scene, Size::new(6, 3), None);
+        let reconstructed: Vec<String> = runs
+            .iter()
+            .map(|row| row.iter().map(|run| run.text.as_str()).collect())
+            .collect();
+        assert_eq!(reconstructed, rows);
+    }
+
+    #[test]
+    fn render_to_buffer_styled_masks_and_merges_wide_char_cells() {
+        // A wide glyph's masked continuation cell maps to a space and merges
+        // into the lead cell's run — the mask carries the lead's style — so a
+        // styled コ followed by a default-styled `a` collapses into two runs:
+        // "コ " bold-red, then "a " default. Concatenating the run texts
+        // reconstructs the plain row.
+        let mut buffer = Buffer::new(4, 1);
+        buffer.set_string(
+            0,
+            0,
+            "コ",
+            Style::new()
+                .fg(_Color::Rgb(255, 0, 0))
+                .add_modifier(Modifiers::BOLD),
+        );
+        buffer.set_string(2, 0, "a", Style::new());
+        assert_eq!(
+            buffer_runs(&buffer),
+            vec![vec![bold_red_run("コ "), plain_run("a ")]]
+        );
+    }
+
+    #[test]
+    fn render_to_buffer_styled_errors_when_destroyed() {
+        // The napi method guards on the destroyed flag like `render_to_buffer`
+        // and `render`, so a torn-down renderer cannot snapshot.
+        let scene = Arc::new(Mutex::new(Scene::new()));
+        let inner = RendererInner {
+            backend: Box::new(Backend::new()),
+            compositor: Compositor::new(),
+            scene,
+            last: None,
+            last_painted_epoch: 0,
+            last_viewport: NO_VIEWPORT,
+            last_painted_viewport: NO_VIEWPORT,
+            selection: None,
+            last_painted_selection: None,
+            cached_size: None,
+            last_flush_bytes: 0,
+            #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
+            exit_on_ctrl_c: false,
+            use_alt_screen: false,
+            headless: false,
+            destroyed: true,
+            #[cfg(feature = "push-events")]
+            event_loop: None,
+        };
+        let renderer = TuiRenderer {
+            inner: Arc::new(Mutex::new(inner)),
+        };
+        let err = renderer
+            .render_to_buffer_styled(None, None)
+            .expect_err("destroyed renderer must error");
+        assert!(err.to_string().contains("destroyed"), "{err}");
+    }
+
+    /// A run carrying no style keys — `{ text }`.
+    fn plain_run(text: &str) -> StyleRunJs {
+        StyleRunJs {
+            text: text.to_string(),
+            fg: None,
+            bg: None,
+            bold: None,
+            dim: None,
+            italic: None,
+            underline: None,
+            reversed: None,
+            strikethrough: None,
+        }
+    }
+
+    /// A run carrying `fg: "#ff0000"` and `bold` — the style keys the styled
+    /// golden text uses.
+    fn bold_red_run(text: &str) -> StyleRunJs {
+        StyleRunJs {
+            text: text.to_string(),
+            fg: Some("#ff0000".to_string()),
+            bg: None,
+            bold: Some(true),
+            dim: None,
+            italic: None,
+            underline: None,
+            reversed: None,
+            strikethrough: None,
+        }
     }
 
     #[test]

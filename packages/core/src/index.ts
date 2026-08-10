@@ -100,6 +100,7 @@ export type {
   NodeHandle,
   RendererCapabilities,
   RendererSize,
+  StyleRunJs,
   TernEventJs,
   TuiRenderer,
   TuiRendererOptions,
@@ -115,6 +116,7 @@ import type {
   MouseEventJs,
   NodeHandle as NativeNodeHandle,
   RendererCapabilities,
+  StyleRunJs,
   TernEventJs,
   TuiRenderer as NativeTuiRenderer,
   TuiRendererOptions,
@@ -5915,6 +5917,29 @@ export class Renderer {
   }
 
   /**
+   * Paint the shared scene into a fresh buffer at the given viewport —
+   * `width`/`height` in cells, each defaulting to the most recent
+   * `render`'s terminal size — and return the frame as one array of
+   * styled runs per row. Each run is a {@link StyleRunJs} `{ text, fg?,
+   * bg?, bold?, dim?, italic?, underline?, reversed?, strikethrough? }`;
+   * adjacent cells with identical style merge into one run, so
+   * concatenating a row's run texts reconstructs the corresponding
+   * {@link snapshotFrame} row string exactly (masked/continuation cells
+   * are spaces, multi-width aware). Colors surface as `"#rrggbb"`
+   * (truecolor) or `"indexed:<n>"` (palette) strings; modifier keys are
+   * present only when set, so an unstyled run carries just `text`.
+   *
+   * The styled counterpart of {@link snapshotFrame}: shares its paint
+   * path and viewport-recording semantics (the `size` getter reports the
+   * viewport painted at after the call) and its destroyed-renderer error,
+   * and performs no terminal I/O — a pure styled snapshot for testing and
+   * golden comparisons (see {@link styledFramesEqual}).
+   */
+  snapshotStyled(width?: number, height?: number): StyleRunJs[][] {
+    return this.#native.render_to_buffer_styled(width, height);
+  }
+
+  /**
    * The scene node ids covering the cell at (`col`, `row`), innermost
    * (topmost) first, then each ancestor that also covers the cell. The scene
    * root is never reported; a cell no node covers yields `[]`. Z-order and
@@ -6028,5 +6053,43 @@ export function framesEqual(a: string[], b: string[]): boolean {
   for (let i = 0; i < a.length; i++) {
     if (a[i] !== b[i]) return false;
   }
+  return true;
+}
+
+/**
+ * Whether two styled snapshot frames (from {@link Renderer.snapshotStyled})
+ * are identical: the same number of rows, each row the same number of runs,
+ * and each run the same text and every style field. Style fields compare
+ * strictly — a run that explicitly sets a modifier or color differs from one
+ * that omits it — mirroring the binding's "modifier keys are present only
+ * when set" contract, so the comparison is the full equality contract for
+ * styled frames. The styled counterpart of {@link framesEqual}.
+ */
+export function styledFramesEqual(a: StyleRunJs[][], b: StyleRunJs[][]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const rowA = a[i]!;
+    const rowB = b[i]!;
+    if (rowA.length !== rowB.length) return false;
+    for (let j = 0; j < rowA.length; j++) {
+      if (!styledRunsEqual(rowA[j]!, rowB[j]!)) return false;
+    }
+  }
+  return true;
+}
+
+/** Whether two styled runs are identical: the same text and every style
+ * field. Field-wise strict comparison (`undefined` vs a set modifier or
+ * color differs), so a styled run is never equal to a plain one. */
+function styledRunsEqual(a: StyleRunJs, b: StyleRunJs): boolean {
+  if (a.text !== b.text) return false;
+  if (a.fg !== b.fg) return false;
+  if (a.bg !== b.bg) return false;
+  if (a.bold !== b.bold) return false;
+  if (a.dim !== b.dim) return false;
+  if (a.italic !== b.italic) return false;
+  if (a.underline !== b.underline) return false;
+  if (a.reversed !== b.reversed) return false;
+  if (a.strikethrough !== b.strikethrough) return false;
   return true;
 }

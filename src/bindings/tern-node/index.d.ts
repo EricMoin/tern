@@ -134,6 +134,23 @@ export declare class TuiRenderer {
    */
   render_to_buffer(width?: number | undefined | null, height?: number | undefined | null): Array<string>
   /**
+   * Paint the shared scene into a fresh buffer at the given viewport —
+   * `width`/`height` in cells, each defaulting to the most recent
+   * [`render`](Self::render) terminal size — and return the frame as one
+   * vector of styled runs per row. Each run is `{ text, fg?, bg?, bold?,
+   * dim?, italic?, underline?, reversed?, strikethrough? }`; adjacent cells
+   * with identical style merge into one run, and concatenating a row's run
+   * texts reconstructs the [`render_to_buffer`](Self::render_to_buffer)
+   * row string exactly (masked/continuation cells are spaces, multi-width
+   * aware). Colors surface as `"#rrggbb"` (truecolor) or `"indexed:<n>"`
+   * (palette) strings; modifier keys are present only when set. Shares
+   * [`render_to_buffer`](Self::render_to_buffer)'s paint path and viewport
+   * recording semantics (and its destroyed-renderer error); performs no
+   * terminal I/O, so the result is a pure styled snapshot for JS-side
+   * testing and golden comparisons.
+   */
+  render_to_buffer_styled(width?: number | undefined | null, height?: number | undefined | null): Array<Array<StyleRunJs>>
+  /**
    * Leave the alternate screen and raw mode and stop event listening,
    * restoring the terminal. Also stops the push event loop (with the
    * default `push-events` feature) so the loop thread exits. Safe to call
@@ -383,6 +400,38 @@ export interface SelectionRange {
   col2: number
   /** The row of the other endpoint (inclusive). */
   row2: number
+}
+
+/**
+ * One styled run in a [`TuiRenderer::render_to_buffer_styled`] snapshot row:
+ * the run's text plus the style keys its cells share. Adjacent cells with
+ * identical style merge into one run, so concatenating a row's run texts
+ * reconstructs the whole row (masked continuation cells as spaces, exactly
+ * like the plain [`TuiRenderer::render_to_buffer`]).
+ *
+ * Colors surface as `"#rrggbb"` (truecolor) or `"indexed:<n>"` (ANSI
+ * palette) strings; every modifier key is present only when set, so an
+ * unstyled run carries just `text`.
+ */
+export interface StyleRunJs {
+  /** The run's text content. */
+  text: string
+  /** The foreground color, when the cells carry one. */
+  fg?: string
+  /** The background color, when the cells carry one. */
+  bg?: string
+  /** Whether the run is bold. */
+  bold?: boolean
+  /** Whether the run is dim. */
+  dim?: boolean
+  /** Whether the run is italic. */
+  italic?: boolean
+  /** Whether the run is underlined. */
+  underline?: boolean
+  /** Whether the run is reversed (fg/bg swapped). */
+  reversed?: boolean
+  /** Whether the run is struck through. */
+  strikethrough?: boolean
 }
 
 /**
