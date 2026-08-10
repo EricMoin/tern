@@ -5,7 +5,9 @@
  * behind a small declarative API:
  *
  * - `createRenderer(options)` constructs a `Renderer` (a native `TuiRenderer`
- *   in raw mode + alternate screen) and exposes the scene root as a `Node`.
+ *   in raw mode + alternate screen — or, with `headless: true`, an
+ *   in-memory buffer at the configured `size`, see
+ *   {@link CreateRendererOptions}) and exposes the scene root as a `Node`.
  * - `Text(props)` / `Box(props, ...children)` / `StreamingText(props)` are
  *   factory functions returning `Node` objects. They are pure data (no native
  *   calls) until a node is attached under the scene root with
@@ -281,6 +283,29 @@ export interface CreateRendererOptions {
    * Maps to the native `title`.
    */
   title?: string;
+  /**
+   * When `true`, the renderer never touches a terminal: no raw mode, no
+   * alternate screen, no event listening, no title. The scene paints into
+   * an in-memory buffer of the configured `size` (default 80x24), so
+   * construction and rendering succeed without a TTY — plain `cargo test`,
+   * CI, snapshot tooling, anything with a fixed viewport. `snapshotFrame`
+   * and `snapshotStyled` work headlessly at the configured size (they are
+   * the natural output channel: there is no screen to paint), and
+   * `startEventStream()` errors — a headless renderer has no terminal to
+   * read events from, so there is no event loop to start (and `events`
+   * stays empty). Maps to the native `headless`. Default `false`.
+   */
+  headless?: boolean;
+  /**
+   * The virtual viewport in cells for `headless` mode, as `{ width,
+   * height }` (default `{ width: 80, height: 24 }`): the buffer
+   * `render()` / `snapshotFrame()` / `snapshotStyled()` paint at when no
+   * explicit viewport is given, and what the `size` getter reports. The
+   * terminal-less counterpart of a resize: nothing resizes a headless
+   * buffer, so the configured size is the one and only viewport. Ignored
+   * when `headless` is `false`. Maps to the native `width`/`height`.
+   */
+  size?: { width: number; height: number };
 }
 
 /**
@@ -5618,6 +5643,14 @@ class TernEventStream implements AsyncIterable<TernEventJs> {
  * terminal and stops the event stream. A destroyed renderer cannot render or
  * poll.
  *
+ * Constructed with `headless: true` (see {@link CreateRendererOptions}), a
+ * renderer never touches a terminal: no raw mode, no alternate screen, no
+ * event stream, no title. The scene paints into an in-memory buffer at the
+ * configured `size` (default 80x24), so `render()`, `snapshotFrame()` and
+ * `snapshotStyled()` work without a TTY — and `startEventStream()` errors,
+ * since a headless renderer has no terminal to read events from (and
+ * nothing to listen to).
+ *
  * Input delivery is push-based but **explicit**: `startEventStream()` begins
  * the native event loop (and with it the delivery of terminal events to
  * `events` and the `on*` handlers). Call it once the scene is ready — before
@@ -5653,6 +5686,11 @@ export class Renderer {
       use_alt_screen: options.useAltScreen ?? true,
     };
     if (options.title !== undefined) nativeOptions.title = options.title;
+    if (options.headless !== undefined) nativeOptions.headless = options.headless;
+    if (options.size !== undefined) {
+      nativeOptions.width = options.size.width;
+      nativeOptions.height = options.size.height;
+    }
     this.#native = new addon.TuiRenderer(nativeOptions);
     this.root = Node.wrapRoot(this.#native.root());
   }
@@ -5693,7 +5731,10 @@ export class Renderer {
    * recent `render()` or `snapshotFrame()` painted at (80×24 before any
    * paint). Before the first paint the native side reports the current
    * terminal size (one probe through its cached-size machinery), so a fresh
-   * renderer never surfaces the synthetic fallback. Equivalent to the
+   * renderer never surfaces the synthetic fallback — except a headless one
+   * (see {@link CreateRendererOptions}), which reports the configured
+   * virtual `size` from the start, there being no terminal to probe.
+   * Equivalent to the
    * `width`/`height` the native layer paints the next frame at — a resize
    * event's `{ width, height }` lands here once the next render paints at
    * it. Throws on a destroyed renderer.
@@ -5780,7 +5821,9 @@ export class Renderer {
    * the JS thread through a ThreadsafeFunction — following Node's error-first
    * callback convention, so the callback's first argument is always null —
    * feeding the `events` iterable and the `on*` handler sets. Idempotent; a
-   * no-op once started. A no-op on a destroyed renderer.
+   * no-op once started. A no-op on a destroyed renderer. Errors on a
+   * headless renderer (see {@link CreateRendererOptions}): there is no
+   * terminal to read events from, so the native binding rejects the call.
    */
   startEventStream(): void {
     if (this.#streamStarted || this.#destroyed) return;
@@ -6037,6 +6080,11 @@ export class Renderer {
  * }
  * renderer.destroy();
  * ```
+ *
+ * Pass `headless: true` (optionally with a `size`) to construct a renderer
+ * that never touches a terminal — no raw mode, no alternate screen, no event
+ * stream — painting into an in-memory buffer at the configured size instead
+ * (see {@link CreateRendererOptions} for the full semantics).
  */
 export function createRenderer(options: CreateRendererOptions = {}): Renderer {
   return new Renderer(options);

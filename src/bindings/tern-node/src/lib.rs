@@ -153,6 +153,62 @@ impl RenderBackend for Backend {
     }
 }
 
+/// An in-memory [`RenderBackend`] for headless renderers: `size()` reports
+/// the configured virtual size (default 80x24) and every terminal operation
+/// is a no-op. A [`TuiRenderer`] constructed with `headless: true` uses this
+/// so it never touches a real terminal — no raw mode, alternate screen, event
+/// listening, or title — which lets rendering and snapshots run under plain
+/// `cargo test`, in CI, and in snapshot tooling with no TTY present.
+struct HeadlessBackend {
+    size: (u16, u16),
+}
+
+impl HeadlessBackend {
+    fn new(width: u32, height: u32) -> Self {
+        // Clamp into the u16 cell range and floor at 1x1: a zero-sized
+        // virtual terminal would make every paint a degenerate viewport.
+        let w = width.clamp(1, u16::MAX as u32) as u16;
+        let h = height.clamp(1, u16::MAX as u32) as u16;
+        Self { size: (w, h) }
+    }
+}
+
+impl RenderBackend for HeadlessBackend {
+    fn size(&self) -> io::Result<(u16, u16)> {
+        Ok(self.size)
+    }
+
+    fn flush_diff(
+        &mut self,
+        _updates: &[CellUpdate],
+        _cursor_pos: (u16, u16),
+    ) -> io::Result<usize> {
+        // Headless frames are never flushed to a terminal; report 0 bytes so
+        // `last_flush_bytes` stays honest about the absent I/O.
+        Ok(0)
+    }
+
+    fn set_title(&self, _title: &str) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn set_clipboard(&self, _text: &str) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn disable_event_listening(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn exit_alt_screen(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn exit_raw_mode(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Convert a painted buffer to one string per row, mapping masked
 /// continuation cells (the zero-width right halves of wide glyphs) to spaces
 /// so every row has exactly `buffer.width` display columns. Multi-width
@@ -609,6 +665,22 @@ pub struct TuiRendererOptions {
     /// leaves the title untouched.
     #[napi(js_name = "title")]
     pub title: Option<String>,
+    /// When `true`, the renderer never touches a terminal: no raw mode, no
+    /// alternate screen, no event listening, no title. Rendering and
+    /// snapshots run against an in-memory buffer of the configured `width` x
+    /// `height` (default 80x24), so construction and rendering succeed
+    /// without a TTY (plain `cargo test`, CI, snapshot tooling). Default
+    /// `false`.
+    #[napi(js_name = "headless")]
+    pub headless: Option<bool>,
+    /// The virtual width in cells for `headless` mode (default 80). Ignored
+    /// when `headless` is `false`.
+    #[napi(js_name = "width")]
+    pub width: Option<u32>,
+    /// The virtual height in cells for `headless` mode (default 24). Ignored
+    /// when `headless` is `false`.
+    #[napi(js_name = "height")]
+    pub height: Option<u32>,
 }
 
 /// The terminal's color capabilities, detected by the backend.
@@ -682,6 +754,10 @@ struct RendererInner {
     /// Whether the alternate screen was entered: `false` renders inline in
     /// the main screen, so teardown must skip `exit_alt_screen` to match.
     use_alt_screen: bool,
+    /// Whether this is a headless renderer: it never entered raw mode, the
+    /// alternate screen, event listening, or a window title (its backend is
+    /// an in-memory no-op), so `destroy` must skip terminal teardown.
+    headless: bool,
     destroyed: bool,
     /// The background push event loop (`push-events` feature): stopped when
     /// the renderer is destroyed so the loop thread exits and releases the
@@ -703,20 +779,42 @@ impl TuiRenderer {
     pub fn new(options: TuiRendererOptions) -> Result<Self> {
         let use_alt_screen = options.use_alt_screen.unwrap_or(true);
         let title = options.title.clone();
-        let backend = Backend::new();
-        backend
-            .enter_raw_mode()
-            .map_err(|e| Error::from_reason(format!("enter raw mode: {e}")))?;
-        if let Err(e) = backend.startup(use_alt_screen, title.as_deref()) {
-            let _ = backend.exit_raw_mode();
-            if use_alt_screen {
-                let _ = backend.exit_alt_screen();
+        let headless = options.headless.unwrap_or(false);
+        // A headless renderer never touches a terminal: no raw mode, no
+        // alternate screen, no event listening, no title. Its in-memory
+        // backend reports the configured virtual size (default 80x24) and
+        // no-ops every terminal operation, so construction succeeds without a
+        // TTY. `use_alt_screen` is forced off so `destroy` skips the
+        // alternate-screen teardown to match (the no-op backend would swallow
+        // it either way).
+        let (backend, use_alt_screen) = if headless {
+            (
+                Box::new(HeadlessBackend::new(
+                    options.width.unwrap_or(80),
+                    options.height.unwrap_or(24),
+                )) as Box<dyn RenderBackend>,
+                false,
+            )
+        } else {
+            let backend = Backend::new();
+            backend
+                .enter_raw_mode()
+                .map_err(|e| Error::from_reason(format!("enter raw mode: {e}")))?;
+            if let Err(e) = backend.startup(use_alt_screen, title.as_deref()) {
+                let _ = backend.exit_raw_mode();
+                if use_alt_screen {
+                    let _ = backend.exit_alt_screen();
+                }
+                return Err(Error::from_reason(format!("enter alternate screen: {e}")));
             }
-            return Err(Error::from_reason(format!("enter alternate screen: {e}")));
-        }
+            (
+                Box::new(Backend::new()) as Box<dyn RenderBackend>,
+                use_alt_screen,
+            )
+        };
         Ok(Self {
             inner: Arc::new(Mutex::new(RendererInner {
-                backend: Box::new(Backend::new()),
+                backend,
                 compositor: Compositor::new(),
                 scene: shared_scene().clone(),
                 last: None,
@@ -730,6 +828,7 @@ impl TuiRenderer {
                 #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
         exit_on_ctrl_c: options.exit_on_ctrl_c.unwrap_or(false),
                 use_alt_screen,
+                headless,
                 destroyed: false,
                 #[cfg(feature = "push-events")]
                 event_loop: None,
@@ -954,11 +1053,16 @@ impl TuiRenderer {
         if let Some(event_loop) = &inner.event_loop {
             event_loop.stop();
         }
-        let _ = inner.backend.disable_event_listening();
-        if inner.use_alt_screen {
-            let _ = inner.backend.exit_alt_screen();
+        // A headless renderer never entered raw mode, the alternate screen,
+        // event listening, or a title — there is nothing to tear down (its
+        // in-memory backend would no-op these anyway).
+        if !inner.headless {
+            let _ = inner.backend.disable_event_listening();
+            if inner.use_alt_screen {
+                let _ = inner.backend.exit_alt_screen();
+            }
+            let _ = inner.backend.exit_raw_mode();
         }
-        let _ = inner.backend.exit_raw_mode();
         inner.destroyed = true;
         Ok(())
     }
@@ -1206,6 +1310,12 @@ impl TuiRenderer {
             if inner.destroyed {
                 return Err(Error::from_reason("renderer is destroyed"));
             }
+            if inner.headless {
+                // A headless renderer has no terminal to read events from.
+                return Err(Error::from_reason(
+                    "headless renderer does not support event streaming",
+                ));
+            }
             if inner.event_loop.is_some() {
                 return Err(Error::from_reason("event stream already started"));
             }
@@ -1268,6 +1378,12 @@ impl TuiRenderer {
         let mut inner = self.inner.lock().expect("renderer inner poisoned");
         if inner.destroyed {
             return Err(Error::from_reason("renderer is destroyed"));
+        }
+        if inner.headless {
+            // A headless renderer has no terminal to poll events from.
+            return Err(Error::from_reason(
+                "headless renderer does not support event polling",
+            ));
         }
         let events = event_module::poll_events(Duration::from_millis(timeout_ms as u64))
             .map_err(|e| Error::from_reason(format!("poll events: {e}")))?;
@@ -2559,6 +2675,7 @@ mod tests {
             #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
             exit_on_ctrl_c: false,
             use_alt_screen: false,
+            headless: false,
             destroyed: true,
             #[cfg(feature = "push-events")]
             event_loop: None,
@@ -3024,6 +3141,115 @@ mod tests {
         assert!(!is_ctrl_c(&TernEvent::FocusGained));
     }
 
+    /// A fresh headless renderer with default options (virtual 80x24),
+    /// constructed through the real [`TuiRenderer::new`] path so the tests
+    /// prove headless construction never touches a terminal.
+    fn headless_renderer() -> TuiRenderer {
+        TuiRenderer::new(TuiRendererOptions {
+            exit_on_ctrl_c: None,
+            use_alt_screen: None,
+            title: None,
+            headless: Some(true),
+            width: None,
+            height: None,
+        })
+        .expect("headless renderer constructs without a terminal")
+    }
+
+    #[test]
+    fn headless_renderer_constructs_without_a_terminal() {
+        // Construction with `headless: true` must not touch a real terminal
+        // (no raw mode, no alternate screen, no event listening, no title):
+        // it succeeds under plain `cargo test` with no TTY and reports the
+        // default 80x24 virtual size.
+        let renderer = headless_renderer();
+        assert!(!renderer.destroyed());
+        let size = renderer.size().expect("size works headlessly");
+        assert_eq!((size.width, size.height), (80, 24), "got: {size:?}");
+    }
+
+    #[test]
+    fn headless_renderer_renders_and_snapshots_without_a_terminal() {
+        // `render`, `render_to_buffer`, and `render_to_buffer_styled` all
+        // work against the in-memory backend: the frame paints at the
+        // virtual size and both snapshot flavors return one row per
+        // configured height cell, each row the configured width.
+        let renderer = headless_renderer();
+        renderer.render().expect("render works headlessly");
+        let rows = renderer
+            .render_to_buffer(None, None)
+            .expect("plain snapshot works headlessly");
+        assert_eq!(rows.len(), 24, "snapshot defaults to the virtual height");
+        assert!(
+            rows.iter().all(|row| row.len() == 80),
+            "snapshot rows must be the virtual width"
+        );
+        let runs = renderer
+            .render_to_buffer_styled(None, None)
+            .expect("styled snapshot works headlessly");
+        assert_eq!(
+            runs.len(),
+            24,
+            "styled snapshot defaults to the virtual height"
+        );
+    }
+
+    #[test]
+    fn headless_renderer_destroy_skips_teardown_and_is_idempotent() {
+        // `destroy` must not attempt terminal teardown (the in-memory
+        // backend no-ops it anyway), must be safe to call twice, and must
+        // leave the renderer unusable — exactly like a real renderer.
+        let renderer = headless_renderer();
+        renderer.destroy().expect("first destroy succeeds");
+        renderer.destroy().expect("second destroy is a no-op");
+        assert!(renderer.destroyed());
+        let err = renderer
+            .render()
+            .expect_err("a destroyed headless renderer must error");
+        assert!(err.to_string().contains("destroyed"), "{err}");
+        let err = renderer
+            .size()
+            .expect_err("size must error on a destroyed renderer");
+        assert!(err.to_string().contains("destroyed"), "{err}");
+    }
+
+    #[test]
+    fn headless_renderer_custom_size_is_reported_and_painted() {
+        // A custom virtual size (120x30) drives the size getter and the
+        // snapshot viewport with no TTY involved. The snapshot is painted at
+        // an explicit size first (recording `last_painted_viewport` without
+        // touching the shared scene viewport), then `size` reports the custom
+        // viewport — the suite's shared-viewport default of 80x24 is never
+        // mutated, keeping the parallel tests deterministic.
+        let renderer = TuiRenderer::new(TuiRendererOptions {
+            exit_on_ctrl_c: None,
+            use_alt_screen: None,
+            title: None,
+            headless: Some(true),
+            width: Some(120),
+            height: Some(30),
+        })
+        .expect("headless renderer with a custom size constructs");
+        let rows = renderer
+            .render_to_buffer(Some(120), Some(30))
+            .expect("custom-size snapshot works headlessly");
+        assert_eq!(rows.len(), 30, "snapshot height matches the custom size");
+        assert!(
+            rows.iter().all(|row| row.len() == 120),
+            "snapshot rows are the custom width"
+        );
+        let runs = renderer
+            .render_to_buffer_styled(Some(120), Some(30))
+            .expect("custom-size styled snapshot works headlessly");
+        assert_eq!(
+            runs.len(),
+            30,
+            "styled snapshot height matches the custom size"
+        );
+        let size = renderer.size().expect("size reports the custom viewport");
+        assert_eq!((size.width, size.height), (120, 30), "got: {size:?}");
+    }
+
     /// A backend that counts every terminal operation instead of performing
     /// it, so tests can assert exactly which renders touched the terminal.
     ///
@@ -3125,6 +3351,7 @@ mod tests {
             #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
             exit_on_ctrl_c: false,
             use_alt_screen: false,
+            headless: false,
             destroyed: false,
             #[cfg(feature = "push-events")]
             event_loop: None,
