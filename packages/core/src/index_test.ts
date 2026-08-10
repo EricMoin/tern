@@ -1228,6 +1228,61 @@ Deno.test("createRenderer defaults useAltScreen to true", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Headless mode (fake native addon — option forwarding)
+// ---------------------------------------------------------------------------
+
+Deno.test("createRenderer forwards headless and size to the native TuiRenderer, and the renderer works headlessly", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer({ headless: true, size: { width: 40, height: 10 } });
+    // The camelCase headless surface routes to the snake_case native
+    // constructor options: `headless` plus the virtual `width`/`height`
+    // viewport, alongside the documented defaults for the unset options.
+    // The fake records exactly what the real TuiRenderer constructor would
+    // receive (the headless option shape of the binding's index.d.ts).
+    if (JSON.stringify(lastRendererOptions) !== JSON.stringify({
+      exit_on_ctrl_c: false,
+      use_alt_screen: true,
+      headless: true,
+      width: 40,
+      height: 10,
+    })) {
+      throw new Error(`native options = ${JSON.stringify(lastRendererOptions)}`);
+    }
+    // A headless renderer is fully usable without a TTY: the scene paints
+    // into the virtual buffer and the snapshot paths return rows at the
+    // configured size — the lifecycle a snapshot tool exercises.
+    renderer.root.addChild(Text({ text: "headless" }));
+    renderer.render();
+    const frame = renderer.snapshotFrame(40, 10);
+    if (frame.length !== 10) {
+      throw new Error(`headless snapshotFrame rows = ${frame.length}`);
+    }
+    if (renderer.size.width !== 40 || renderer.size.height !== 10) {
+      throw new Error(`headless size = ${JSON.stringify(renderer.size)}`);
+    }
+    renderer.destroy();
+    if (!renderer.destroyed) throw new Error("headless renderer must report destroyed");
+  });
+});
+
+Deno.test("createRenderer omits headless and size when unset", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const options = lastRendererOptions as Record<string, unknown>;
+    // Unset headless stays unset (the native default is `false`, so there
+    // is nothing to say) — and the virtual viewport keys appear only when
+    // `size` is given, mirroring how `title` is omitted when unset.
+    if (options.headless !== undefined) {
+      throw new Error(`headless must be omitted when unset: ${JSON.stringify(options.headless)}`);
+    }
+    if ("width" in options || "height" in options) {
+      throw new Error("width/height must be omitted when size is unset");
+    }
+    renderer.destroy();
+  });
+});
+
 Deno.test("renderer capabilities getter routes to the native addon", () => {
   withFakeAddon(() => {
     const renderer = createRenderer();
