@@ -28,6 +28,7 @@ export type {
   HighlightSpanJs,
   KeyEvent,
   NodeHandle,
+  StyleRunJs,
   TuiRenderer,
   TuiRendererOptions,
 } from "@tern-tui/node";
@@ -47,10 +48,20 @@ const ADDON_PATH = "../../../src/bindings/tern-node/index.js";
 let cached: TernAddon | null = null;
 
 /**
- * @internal — test seam for `packages/core/src/index_test.ts`. Injects a fake
- * addon into the cache so `Renderer` dispatch can be exercised without the
- * native `.node` binding (Deno ESM exports are immutable, so the cached slot
- * is the seam). Pass `null` to reset back to lazy loading.
+ * The addon test seam: inject a fake `TernAddon` into the load cache so
+ * `Renderer` dispatch can be exercised without the native `.node` binding
+ * (Deno ESM exports are immutable, so the cached slot is the seam — the one
+ * place a fake can displace the real addon). Pass `null` to reset back to
+ * lazy loading.
+ *
+ * This is a supported public seam, not just an internal test helper: a
+ * consumer testing headlessly — snapshot tooling, CI, or a fake-addon suite
+ * that records or scripts the native surface — can inject a fake addon
+ * through this exported function and exercise the full JS layer without a
+ * TTY, a compiled `.node` binary, or exports-map indirection. Injecting
+ * through the cache keeps the runtime loading path (`loadAddon`) untouched:
+ * install a fake at the start of a test run, pass `null` to restore the
+ * real loader, and the shared cache stays consistent for everyone.
  */
 export function setAddonForTesting(addon: TernAddon | null): void {
   cached = addon;

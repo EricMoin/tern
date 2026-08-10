@@ -93,7 +93,8 @@
  * `--allow-ffi` (+ read access to the `.node` file). Node.js works unchanged.
  */
 
-export { loadAddon } from "./addon.ts";
+export { loadAddon, setAddonForTesting } from "./addon.ts";
+export type { TernAddon } from "./addon.ts";
 export type {
   ContentSize,
   HighlightSpanJs,
