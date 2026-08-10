@@ -1,7 +1,7 @@
 //! The compositor's 2D cell grid, plus multi-width-aware minimal diff and
 //! region-aware drawing (clip rects and scroll offsets).
 
-use crate::cell::{char_width, clusters, Cell, CellUpdate, Cluster};
+use crate::cell::{char_width, clusters, strip_escapes, Cell, CellUpdate, Cluster};
 use crate::color::Color;
 use crate::cursor::Cursor;
 use crate::rect::Rect;
@@ -252,9 +252,15 @@ impl Buffer {
     /// no cluster is ever truncated mid-glyph: a cluster that does not fit
     /// whole is dropped whole. Zero-width clusters (lone combining marks) are
     /// skipped.
+    ///
+    /// ANSI/OSC/CSI escape sequences are stripped at ingestion
+    /// ([`strip_escapes`](crate::cell::strip_escapes)): they occupy no
+    /// columns and never reach a [`Cell`] — an escape-carrying string writes
+    /// exactly the cells its stripped form writes.
     pub fn set_string(&mut self, x: u16, y: u16, text: &str, style: Style) {
+        let text = strip_escapes(text);
         let mut cx = x;
-        for cluster in clusters(text) {
+        for cluster in clusters(&text) {
             if cx >= self.width {
                 break;
             }
@@ -393,9 +399,14 @@ impl Buffer {
     /// no cluster is ever truncated mid-glyph: a cluster that does not fit
     /// whole is dropped whole. Zero-width clusters (lone combining marks) are
     /// skipped, as in [`set_string`](Self::set_string).
+    ///
+    /// ANSI/OSC/CSI escape sequences are stripped at ingestion
+    /// ([`strip_escapes`](crate::cell::strip_escapes)), exactly as in
+    /// [`set_string`](Self::set_string).
     pub fn set_string_region(&mut self, x: i32, y: i32, text: &str, style: Style, region: Region) {
+        let text = strip_escapes(text);
         let mut cx = x;
-        for cluster in clusters(text) {
+        for cluster in clusters(&text) {
             let w = cluster.width;
             if w == 0 {
                 continue;
@@ -741,6 +752,33 @@ mod tests {
         assert_eq!(lead.width, 2);
         assert_eq!(b.cell(1, 0).unwrap().width, 0);
         assert_eq!(b.cell(2, 0).unwrap().ch, 'a');
+    }
+
+    #[test]
+    fn set_string_strips_ansi_escapes_at_ingestion() {
+        // The cell-model golden contract: an escape-carrying string paints
+        // exactly the cells its stripped form paints — an escape occupies no
+        // columns and never reaches a Cell.
+        let mut plain = Buffer::new(3, 1);
+        plain.set_string(0, 0, "red", Style::new());
+        let mut colored = Buffer::new(3, 1);
+        colored.set_string(0, 0, "\x1b[31mred\x1b[0m", Style::new());
+        assert_eq!(plain.cells, colored.cells);
+
+        // A wide glyph with surrounding escapes still lands as lead + masked
+        // continuation at the same columns.
+        let mut wide = Buffer::new(2, 1);
+        wide.set_string(0, 0, "\x1b[1mコ\x1b[0m", Style::new());
+        assert_eq!(wide.cell(0, 0).map(|c| c.width), Some(2));
+        assert_eq!(wide.cell(1, 0).map(|c| c.width), Some(0));
+        assert!(wide.cell(1, 0).map(Cell::is_masked).unwrap_or(false));
+
+        // A combining sequence with surrounding escapes keeps its full symbol
+        // on a single cell.
+        let mut comb = Buffer::new(1, 1);
+        comb.set_string(0, 0, "\x1b[31me\u{301}\x1b[0m", Style::new());
+        assert_eq!(comb.cell(0, 0).map(|c| c.symbol.as_deref()), Some(Some("e\u{301}")));
+        assert_eq!(comb.cell(0, 0).map(|c| c.width), Some(1));
     }
 
     #[test]

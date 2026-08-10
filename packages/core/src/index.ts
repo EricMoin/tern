@@ -636,9 +636,134 @@ export function StreamingText(props: NodeProps = {}): Node {
 // ---------------------------------------------------------------------------
 
 /**
+ * The escape-stripped view of a string: the visible text and the code-unit
+ * map back to the original string.
+ */
+interface StrippedView {
+  /** The text with every escape sequence removed. */
+  text: string;
+  /** For each code-unit offset `s` in `0..=text.length`, the code-unit
+   * offset in the original string where stripped offset `s` begins
+   * (`orig[text.length]` is the original length). Strictly ascending. */
+  orig: number[];
+}
+
+/**
+ * Strip ANSI/OSC/CSI escape sequences from `value` — the "strip at
+ * ingestion" rule the entire measurement path shares with its tern-core
+ * mirror (`strip_escapes`, cell.rs), which documents the same contract.
+ * Escape sequences occupy no terminal columns and never enter the
+ * cluster/cell model, so measurement and painting agree by construction:
+ * stripping happens before grapheme segmentation — an escape's bytes would
+ * otherwise segment as their own clusters (ESC is a control boundary, and
+ * the printable CSI payload bytes like `[31m` are ordinary width-1
+ * characters), corrupting both width and text.
+ *
+ * The rule, byte-identical across both sides:
+ *
+ * - **CSI** — the introducer `ESC [` (0x1B 0x5B) or the C1 CSI single
+ *   character 0x9B, followed by any run of characters up to and including
+ *   the first **final byte** in 0x40–0x7E (a *tolerant* scan, not a strict
+ *   grammar: any character before the final byte is consumed as part of the
+ *   sequence, so malformed control data is removed rather than painted). A
+ *   sequence truncated at the end of the string (no final byte) strips to
+ *   the end of the string.
+ * - **OSC** — the introducer `ESC ]` (0x1B 0x5D), followed by any
+ *   characters up to and including the first terminator: BEL (0x07), ST as
+ *   `ESC \` (0x1B 0x5C), or the C1 ST single character 0x9C. A bare `ESC`
+ *   inside the body that is not followed by `\` is a body character, not a
+ *   terminator. A sequence truncated at the end of the string (no
+ *   terminator) strips to the end of the string.
+ *
+ * Everything else is kept as-is — including a lone `ESC` that introduces
+ * neither CSI nor OSC (it measures 1 in {@link charWidth}, like any other
+ * control character), and C1 bytes outside the rule such as the C1 OSC
+ * start 0x9D. `orig[s]` is the code-unit index in `value` where stripped
+ * offset `s` begins (`orig[text.length]` is `value.length`); every offset a
+ * consumer emits is translated through this map, so it stays exact and
+ * never points inside an escape.
+ */
+function stripEscapes(value: string): StrippedView {
+  const kept: string[] = [];
+  const orig: number[] = [];
+  const n = value.length;
+  let i = 0;
+  while (i < n) {
+    const code = value.charCodeAt(i);
+    const isEsc = code === 0x1b;
+    const next = i + 1 < n ? value.charCodeAt(i + 1) : -1;
+    // OSC: ESC ] — payload to the first terminator (BEL 0x07, the two-byte
+    // ST ESC \, or the C1 ST 0x9C), terminator consumed; a bare ESC not
+    // followed by `\` is a body character; a truncated OSC (no terminator
+    // before the end of the string) strips to the end.
+    if (isEsc && next === 0x5d) {
+      let j = i + 2;
+      while (j < n) {
+        const c = value.charCodeAt(j);
+        if (c === 0x07) {
+          j += 1; // BEL terminates
+          break;
+        }
+        if (c === 0x1b && j + 1 < n && value.charCodeAt(j + 1) === 0x5c) {
+          j += 2; // ST (ESC \) terminates
+          break;
+        }
+        if (c === 0x9c) {
+          j += 1; // C1 ST terminates
+          break;
+        }
+        j += 1;
+      }
+      i = j;
+      continue;
+    }
+    // CSI: ESC [ or the C1 CSI lead 0x9B — a tolerant scan up to and
+    // including the first final byte (0x40–0x7E); any character before it
+    // is part of the sequence. A truncated CSI (no final byte before the
+    // end of the string) strips to the end.
+    if ((isEsc && next === 0x5b) || code === 0x9b) {
+      let j = isEsc ? i + 2 : i + 1;
+      while (j < n) {
+        const c = value.charCodeAt(j);
+        if (c >= 0x40 && c <= 0x7e) {
+          j += 1; // the final byte — consumed
+          break;
+        }
+        j += 1;
+      }
+      i = j;
+      continue;
+    }
+    kept.push(value[i]!);
+    orig.push(i);
+    i += 1;
+  }
+  orig.push(n);
+  return { text: kept.join(""), orig };
+}
+
+/** The largest stripped offset `s` with `orig[s] <= index` — a binary search
+ * over the strictly ascending strip map (see {@link stripEscapes}). Every
+ * original index maps to the stripped offset whose original position is at
+ * or before it: `0` when `index` precedes every kept character. */
+function strippedIndexAt(orig: number[], index: number): number {
+  let lo = 0;
+  let hi = orig.length - 1; // orig[hi] is the original length
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (orig[mid]! <= index) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/**
  * The display width of a character in terminal columns, mirroring
  * tern-core's `char_width` (cell.rs:11): 0 for NUL and combining/zero-width
- * marks, 2 for wide (CJK / fullwidth) characters, 1 otherwise.
+ * marks, 2 for wide (CJK / fullwidth) characters, 1 otherwise. Escape
+ * sequences never reach this function — they are stripped at ingestion (see
+ * {@link stripEscapes}) — so a stray kept control byte (e.g. a lone `ESC`)
+ * measures 1, exactly like tern-core's fallback.
  */
 function charWidth(ch: string): number {
   const code = ch.codePointAt(0) ?? 0;
@@ -706,28 +831,39 @@ function graphemeSegmenter(): Intl.Segmenter | null {
 /**
  * The extended grapheme clusters of `value` (UAX #29), each with its
  * code-unit offset, its text, and its display width — the atom every edit in
- * this layer moves by. When `Intl.Segmenter` is unavailable the documented
- * fallback splits on code points (surrogate pairs stay whole), so combining
- * sequences and ZWJ emoji degrade to per-code-point steps instead of
- * mid-cluster corruption.
+ * this layer moves by. Escape sequences (ANSI/OSC/CSI, see
+ * {@link stripEscapes}) are stripped at ingestion: they consume zero cells
+ * and emit no run, so every cluster `start` is a code-unit index into the
+ * ORIGINAL `value` (translated through the strip map) and never points
+ * inside an escape — a caret's display column lands on the visible character
+ * after one. When `Intl.Segmenter` is unavailable the documented fallback
+ * splits on code points (surrogate pairs stay whole), so combining sequences
+ * and ZWJ emoji degrade to per-code-point steps instead of mid-cluster
+ * corruption.
  */
 function clusterRuns(value: string): ClusterRun[] {
+  const { text, orig } = stripEscapes(value);
   const runs: ClusterRun[] = [];
   const segmenter = graphemeSegmenter();
   if (segmenter !== null) {
     let start = 0;
-    for (const seg of segmenter.segment(value)) {
-      const text = seg.segment;
-      runs.push({ start, len: text.length, width: clusterWidth(text), text });
-      start += text.length;
+    for (const seg of segmenter.segment(text)) {
+      const segText = seg.segment;
+      runs.push({
+        start: orig[start]!,
+        len: segText.length,
+        width: clusterWidth(segText),
+        text: segText,
+      });
+      start += segText.length;
     }
     return runs;
   }
   // Fallback: iterate code points (`for...of` over a string yields one code
   // point per iteration, keeping surrogate pairs whole).
   let start = 0;
-  for (const ch of value) {
-    runs.push({ start, len: ch.length, width: charWidth(ch), text: ch });
+  for (const ch of text) {
+    runs.push({ start: orig[start]!, len: ch.length, width: charWidth(ch), text: ch });
     start += ch.length;
   }
   return runs;
@@ -753,9 +889,12 @@ function clusterWidth(cluster: string): number {
  * translate the caret's display column — the value the compositor paints —
  * into a string index for editing. `column` always lands on a cluster
  * boundary: a column inside a wide cluster snaps to that cluster's start.
+ * Escape sequences are skipped (they emit no run), so the returned index is
+ * the original position of the visible character — a caret at column 0 of a
+ * colored line rests before its first visible character, never inside the
+ * leading escape.
  */
 function columnToIndex(value: string, column: number): number {
-  if (column <= 0) return 0;
   let col = 0;
   for (const run of clusterRuns(value)) {
     if (col + run.width > column) return run.start;
@@ -1010,7 +1149,10 @@ function textareaHeight(props: TextareaProps): number | null {
 }
 
 /** The total display width of a string in terminal columns — the sum of its
- * grapheme clusters' widths (a ZWJ emoji counts 2, never per code point). */
+ * grapheme clusters' widths (a ZWJ emoji counts 2, never per code point).
+ * Escape sequences consume zero cells (stripped at ingestion by
+ * {@link clusterRuns}), so a colored string measures exactly as its plain
+ * text. */
 function textWidth(text: string): number {
   let width = 0;
   for (const run of clusterRuns(text)) width += run.width;
@@ -1025,8 +1167,15 @@ function textWidth(text: string): number {
  * not fit on the current display line wraps whole to the next when it can
  * fit there; a token wider than the width hard-breaks across rows; a
  * trailing space at a full display line is dropped (the wrap would collapse
- * it anyway); an embedded `\n` ends the display line. The offsets are exact
- * — a character dropped by the wrap belongs to no display line, so caret
+ * it anyway); an embedded `\n` ends the display line. Escape sequences
+ * (ANSI/OSC/CSI, see {@link stripEscapes}) are stripped at ingestion before
+ * wrapping, so they consume zero cells, never break a token, and never
+ * appear in a row's `text`. The returned `start` offsets are code-unit
+ * indices into the ORIGINAL `line`, translated through the strip map: a row
+ * starts at its first visible character's original index, so offsets are
+ * exact and never land inside an escape — a stripped escape belongs to no
+ * display line, so its bytes sit in the trailing row's original span. A
+ * character dropped by the wrap belongs to no display line, so caret
  * navigation stays consistent with what is composed. Downstream consumers
  * count rows at a width through {@link measureText} — never a hand-written
  * mirror — so the measurement cannot drift from what the compositor paints.
@@ -1035,8 +1184,12 @@ export function wrapLineWithOffsets(
   line: string,
   width: number | null,
 ): Array<{ text: string; start: number }> {
-  if (width === null) return [{ text: line, start: 0 }];
+  if (width === null) {
+    const stripped = stripEscapes(line);
+    return [{ text: stripped.text, start: stripped.orig[0]! }];
+  }
   const limit = Math.max(1, Math.floor(width));
+  const { text, orig } = stripEscapes(line);
   const rows: Array<{ text: string; start: number }> = [];
   let row = "";
   let rowWidth = 0;
@@ -1049,12 +1202,14 @@ export function wrapLineWithOffsets(
     if (token === "") return;
     const tokenWidth = textWidth(token);
     if (row !== "" && rowWidth + tokenWidth > limit && tokenWidth <= limit) {
-      rows.push({ text: row, start: rowStart });
+      rows.push({ text: row, start: orig[rowStart]! });
       row = "";
       rowWidth = 0;
       rowStart = tokenStart;
     }
-    // The code-unit index (within `line`) of the current token cluster.
+    // The code-unit index (within the stripped `text`) of the current token
+    // cluster; every pushed `start` is translated to the original line
+    // through `orig`.
     let cur = tokenStart;
     for (const run of clusterRuns(token)) {
       const w = run.width;
@@ -1063,7 +1218,7 @@ export function wrapLineWithOffsets(
         continue;
       }
       if (rowWidth + w > limit) {
-        rows.push({ text: row, start: rowStart });
+        rows.push({ text: row, start: orig[rowStart]! });
         row = "";
         rowWidth = 0;
         if (w > limit) {
@@ -1080,10 +1235,10 @@ export function wrapLineWithOffsets(
     token = "";
   };
 
-  for (const ch of line) {
+  for (const ch of text) {
     if (ch === "\n") {
       flushToken();
-      rows.push({ text: row, start: rowStart });
+      rows.push({ text: row, start: orig[rowStart]! });
       row = "";
       rowWidth = 0;
       rowStart = idx + 1;
@@ -1100,7 +1255,7 @@ export function wrapLineWithOffsets(
     idx += ch.length;
   }
   flushToken();
-  rows.push({ text: row, start: rowStart });
+  rows.push({ text: row, start: orig[rowStart]! });
   if (rows.length === 0) rows.push({ text: "", start: 0 });
   return rows;
 }
@@ -1117,7 +1272,9 @@ function wrapCount(line: string, width: number | null): number {
  * text is split on `\n` and each logical line is soft-wrapped through
  * {@link wrapLineWithOffsets} — the canonical mirror of the Rust
  * `wrap_line` — so the row count is exactly what the compositor would
- * compose. A non-positive (or non-finite) `width` follows the file's "no
+ * compose. Escape sequences consume zero cells (stripped at ingestion, see
+ * {@link stripEscapes}), so a colored line measures exactly as its plain
+ * text. A non-positive (or non-finite) `width` follows the file's "no
  * width" convention (`textareaWidth` maps such widths to `null`): each
  * logical line counts as one display row and the widest display line is the
  * widest logical line. An empty string occupies exactly one empty display
@@ -1155,11 +1312,16 @@ function totalDisplayRows(lines: string[], width: number | null): number {
 
 /** The display-line offset (within `line`'s wrapped lines) that contains the
  * char index `col`. A char dropped by the wrap maps to the display line it
- * trails. */
+ * trails — and so does an escape-stripped sequence, whose bytes sit inside
+ * the trailing row's original span. The check needs no strip map: the rows'
+ * original `start`s tile `line` (each row spans `start[i]..start[i+1)`, the
+ * last reaching `line.length`), so `col` trails row `i` exactly while it is
+ * before row `i+1`'s start. */
 function offsetOfCol(line: string, col: number, width: number | null): number {
   const wrapped = wrapLineWithOffsets(line, width);
   for (let i = 0; i < wrapped.length; i++) {
-    if (col <= wrapped[i]!.start + wrapped[i]!.text.length) return i;
+    const end = i + 1 < wrapped.length ? wrapped[i + 1]!.start : line.length;
+    if (col < end) return i;
   }
   return wrapped.length - 1;
 }
@@ -1175,7 +1337,10 @@ function caretDisplayRow(
 }
 
 /** The display column of `col` within display-line `offset` of `line`, and
- * the code-unit index where that display line starts. */
+ * the code-unit index where that display line starts. `col` (an original
+ * index) is translated through the strip map first, so a caret resting on —
+ * or inside — an escape measures against the visible text only: an escape
+ * interior trails its content, exactly like a char dropped by the wrap. */
 function caretDisplayIn(
   line: string,
   col: number,
@@ -1184,7 +1349,9 @@ function caretDisplayIn(
 ): { col: number; start: number } {
   const wrapped = wrapLineWithOffsets(line, width);
   const entry = wrapped[Math.min(offset, wrapped.length - 1)] ?? { text: "", start: 0 };
-  const local = Math.max(0, Math.min(col - entry.start, entry.text.length));
+  const { orig } = stripEscapes(line);
+  const base = strippedIndexAt(orig, entry.start);
+  const local = Math.max(0, Math.min(strippedIndexAt(orig, col) - base, entry.text.length));
   return { col: indexToColumn(entry.text, local), start: entry.start };
 }
 
@@ -1217,7 +1384,9 @@ function logicalAtDisplayRow(
 
 /** The char (code-unit) index into `line` at display column `targetCol`
  * within display-line `offset` (clamped to the display line's end; a column
- * inside a wide glyph snaps to that glyph's start). */
+ * inside a wide glyph snaps to that glyph's start). The cluster boundary is
+ * translated back through the strip map, so the returned index is the
+ * original position of the visible character — never inside an escape. */
 function charAtDisplayCol(
   line: string,
   offset: number,
@@ -1226,7 +1395,10 @@ function charAtDisplayCol(
 ): number {
   const wrapped = wrapLineWithOffsets(line, width);
   const entry = wrapped[Math.min(offset, wrapped.length - 1)] ?? { text: "", start: 0 };
-  return entry.start + columnToIndex(entry.text, targetCol);
+  const { orig } = stripEscapes(line);
+  const base = strippedIndexAt(orig, entry.start);
+  const local = columnToIndex(entry.text, targetCol);
+  return orig[base + local]!;
 }
 
 /** The scroll offset that keeps the caret's display row inside the visible
