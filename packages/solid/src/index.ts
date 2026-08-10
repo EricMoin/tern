@@ -58,7 +58,11 @@
  * `subscribeResize` wires
  * a renderer's terminal resize events to a handler, re-invoking
  * `renderer.render()` after each so the compositor re-lays out at the new
- * terminal size (the Solid-flavored `useResize` equivalent). `subscribeFocus`
+ * terminal size (the Solid-flavored `useResize` equivalent).
+ * `createTerminalDimensions` returns a reactive
+ * `{ width, height }` accessor — seeded from `renderer.size` at creation,
+ * updated on every resize — the Solid-flavored `useTerminalDimensions`
+ * equivalent. `subscribeFocus`
  * wires a renderer's terminal focus events (`{ focus_gained }`) to a handler,
  * and `subscribeFocusTraversal` wires a renderer's Tab / Shift+Tab keys to
  * the focus manager's `next()` / `prev()` traversal, skipping an exclude list
@@ -78,6 +82,8 @@ import {
   type Renderer as UniversalRenderer,
   type RendererOptions,
 } from "./universal.ts";
+// @deno-types="../../../node_modules/solid-js/types/index.d.ts"
+import { createSignal } from "solid-js";
 import {
   Box as TernBox,
   DiffView as TernDiffView,
@@ -1136,6 +1142,35 @@ export function subscribeResize(
     // layout reflects the new width/height.
     renderer.render();
   });
+}
+
+/**
+ * Create a reactive terminal dimensions accessor — the Solid-flavored
+ * `@tern-tui/react` `useTerminalDimensions` equivalent. Solid has no
+ * React-style context, so the renderer is an explicit argument (the React
+ * hook reads it from the tree context instead).
+ *
+ * The accessor's initial value is read from `renderer.size` at creation;
+ * every terminal resize event (via {@link subscribeResize}) replaces it with
+ * the event's `{ width, height }` payload, so consumers reading the accessor
+ * inside JSX re-render with the new size automatically — layout props
+ * (widths, clip regions, wrap widths, table column widths) can be derived
+ * from it without wiring a resize handler by hand. `subscribeResize` also
+ * re-invokes `renderer.render()` after each event so the compositor re-lays
+ * out the scene at the new terminal size.
+ *
+ * Returns `{ size, dispose }`: `size` is the accessor, `dispose`
+ * unsubscribes. The subscription persists until disposed — call
+ * `createTerminalDimensions` with a lifetime matching the component or root
+ * that owns the dimensions (e.g. inside a `createRoot`-managed effect, or
+ * dispose it in the owner's cleanup).
+ */
+export function createTerminalDimensions(
+  renderer: Renderer,
+): { size: () => { width: number; height: number }; dispose: () => void } {
+  const [size, setSize] = createSignal<{ width: number; height: number }>(renderer.size);
+  const dispose = subscribeResize(renderer, (event) => setSize(event));
+  return { size, dispose };
 }
 
 // ---------------------------------------------------------------------------
