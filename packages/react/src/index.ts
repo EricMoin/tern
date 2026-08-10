@@ -48,6 +48,10 @@
  *   `useResize(handler)` subscribes to terminal resize events, re-invoking
  *   `renderer.render()` after each so the compositor re-lays out at the new
  *   terminal size.
+ *   `useTerminalDimensions()` returns the terminal's current
+ *   `{ width, height }` as reactive state — seeded from `renderer.size` at
+ *   mount, updated on every resize — the re-render counterpart to
+ *   `useResize`.
  *   `useWheelScroll(viewRef)` maps wheel events onto a scrollable view's
  *   offsets; `useSelection()` wires mouse-drag text selection onto the
  *   renderer's native selection overlay (the core
@@ -64,6 +68,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
   type Context,
   type ReactElement,
   type ReactNode,
@@ -1192,6 +1197,42 @@ export function useResize(handler: ResizeHandler): void {
       renderer.render();
     });
   }, [renderer]);
+}
+
+/**
+ * Read the terminal's current dimensions as reactive state. Returns
+ * `{ width, height }` seeded from `renderer.size` when the component mounts,
+ * then updated on every terminal resize — the component re-renders with the
+ * new size each time, so layout props (widths, clip regions, wrap widths,
+ * table column widths) can be derived directly from the returned value
+ * without a hand-wired `useResize` handler that re-renders by hand.
+ *
+ * The subscription listens on the renderer's resize channel (the same
+ * channel `useResize` subscribes to) and updates local state from each
+ * event's `{ width, height }` payload; after the update `renderer.render()`
+ * is re-invoked so the compositor re-lays out the scene at the new terminal
+ * size (the state update's own commit repaints as well — the extra paint is
+ * idempotent, and guarantees the compositor re-lays out even when the
+ * consuming component's rendered output does not change). Returns the live
+ * `{ width, height }` object; the subscription is torn down when the
+ * component unmounts.
+ */
+export function useTerminalDimensions(): { width: number; height: number } {
+  const { renderer } = useApp();
+  // The initial value is read lazily at mount: whatever the renderer reports
+  // before the tree's first paint.
+  const [size, setSize] = useState<{ width: number; height: number }>(() => renderer.size);
+
+  useEffect(() => {
+    return renderer.onResize((event) => {
+      setSize(event);
+      // The compositor sizes the scene from the terminal; re-paint so the
+      // layout reflects the new width/height.
+      renderer.render();
+    });
+  }, [renderer]);
+
+  return size;
 }
 
 // ---------------------------------------------------------------------------
