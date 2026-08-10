@@ -1,6 +1,6 @@
 {
   "name": "@tern-tui/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "license": "MIT",
   "description": "tern core \u2014 TypeScript bindings for the tern TUI engine",
@@ -23,7 +23,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@tern-tui/node": "0.1.0"
+    "@tern-tui/node": "0.2.0"
   },
   "scripts": {
     "check": "deno check src/index.ts",
