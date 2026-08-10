@@ -33,7 +33,7 @@
 //! Scope lock (subtask 3): the edit model only — insert/delete/navigation/
 //! split. No clipboard, IME composition, or selection.
 
-use tern_core::char_width;
+use tern_core::{char_width, strip_escapes};
 use tern_core::scene::{NodeId, PropValue, Scene};
 use tern_core::style::Style;
 
@@ -603,6 +603,10 @@ impl From<Textarea> for Renderable {
 /// would collapse it anyway), and an embedded `\n` ends the display line
 /// (defensive — textarea lines normally carry none). A wide glyph is never
 /// split.
+///
+/// ANSI/OSC/CSI escape sequences are invisible to the wrap
+/// ([`strip_escapes`]): they occupy no columns and never appear in a display
+/// line, so an escape-carrying line wraps identically to its stripped form.
 pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
     wrap_line_with_offsets(line, width)
         .into_iter()
@@ -615,8 +619,15 @@ pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
 /// trailing space at a full row) belongs to no display line, so a display
 /// line's start is its real position in the logical line, which keeps caret
 /// row/col navigation consistent with what is painted.
+///
+/// Escape sequences are stripped first ([`strip_escapes`]): they occupy no
+/// columns, never appear in a display line, and are skipped when offsets are
+/// counted — the offsets index the escape-free line, so an escape-carrying
+/// `line` yields exactly the rows and offsets of its stripped form (for
+/// escape-free input they are the input's own indices, unchanged).
 fn wrap_line_with_offsets(line: &str, width: usize) -> Vec<(String, usize)> {
     let width = width.max(1);
+    let line = strip_escapes(line);
     let mut rows: Vec<(String, usize)> = Vec::new();
     let mut row = String::new();
     let mut row_width = 0usize;
@@ -759,6 +770,29 @@ mod tests {
         // A wide glyph is never split mid-glyph (it rides the row when it
         // fits; the trailing 'b' wraps whole).
         assert_eq!(wrap_line("aコb", 3), vec!["aコ", "b"]);
+    }
+
+    #[test]
+    fn wrap_line_strips_ansi_escapes() {
+        // The golden contract: an escape-carrying line wraps identically to
+        // its stripped form — escapes occupy no columns and never appear in a
+        // display line.
+        assert_eq!(wrap_line("\x1b[31mred\x1b[0m", 5), wrap_line("red", 5));
+        assert_eq!(wrap_line("\x1b[31mred\x1b[0m", 5), vec!["red"]);
+        // A colored token wider than the width hard-breaks on visible glyphs.
+        assert_eq!(wrap_line("\x1b[31mabcdef\x1b[0m", 3), vec!["abc", "def"]);
+        // A colored wide CJK glyph keeps its 2-column width; the wrap never
+        // splits it (the trailing 'b' wraps whole, as for plain text).
+        assert_eq!(wrap_line("\x1b[31maコ\x1b[0m", 3), vec!["aコ"]);
+        assert_eq!(wrap_line("\x1b[31maコb\x1b[0m", 3), wrap_line("aコb", 3));
+        // NUL / combining-mark behavior is unchanged by surrounding escapes
+        // (the wrap treats a zero-width mark exactly as before).
+        assert_eq!(wrap_line("\x1b[31me\u{301}\x1b[0m", 5), wrap_line("e\u{301}", 5));
+        // Offsets are exact within the escape-free line.
+        assert_eq!(
+            wrap_line_with_offsets("\x1b[31mhello world\x1b[0m", 5),
+            wrap_line_with_offsets("hello world", 5),
+        );
     }
 
     // --- construction + editing ------------------------------------------

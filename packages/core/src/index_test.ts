@@ -2424,6 +2424,135 @@ Deno.test("measureText sums wrapped rows and reports the widest display line", (
   }
 });
 
+Deno.test("wrapLineWithOffsets and measureText strip ANSI escapes at ingestion", () => {
+  // A CSI-colored string measures and wraps identically to its plain text:
+  // the escape sequences consume zero cells and belong to no display line.
+  const red = "\x1b[31mred\x1b[0m";
+  const colored = measureText(red, 5);
+  const plain = measureText("red", 5);
+  if (colored.rows !== plain.rows || colored.maxWidth !== plain.maxWidth) {
+    throw new Error(`colored = ${JSON.stringify(colored)}, plain = ${JSON.stringify(plain)}`);
+  }
+  if (colored.rows !== 1 || colored.maxWidth !== 3) {
+    throw new Error(`colored = ${JSON.stringify(colored)}`);
+  }
+  // The wrapped row carries only the visible text; its start is the original
+  // code-unit index of 'r' (after the 5-byte leading escape).
+  const wrapped = wrapLineWithOffsets(red, 5);
+  if (wrapped.length !== 1 || wrapped[0]!.text !== "red" || wrapped[0]!.start !== 5) {
+    throw new Error(`wrapped = ${JSON.stringify(wrapped)}`);
+  }
+  // The no-width path strips too, so the composed leaf never carries the
+  // escape bytes.
+  const flat = wrapLineWithOffsets(red, null);
+  if (flat.length !== 1 || flat[0]!.text !== "red" || flat[0]!.start !== 5) {
+    throw new Error(`flat = ${JSON.stringify(flat)}`);
+  }
+});
+
+Deno.test("wrapLineWithOffsets and measureText strip OSC and C1 escape forms", () => {
+  // OSC 8 hyperlink (ESC ] ... ESC \), BEL-terminated OSC, the C1 ST (0x9C)
+  // terminator, and the C1 CSI (0x9B) lead all strip like the ESC [ SGR
+  // form: the visible text is all that measures.
+  const link = "\x1b]8;;https://example.com\x1b\\red\x1b]8;;\x1b\\";
+  if (measureText(link, 20).maxWidth !== 3) throw new Error(`link`);
+  if (measureText("\x1b]0;my title\x07red", 20).maxWidth !== 3) throw new Error(`bel`);
+  if (measureText("\x1b]8;;u\x9cred", 20).maxWidth !== 3) throw new Error(`c1st`);
+  if (measureText("\x9b31mred\x9b0m", 20).maxWidth !== 3) throw new Error(`c1csi`);
+  // A bare ESC inside an OSC body (not followed by `\`) is body data.
+  if (measureText("\x1b]0;a\x1bb\x07", 20).maxWidth !== 0) throw new Error(`bare`);
+  // Truncated sequences (no final byte / no terminator) strip to the end of
+  // the input rather than leaking their bytes.
+  if (measureText("red\x1b[31", 20).maxWidth !== 3) throw new Error(`trunc-csi`);
+  if (measureText("red\x1b]0;unterminated", 20).maxWidth !== 3) throw new Error(`trunc-osc`);
+  if (measureText("a\x1b]0;title", 20).maxWidth !== 1) throw new Error(`trunc-osc-lead`);
+  // Only the OSC and CSI shapes strip: a lone ESC that introduces neither
+  // (here the charset-designator form ESC ( B) is kept as-is — every byte
+  // measures 1, mirroring tern-core's control fallback.
+  if (measureText("\x1b(Bred", 20).maxWidth !== 6) throw new Error(`other`);
+  // C1 bytes outside the rule — e.g. the C1 OSC lead 0x9D — are kept as-is.
+  if (measureText("\x9dred", 20).maxWidth !== 4) throw new Error(`c1osc`);
+});
+
+Deno.test("wrapLineWithOffsets offsets skip escape sequences exactly", () => {
+  // Escapes are stripped before wrapping, so each row's start is the ORIGINAL
+  // code-unit index of its first visible character — exact, and never inside
+  // an escape. Stripped "hello world" wraps at 5 into "hello" (original
+  // 5..10) and "world" (original 11..15); the trailing escape (16..20)
+  // belongs to no display line.
+  const wrapped = wrapLineWithOffsets("\x1b[31mhello world\x1b[0m", 5);
+  if (wrapped.length !== 2) throw new Error(`rows = ${wrapped.length}`);
+  if (wrapped[0]!.text !== "hello" || wrapped[0]!.start !== 5) {
+    throw new Error(`row 0 = ${JSON.stringify(wrapped[0])}`);
+  }
+  if (wrapped[1]!.text !== "world" || wrapped[1]!.start !== 11) {
+    throw new Error(`row 1 = ${JSON.stringify(wrapped[1])}`);
+  }
+  // An escape between two display characters on one row: "red " starts at
+  // original 5, the mid-line escape (8..12) belongs to no display line, and
+  // "world" starts at original 13 (the space after the escape is at 12).
+  const mid = wrapLineWithOffsets("\x1b[31mred\x1b[0m world", 5);
+  if (mid.length !== 2) throw new Error(`mid rows = ${mid.length}`);
+  if (mid[0]!.text !== "red " || mid[0]!.start !== 5) {
+    throw new Error(`mid row 0 = ${JSON.stringify(mid[0])}`);
+  }
+  if (mid[1]!.text !== "world" || mid[1]!.start !== 13) {
+    throw new Error(`mid row 1 = ${JSON.stringify(mid[1])}`);
+  }
+  // An embedded newline after an escape starts the next row at the original
+  // index of the first character after it.
+  const nl = wrapLineWithOffsets("a\x1b[31m\nred\x1b[0m", 5);
+  if (nl.length !== 2) throw new Error(`nl rows = ${nl.length}`);
+  if (nl[0]!.text !== "a" || nl[0]!.start !== 0) {
+    throw new Error(`nl row 0 = ${JSON.stringify(nl[0])}`);
+  }
+  if (nl[1]!.text !== "red" || nl[1]!.start !== 7) {
+    throw new Error(`nl row 1 = ${JSON.stringify(nl[1])}`);
+  }
+});
+
+Deno.test("escaped wide, ZWJ, and combining content measures as its plain text", () => {
+  // Stripping happens before clustering, so an escape never splits a wide
+  // char, a ZWJ emoji, or a base+combining pair, and never changes its
+  // width: the colored variants measure exactly as the plain content.
+  const wide = measureText("\x1b[32mココ\x1b[0m", 10);
+  if (wide.rows !== 1 || wide.maxWidth !== 4) {
+    throw new Error(`wide = ${JSON.stringify(wide)}`);
+  }
+  const family = "\u{1f468}\u200d\u{1f469}\u200d\u{1f467}\u200d\u{1f466}";
+  const zwj = measureText(`\x1b[33m${family}\x1b[0m`, 10);
+  if (zwj.rows !== 1 || zwj.maxWidth !== 2) {
+    throw new Error(`zwj = ${JSON.stringify(zwj)}`);
+  }
+  const comb = measureText("\x1b[34me\u0301\x1b[0m", 10);
+  if (comb.rows !== 1 || comb.maxWidth !== 1) {
+    throw new Error(`comb = ${JSON.stringify(comb)}`);
+  }
+  // An escape between a base and its combining mark is stripped before
+  // clustering, so the pair still forms ONE cluster of width 1.
+  const split = measureText("e\x1b[31m\u0301", 10);
+  if (split.rows !== 1 || split.maxWidth !== 1) {
+    throw new Error(`split = ${JSON.stringify(split)}`);
+  }
+});
+
+Deno.test("Textarea paints stripped leaves and maps the caret across escapes", () => {
+  // The wrapped leaf text is the stripped text (the compositor never sees
+  // the escape bytes), and a caret at the end of a colored line lands at the
+  // display column of the visible text — the escape interior trails its
+  // content, never splitting the caret into an escape.
+  const ta = Textarea({ lines: ["\x1b[31mred\x1b[0m"], row: 0, col: 12, width: 5 });
+  const leaves = ta.children.map((c) => c.props.text).join("|");
+  if (leaves !== "red") throw new Error(`leaves = ${JSON.stringify(leaves)}`);
+  const caret = (ta.children[0]?.props as { caret?: number }).caret;
+  if (caret !== 3) throw new Error(`caret = ${caret}`);
+  // A caret inside the leading escape rests before the first visible char
+  // (display column 0 of the only display line).
+  const inside = Textarea({ lines: ["\x1b[31mred\x1b[0m"], row: 0, col: 2, width: 5 });
+  const insideCaret = (inside.children[0]?.props as { caret?: number }).caret;
+  if (insideCaret !== 0) throw new Error(`inside caret = ${insideCaret}`);
+});
+
 Deno.test("editTextareaKey inserts chars and splits lines on enter", () => {
   const base = { ctrl: false, alt: false, shift: false } as const;
   const ta = Textarea({ lines: ["ab", "cd"], row: 1, col: 1 });
