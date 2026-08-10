@@ -68,7 +68,7 @@
 use std::collections::{HashMap, HashSet};
 
 use tern_core::buffer::{Buffer, Region};
-use tern_core::cell::{clusters, Cell};
+use tern_core::cell::{clusters, strip_escapes, Cell};
 use tern_core::color::Color;
 use tern_core::cursor::Cursor;
 use tern_core::layout::LayoutEngine;
@@ -1451,7 +1451,10 @@ fn paint_box(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) 
 /// (the content is shifted by the region's scroll offset and clipped to its
 /// clip rect — and to the buffer). Text advances grapheme cluster by cluster:
 /// a cluster that would straddle the right edge is dropped, never split
-/// mid-cluster (a ZWJ emoji or a combining sequence stays whole).
+/// mid-cluster (a ZWJ emoji or a combining sequence stays whole). ANSI/OSC/
+/// CSI escape sequences are stripped at ingestion
+/// ([`strip_escapes`](tern_core::cell::strip_escapes)): they occupy no
+/// columns and never reach the buffer.
 ///
 /// When the node carries a `caret` Int prop (a display-column offset — the
 /// [`Input`](crate::Input) component stamps it), the block caret is painted
@@ -1479,7 +1482,8 @@ fn paint_text(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer)
         {
             let right = rect.right().min(region.clip.right() + region.scroll_x);
             let mut cx = rect.x;
-            for cluster in clusters(content) {
+            let content = strip_escapes(content);
+            for cluster in clusters(&content) {
                 if cx >= right || cluster.text == "\n" || cluster.text == "\r\n" {
                     break;
                 }
@@ -1539,7 +1543,10 @@ fn wrap_enabled(node: &SceneNode) -> bool {
 /// style never bleeds into the next. A wide character that would straddle the
 /// right edge — or that is wider than the row itself — is dropped, never split
 /// mid-glyph. Painting stops at the rect's bottom edge; both edges are clipped
-/// to the region and the buffer.
+/// to the region and the buffer. ANSI/OSC/CSI escape sequences are stripped
+/// at ingestion ([`strip_escapes`](tern_core::cell::strip_escapes)): they
+/// occupy no columns and never reach the buffer, so measurement and painting
+/// agree by construction.
 ///
 /// A node with `wrap: false` instead paints its whole stream as one
 /// single-row line, trimmed at the right edge (see
@@ -1573,7 +1580,8 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &m
     let mut word_style = Style::new();
 
     for span in stream {
-        for cluster in clusters(&span.text) {
+        let text = strip_escapes(&span.text);
+        for cluster in clusters(&text) {
             match cluster.text {
                 // Hard break: flush the pending word, then start a new row.
                 // CRLF is a single grapheme cluster and breaks like LF.
@@ -1646,7 +1654,8 @@ fn paint_streaming_text_single_row(
     }
     let mut cx = rect.x;
     for span in stream {
-        for cluster in clusters(&span.text) {
+        let text = strip_escapes(&span.text);
+        for cluster in clusters(&text) {
             if cluster.text == "\n" || cluster.text == "\r\n" {
                 return; // single-row: the line ends here
             }
@@ -1676,9 +1685,11 @@ fn row_inside_frame(rect: Rect, region: Region, row: i32) -> bool {
 }
 
 /// The display width of a string in terminal cells: the sum of its grapheme
-/// clusters' widths (multi-width aware, cluster-indivisible).
+/// clusters' widths (multi-width aware, cluster-indivisible). ANSI/OSC/CSI
+/// escape sequences are stripped first ([`strip_escapes`]), so they occupy
+/// no columns — measurement and the paint pass agree by construction.
 fn display_width(content: &str) -> u32 {
-    clusters(content).map(|c| c.width as u32).sum()
+    clusters(&strip_escapes(content)).map(|c| c.width as u32).sum()
 }
 
 /// The wrapped content size of `content` laid out at `width` cells: the
@@ -1701,7 +1712,8 @@ fn measure_wrapped(content: &str, width: u32) -> (u32, u32) {
     let mut max_col: u32 = 0;
     let mut col: u32 = 0;
     let mut word = String::new();
-    for cluster in clusters(content) {
+    let content = strip_escapes(content);
+    for cluster in clusters(&content) {
         match cluster.text {
             "\n" | "\r\n" => {
                 flush_word(&word, width, &mut col, &mut lines, &mut max_col);
@@ -1744,7 +1756,7 @@ fn flush_word(word: &str, width: u32, col: &mut u32, lines: &mut u32, max_col: &
         *max_col = (*max_col).max(*col);
         return;
     }
-    for cluster in clusters(word) {
+    for cluster in clusters(&strip_escapes(word)) {
         let w = cluster.width as u32;
         if w == 0 {
             continue;
@@ -1801,7 +1813,7 @@ fn paint_word(
             return;
         }
     }
-    for cluster in clusters(word) {
+    for cluster in clusters(&strip_escapes(word)) {
         let w = cluster.width;
         if w == 0 {
             continue;

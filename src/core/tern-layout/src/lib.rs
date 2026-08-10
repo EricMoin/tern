@@ -88,7 +88,7 @@ use taffy::style::{
 };
 use taffy::tree::{Layout as TaffyLayout, NodeId as TaffyNodeId, TaffyTree};
 
-use tern_core::cell::clusters;
+use tern_core::cell::{clusters, strip_escapes};
 use tern_core::layout::LayoutEngine;
 use tern_core::rect::{Rect, Size};
 use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene, SceneNode, Span};
@@ -1018,9 +1018,11 @@ fn prop_bool(props: &PropMap, key: &str) -> Option<bool> {
 /// clusters' widths (multi-width aware, cluster-indivisible — a ZWJ emoji
 /// measures 2 columns, a combining sequence measures 1). Mirrors the
 /// compositor's `display_width` so a text leaf's laid-out size agrees with
-/// what its paint pass draws.
+/// what its paint pass draws. ANSI/OSC/CSI escape sequences are stripped
+/// first ([`strip_escapes`](tern_core::cell::strip_escapes)), so a styled
+/// text leaf measures its visible glyphs only.
 fn display_width(content: &str) -> usize {
-    clusters(content).map(|c| c.width as usize).sum()
+    clusters(&strip_escapes(content)).map(|c| c.width as usize).sum()
 }
 
 /// Map a taffy `Layout` (relative to its parent, so already in scene

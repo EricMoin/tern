@@ -8,8 +8,22 @@
 //! [`char_width`]s, clamped to 2) and is painted as one logical glyph: the
 //! lead cell carries the cluster's full symbol string, and a 2-column
 //! cluster's second column is a masked continuation cell.
+//!
+//! ## ANSI / OSC / CSI escape sequences
+//!
+//! Escape sequences are stripped **at ingestion** ([`strip_escapes`]), never
+//! classified as zero-width: an escape occupies no columns and never enters
+//! the cluster/cell model, so measurement and painting agree by
+//! construction. The strip must happen *before* grapheme segmentation — an
+//! escape's bytes would otherwise segment as their own clusters (ESC is a
+//! control boundary and the printable CSI payload bytes like `[31m` are
+//! ordinary width-1 characters), corrupting both width and text. The rule is
+//! documented on [`strip_escapes`] as the byte-identical contract the JS
+//! mirror in `packages/core` reproduces.
 
 use std::borrow::Cow;
+use std::iter::Peekable;
+use std::str::CharIndices;
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
@@ -62,6 +76,13 @@ impl Cluster<'_> {
 
 /// Iterate the extended grapheme clusters of `text` (UAX #29), each paired
 /// with its display width.
+///
+/// The iterator borrows `text`, so escape stripping happens at ingestion:
+/// callers pass `&strip_escapes(text)` (see [`strip_escapes`]). An escape
+/// sequence must be removed *before* segmentation — its bytes would
+/// otherwise segment as their own clusters (ESC is a control boundary, and
+/// the printable payload bytes of a CSI like `[31m` are ordinary width-1
+/// characters) and occupy columns they must not.
 pub fn clusters(text: &str) -> impl Iterator<Item = Cluster<'_>> {
     text.graphemes(true)
         .map(|g| Cluster {
@@ -72,11 +93,139 @@ pub fn clusters(text: &str) -> impl Iterator<Item = Cluster<'_>> {
 
 /// The display width of one grapheme cluster in terminal columns: the sum of
 /// its member characters' [`char_width`]s, clamped to 2.
+///
+/// Escape sequences are invisible: [`strip_escapes`] removes them before
+/// measuring, so a cluster carrying (or consisting of) an escape sequence
+/// measures as its visible text only — `"\x1b[31mred\x1b[0m"` measures as
+/// `"red"`. This keeps direct callers of `cluster_width` safe even when a
+/// consumer forgets to strip at ingestion (the cluster is then a
+/// whole-string measurement rather than a true grapheme, but the answer is
+/// still the escape-free width).
 pub fn cluster_width(cluster: &str) -> u8 {
-    cluster
+    strip_escapes(cluster)
         .chars()
         .fold(0u16, |acc, c| acc + char_width(c) as u16)
         .min(2) as u8
+}
+
+/// Strip ANSI/OSC/CSI escape sequences from `text`, returning the
+/// escape-free remainder — `Cow::Borrowed` when nothing was stripped (the
+/// common case, so the hot measurement path allocates nothing), `Cow::Owned`
+/// otherwise.
+///
+/// ## The strip rule (byte-identical contract)
+///
+/// This is the canonical rule the JS mirror (`packages/core`'s width and
+/// wrap functions) must reproduce byte-identically. Two sequence kinds are
+/// removed:
+///
+/// * **CSI** — the introducer `ESC [` (`0x1B 0x5B`) or the C1 CSI single
+///   character `U+009B`, followed by any run of characters up to and
+///   including the first **final byte** in `0x40..=0x7E` (the parameter
+///   bytes `0x30..=0x3F` and intermediate bytes `0x20..=0x2F` are all below
+///   `0x40`, so this is the standard `\x1b\[[0-?]*[ -/]*[@-~]` shape; a
+///   *tolerant* scan, not a strict grammar — any character before the final
+///   byte is consumed as part of the sequence, so malformed control data is
+///   removed rather than painted).
+/// * **OSC** — the introducer `ESC ]` (`0x1B 0x5D`), followed by any
+///   characters up to and including the first terminator: BEL (`0x07`), ST
+///   as `ESC \` (`0x1B 0x5C`), or the C1 ST single character `U+009C`. A
+///   bare `ESC` inside the body that is not followed by `\` is a body
+///   character, not a terminator.
+///
+/// A sequence truncated at the end of the input (no final byte / no
+/// terminator) is stripped to the end of the input. Everything else is kept
+/// as-is — including a lone `ESC` that introduces neither CSI nor OSC, and
+/// all other C1 control characters (`U+0080..=U+009F` except `U+009B` and
+/// the `U+009C` terminator). The scan works on characters (the UTF-8
+/// encoding of a C1 control is a two-byte run `0xC2 0x80..0xBF`), so a
+/// multi-byte character is never split: sequences start and end on
+/// characters, and runs are consumed or kept whole.
+pub fn strip_escapes(text: &str) -> Cow<'_, str> {
+    let mut out = String::new();
+    let mut run_start = 0usize; // byte offset of the current untouched run
+    let mut it = text.char_indices().peekable();
+    while let Some((i, ch)) = it.next() {
+        let seq = match ch {
+            '\u{1b}' => match it.peek() {
+                Some(&(_, '[')) => {
+                    it.next();
+                    Sequence::Csi
+                }
+                Some(&(_, ']')) => {
+                    it.next();
+                    Sequence::Osc
+                }
+                _ => continue, // a lone ESC introduces no sequence
+            },
+            '\u{9b}' => Sequence::Csi,
+            _ => continue,
+        };
+        // Consume the sequence body; `end` is the byte offset just past it,
+        // or the end of the input when the sequence is truncated.
+        let end = match seq {
+            Sequence::Csi => match csi_end(&mut it) {
+                Some(end) => end,
+                None => text.len(),
+            },
+            Sequence::Osc => match osc_end(&mut it) {
+                Some(end) => end,
+                None => text.len(),
+            },
+        };
+        if out.is_empty() {
+            out.reserve(text.len());
+        }
+        out.push_str(&text[run_start..i]);
+        run_start = end;
+    }
+    if run_start == 0 {
+        Cow::Borrowed(text)
+    } else {
+        out.push_str(&text[run_start..]);
+        Cow::Owned(out)
+    }
+}
+
+/// The sequence kind a stripped introducer opens.
+enum Sequence {
+    Csi,
+    Osc,
+}
+
+/// Consume a CSI sequence body (the introducer is already consumed) from
+/// `it`, returning the byte offset just past its end: the first character
+/// whose code point is a final byte in `0x40..=0x7E` — or `None` when the
+/// sequence is truncated.
+fn csi_end(it: &mut Peekable<CharIndices<'_>>) -> Option<usize> {
+    loop {
+        match it.next() {
+            Some((j, c)) if ('\u{40}'..='\u{7e}').contains(&c) => return Some(j + c.len_utf8()),
+            Some(_) => {}
+            None => return None,
+        }
+    }
+}
+
+/// Consume an OSC sequence body (the introducer is already consumed) from
+/// `it`, returning the byte offset just past its end: the first terminator —
+/// BEL (`0x07`), ST as `ESC \` (`0x1B 0x5C`), or the C1 ST `U+009C`. A bare
+/// `ESC` not followed by `\` is a body character. `None` when the sequence
+/// is truncated.
+fn osc_end(it: &mut Peekable<CharIndices<'_>>) -> Option<usize> {
+    loop {
+        match it.next() {
+            Some((j, '\u{7}')) => return Some(j + 1), // BEL (1 byte)
+            Some((j, '\u{9c}')) => return Some(j + '\u{9c}'.len_utf8()), // C1 ST (2 bytes)
+            Some((j, '\u{1b}')) => match it.next() {
+                Some((k, '\\')) => return Some(k + 1), // ST: ESC \ (1 byte each)
+                Some(_) => {} // a bare ESC is an OSC body character
+                None => return Some(j + 1), // truncated at the trailing ESC
+            },
+            Some(_) => {}
+            None => return None,
+        }
+    }
 }
 
 /// A single cell of a [`Buffer`](crate::Buffer): the lead character of the
@@ -207,6 +356,64 @@ mod tests {
         assert_eq!(char_width('\0'), 0);
         assert_eq!(char_width('\u{0301}'), 0); // combining acute accent
         assert_eq!(char_width('\t'), 1); // control chars fall back to 1
+    }
+
+    #[test]
+    fn strip_escapes_removes_csi_and_osc_sequences() {
+        // CSI SGR color codes vanish; the visible text survives intact.
+        assert_eq!(strip_escapes("\x1b[31mred\x1b[0m"), "red");
+        assert_eq!(strip_escapes("\x1b[1m\x1b[38;2;255;0;0mbold\x1b[0m"), "bold");
+        // Non-SGR CSI (hide cursor, clear screen) are sequences too.
+        assert_eq!(strip_escapes("\x1b[?25l"), "");
+        assert_eq!(strip_escapes("\x1b[2J"), "");
+        // OSC: a BEL-terminated title, an ST-terminated hyperlink, and a
+        // C1-ST terminator all vanish while the surrounding text survives.
+        assert_eq!(strip_escapes("\x1b]0;title\x07"), "");
+        assert_eq!(strip_escapes("a\x1b]8;;http://example.com\x1b\\b"), "ab");
+        assert_eq!(strip_escapes("\x1b]0;title\u{9c}"), "");
+        // A bare ESC inside an OSC body (not followed by `\`) is body data.
+        assert_eq!(strip_escapes("\x1b]0;a\x1bb\x07"), "");
+        // The C1 CSI single byte (0x9B) opens a CSI sequence just like ESC [.
+        assert_eq!(strip_escapes("\u{9b}31mred\u{9b}0m"), "red");
+        // Truncated sequences (no final byte / no terminator) strip to the
+        // end of the input rather than leaking their bytes.
+        assert_eq!(strip_escapes("red\x1b[31"), "red");
+        assert_eq!(strip_escapes("red\x1b]0;unterminated"), "red");
+    }
+
+    #[test]
+    fn strip_escapes_leaves_plain_text_borrowed() {
+        // No escapes: the input is returned borrowed, byte-identical — the
+        // hot path allocates nothing.
+        let plain = "e\u{301}日\n";
+        assert_eq!(strip_escapes(plain), plain);
+        assert!(matches!(strip_escapes(plain), Cow::Borrowed(_)));
+        // A lone ESC (neither CSI nor OSC introducer) and C1 bytes outside
+        // the rule (e.g. the C1 OSC start 0x9D) are kept as-is.
+        assert_eq!(strip_escapes("a\x1bb"), "a\x1bb");
+        assert_eq!(strip_escapes("a\u{9d}b"), "a\u{9d}b");
+        // NUL / combining marks / wide CJK pass through untouched.
+        assert_eq!(strip_escapes("e\u{301}日\0"), "e\u{301}日\0");
+    }
+
+    #[test]
+    fn ansi_escapes_measure_as_invisible() {
+        // The golden contract: an escape-carrying string measures and
+        // clusters identically to its stripped form.
+        let colored = strip_escapes("\x1b[31mred\x1b[0m");
+        assert_eq!(
+            clusters(&colored).map(|c| (c.text, c.width)).collect::<Vec<_>>(),
+            clusters("red").map(|c| (c.text, c.width)).collect::<Vec<_>>(),
+        );
+        // cluster_width clamps to 2, so the golden check is equality with
+        // the stripped form; a single visible char is exactly 1.
+        assert_eq!(cluster_width("\x1b[31mred\x1b[0m"), cluster_width("red"));
+        assert_eq!(cluster_width("\x1b[31me\x1b[0m"), 1);
+        // Wide CJK, combining, and NUL behavior is unchanged by surrounding
+        // escapes: 2 columns, 1 column (base + zero-width mark), 0.
+        assert_eq!(cluster_width("\x1b[31mコ\x1b[0m"), 2);
+        assert_eq!(cluster_width("\x1b[31me\u{301}\x1b[0m"), 1);
+        assert_eq!(cluster_width("\x1b[31m\0\x1b[0m"), 0);
     }
 
     #[test]

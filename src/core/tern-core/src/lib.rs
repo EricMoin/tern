@@ -30,7 +30,7 @@ pub mod scene;
 pub mod style;
 
 pub use buffer::{diff, Buffer, Region};
-pub use cell::{char_width, cluster_width, clusters, Cell, CellUpdate, Cluster};
+pub use cell::{char_width, cluster_width, clusters, strip_escapes, Cell, CellUpdate, Cluster};
 pub use color::Color;
 pub use cursor::Cursor;
 pub use layout::LayoutEngine;
