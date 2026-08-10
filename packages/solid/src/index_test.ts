@@ -24,6 +24,7 @@ import {
   selectKey,
   subscribeInput,
   subscribeResize,
+  createTerminalDimensions,
   subscribeFocus,
   subscribeFocusTraversal,
   subscribePaste,
@@ -1492,12 +1493,17 @@ function mockRenderer(): {
   renderer: Renderer;
   root: Node;
   renderCalls: number[];
+  size: { width: number; height: number };
   keyHandlers: Set<(event: KeyEvent) => void>;
   resizeHandlers: Set<(event: { width: number; height: number }) => void>;
   focusHandlers: Set<(event: { focus_gained: boolean }) => void>;
   pasteHandlers: Set<(text: string) => void>;
 } {
   const renderCalls: number[] = [];
+  // The reported terminal size: `renderer.size` in the real renderer reads
+  // the native terminal, here it reads this mutable object (tests may adjust
+  // it before creation to seed the initial value).
+  const size = { width: 80, height: 24 };
   const keyHandlers = new Set<(event: KeyEvent) => void>();
   const resizeHandlers = new Set<(event: { width: number; height: number }) => void>();
   const focusHandlers = new Set<(event: { focus_gained: boolean }) => void>();
@@ -1505,6 +1511,9 @@ function mockRenderer(): {
   const root = Box();
   const renderer = {
     root,
+    get size(): { width: number; height: number } {
+      return size;
+    },
     render: () => {
       renderCalls.push(renderCalls.length);
     },
@@ -1526,7 +1535,7 @@ function mockRenderer(): {
     },
     destroy: () => {},
   } as unknown as Renderer;
-  return { renderer, root, renderCalls, keyHandlers, resizeHandlers, focusHandlers, pasteHandlers };
+  return { renderer, root, renderCalls, size, keyHandlers, resizeHandlers, focusHandlers, pasteHandlers };
 }
 
 function keyEvent(over: Partial<KeyEvent> = {}): KeyEvent {
@@ -2236,6 +2245,33 @@ Deno.test("subscribeResize re-renders on resize events and detaches on dispose",
   }
 
   dispose();
+  if (resizeHandlers.size >= 1) throw new Error("resize handler must be detached on dispose");
+});
+
+Deno.test("createTerminalDimensions seeds from renderer.size and tracks resizes reactively", () => {
+  const { renderer, resizeHandlers, size } = mockRenderer();
+  const dims = createTerminalDimensions(renderer);
+
+  if (resizeHandlers.size !== 1) {
+    throw new Error(`expected 1 resize handler, got ${resizeHandlers.size}`);
+  }
+  // Seeded from renderer.size at creation — the mock's initial 80x24.
+  let current = dims.size();
+  if (current.width !== size.width || current.height !== size.height) {
+    throw new Error(
+      `initial size = ${JSON.stringify(current)}, renderer.size = ${JSON.stringify(size)}`,
+    );
+  }
+
+  // Each resize event replaces the accessor's value (signal writes are
+  // synchronous, so the fresh read reflects the update immediately).
+  for (const handler of resizeHandlers) handler({ width: 132, height: 43 });
+  current = dims.size();
+  if (current.width !== 132 || current.height !== 43) {
+    throw new Error(`post-resize size = ${JSON.stringify(current)}`);
+  }
+
+  dims.dispose();
   if (resizeHandlers.size >= 1) throw new Error("resize handler must be detached on dispose");
 });
 

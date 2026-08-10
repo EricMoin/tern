@@ -77,6 +77,7 @@ import {
   usePaste,
   useResize,
   useSelection,
+  useTerminalDimensions,
   useTheme,
   useWheelScroll,
   version,
@@ -97,12 +98,17 @@ function mockRenderer(): {
   renderer: Renderer;
   root: ReturnType<typeof CoreBox>;
   renderCalls: number[];
+  size: { width: number; height: number };
   keyHandlers: Set<(event: KeyEvent) => void>;
   resizeHandlers: Set<ResizeHandler>;
   focusHandlers: Set<(event: { focus_gained: boolean }) => void>;
   pasteHandlers: Set<(text: string) => void>;
 } {
   const renderCalls: number[] = [];
+  // The reported terminal size: `renderer.size` in the real renderer reads
+  // the native terminal, here it reads this mutable object (tests may adjust
+  // it before mounting to seed the initial state).
+  const size = { width: 80, height: 24 };
   const keyHandlers = new Set<(event: KeyEvent) => void>();
   const resizeHandlers = new Set<ResizeHandler>();
   const focusHandlers = new Set<(event: { focus_gained: boolean }) => void>();
@@ -110,6 +116,9 @@ function mockRenderer(): {
   const root = CoreBox();
   const renderer = {
     root,
+    get size(): { width: number; height: number } {
+      return size;
+    },
     render: () => {
       renderCalls.push(renderCalls.length);
     },
@@ -131,7 +140,7 @@ function mockRenderer(): {
     },
     destroy: () => {},
   } as unknown as Renderer;
-  return { renderer, root, renderCalls, keyHandlers, resizeHandlers, focusHandlers, pasteHandlers };
+  return { renderer, root, renderCalls, size, keyHandlers, resizeHandlers, focusHandlers, pasteHandlers };
 }
 
 function keyEvent(over: Partial<KeyEvent> = {}): KeyEvent {
@@ -170,6 +179,7 @@ Deno.test("public API surface is exported", () => {
     useFocusTraversal,
     useResize,
     useSelection,
+    useTerminalDimensions,
     createRoot,
     render,
     useApp,
@@ -1186,6 +1196,51 @@ Deno.test("useResize subscribes to renderer resize events, re-renders, and detac
     throw new Error(
       `useResize must re-invoke renderer.render() on resize (${rendersBeforeResize} -> ${renderCalls.length})`,
     );
+  }
+
+  await act(() => {
+    ternRoot.unmount();
+  });
+  if (resizeHandlers.size >= 1) throw new Error("resize handler must be detached on unmount");
+});
+
+Deno.test("useTerminalDimensions seeds from renderer.size and tracks resizes reactively", async () => {
+  const { renderer, resizeHandlers, size } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  const captured: { dims: { width: number; height: number } | null } = { dims: null };
+  function DimsProbe() {
+    const dims = useTerminalDimensions();
+    captured.dims = dims;
+    return createElement(Text, { text: `${dims.width}x${dims.height}` });
+  }
+
+  await act(() => {
+    ternRoot.render(createElement(DimsProbe));
+  });
+
+  if (resizeHandlers.size !== 1) {
+    throw new Error(`expected 1 resize handler, got ${resizeHandlers.size}`);
+  }
+  // Seeded from renderer.size at mount — the mock's initial 80x24. Read
+  // through a function: the resize below reassigns `captured.dims` inside
+  // React's render, which TS control-flow narrowing cannot see.
+  const dimsOf = () => captured.dims;
+  const initial = dimsOf();
+  if (initial === null || initial.width !== size.width || initial.height !== size.height) {
+    throw new Error(
+      `initial dims = ${JSON.stringify(initial)}, renderer.size = ${JSON.stringify(size)}`,
+    );
+  }
+
+  // A resize event updates the state: the component re-renders and the
+  // captured value reflects the new size.
+  await act(() => {
+    for (const handler of resizeHandlers) handler({ width: 120, height: 40 });
+  });
+  const resized = dimsOf();
+  if (resized === null || resized.width !== 120 || resized.height !== 40) {
+    throw new Error(`post-resize dims = ${JSON.stringify(resized)}`);
   }
 
   await act(() => {
