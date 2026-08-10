@@ -483,4 +483,23 @@ export interface TuiRendererOptions {
    * leaves the title untouched.
    */
   title?: string
+  /**
+   * When `true`, the renderer never touches a terminal: no raw mode, no
+   * alternate screen, no event listening, no title. Rendering and
+   * snapshots run against an in-memory buffer of the configured `width` x
+   * `height` (default 80x24), so construction and rendering succeed
+   * without a TTY (plain `cargo test`, CI, snapshot tooling). Default
+   * `false`.
+   */
+  headless?: boolean
+  /**
+   * The virtual width in cells for `headless` mode (default 80). Ignored
+   * when `headless` is `false`.
+   */
+  width?: number
+  /**
+   * The virtual height in cells for `headless` mode (default 24). Ignored
+   * when `headless` is `false`.
+   */
+  height?: number
 }
