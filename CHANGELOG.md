@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ANSI-aware text measurement:** `strip_escapes` (tern-core) strips ANSI/OSC/CSI
+  escape sequences at ingestion — applied through the width/wrap path in the
+  buffer (`Buffer::set_text` / `insert_text`), the compositor (`paint_text` and
+  the streaming-span painter), the `Textarea` soft-wrap, and tern-layout's
+  content sizing — and mirrored in JS as `stripEscapes`, wired into
+  `wrapLineWithOffsets` / `measureText` etc., so escaped text measures, wraps,
+  and paints identically to its stripped form.
+- **Styled snapshot API:** `render_to_buffer_styled` (tern-node) paints the scene
+  into per-row styled runs, surfaced as `Renderer.snapshotStyled` with
+  `styledFramesEqual` for golden comparison in `@tern-tui/core` — each run
+  carries `{ text, fg, bg, bold, dim, italic, underline, reversed,
+  strikethrough }`, adjacent cells with identical style merging into one run
+  (concatenating a row's run texts reconstructs the row).
+- **Headless backend option:** `TuiRendererOptions.headless` plus `width` /
+  `height` (default 80x24) and the `@tern-tui/core` `CreateRendererOptions`
+  `headless` / `size` surface — a headless renderer never touches a terminal
+  (no raw mode, no alt screen, no event stream; `startEventStream()` errors) and
+  `snapshotFrame` / `snapshotStyled` work without a TTY.
+- **`setAddonForTesting` + `TernAddon`:** exported from the `@tern-tui/core`
+  package root — a supported fake-addon injection seam (`setAddonForTesting`
+  swaps the addon in the load cache) for headless consumer testing.
+- **`useTerminalDimensions()`:** reactive terminal dimensions in `@tern-tui/react`
+  — seeds `{ width, height }` from `renderer.size` at mount and updates on every
+  resize, re-rendering consumers; the Solid counterpart is
+  `createTerminalDimensions(renderer)` in `@tern-tui/solid`.
 - **Terminal capabilities, window title, and alt-screen option:** the
   tern-terminal backend detects the terminal's color support once via the
   `supports-color` crate and exposes it as `Backend::capabilities()`
