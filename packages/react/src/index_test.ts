@@ -155,7 +155,7 @@ Deno.test("react exports package metadata", () => {
   if (name !== "@tern-tui/react") {
     throw new Error(`unexpected name: ${name}`);
   }
-  if (version !== "0.1.0") {
+  if (version !== "0.2.0") {
     throw new Error(`unexpected version: ${version}`);
   }
 });

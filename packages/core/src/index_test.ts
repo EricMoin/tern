@@ -689,7 +689,7 @@ Deno.test("core exports package metadata", () => {
   if (name !== "@tern-tui/core") {
     throw new Error(`unexpected name: ${name}`);
   }
-  if (version !== "0.1.0") {
+  if (version !== "0.2.0") {
     throw new Error(`unexpected version: ${version}`);
   }
 });

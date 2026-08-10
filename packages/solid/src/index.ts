@@ -150,7 +150,7 @@ import {
 } from "@tern-tui/core";
 
 export const name = "@tern-tui/solid";
-export const version = "0.1.0";
+export const version = "0.2.0";
 
 // The @tern-tui/core types the factories and focus wiring expose, re-exported so
 // consumers can type elements, props, focus handles and input handlers without

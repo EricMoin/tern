@@ -1,6 +1,6 @@
 {
   "name": "@tern-tui/solid",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "license": "MIT",
   "description": "tern solid \u2014 SolidJS custom renderer for tern",
@@ -34,6 +34,6 @@
   },
   "dependencies": {
     "solid-js": "^1.9.14",
-    "@tern-tui/core": "^0.1.0"
+    "@tern-tui/core": "^0.2.0"
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@tern-tui/node",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "tern napi binding: Deno/Node.js -> tern-core bridge (native addon)",
   "license": "MIT",
   "repository": {
@@ -33,11 +33,11 @@
     ]
   },
   "optionalDependencies": {
-    "@tern-tui/node-linux-x64-gnu": "0.1.0",
-    "@tern-tui/node-linux-arm64-gnu": "0.1.0",
-    "@tern-tui/node-darwin-x64": "0.1.0",
-    "@tern-tui/node-darwin-arm64": "0.1.0",
-    "@tern-tui/node-win32-x64-msvc": "0.1.0"
+    "@tern-tui/node-linux-x64-gnu": "0.2.0",
+    "@tern-tui/node-linux-arm64-gnu": "0.2.0",
+    "@tern-tui/node-darwin-x64": "0.2.0",
+    "@tern-tui/node-darwin-arm64": "0.2.0",
+    "@tern-tui/node-win32-x64-msvc": "0.2.0"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.8.2"

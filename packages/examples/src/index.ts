@@ -15,4 +15,4 @@
  * the workspace check/test tasks; the demos are standalone scripts.
  */
 export const name = "@tern-tui/examples";
-export const version = "0.1.0";
+export const version = "0.2.0";

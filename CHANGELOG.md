@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-10
+
 ### Added
 
 - **ANSI-aware text measurement:** `strip_escapes` (tern-core) strips ANSI/OSC/CSI
@@ -398,4 +400,5 @@ the MVP, the roadmap element set, and the Phase 2 event surface.
   for `Panels`, and focus-aware redraw — remains tracked in
   `docs/roadmap.md` Phase 2.
 
+[0.2.0]: https://github.com/EricMoin/tern/releases/tag/v0.2.0
 [0.1.0]: https://github.com/EricMoin/tern/releases/tag/v0.1.0
