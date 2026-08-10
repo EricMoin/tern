@@ -134,14 +134,18 @@ jobs:
           cache-dependency-path: "**/package-lock.json"
 
       # Trusted Publishing (OIDC) requires npm >= 11.5.1, so the CLI is
-      # upgraded to npm@latest. npm 12.x dropped Node 20 support (requires
-      # ^22.22.2 || ^24.15.0 || >=26), so this job runs on Node 24; all JS
-      # packages declare engines.node >=20, so Node 24 is compatible. With a
-      # trusted publisher configured on each package, npm publish exchanges
-      # the Actions OIDC token for publish credentials — no NPM_TOKEN secret
-      # involved.
+      # pinned to npm@11 instead of @latest: npm 12 changed `npm pack
+      # --dry-run --json` to emit an object keyed by package name instead
+      # of an array, which breaks the @napi-rs/cli 3.8.2 `napi prepublish`
+      # validation (it reads packResult[0].files and throws "Failed to
+      # validate the release package"). This job also runs on Node 24
+      # because npm 12.x dropped Node 20 support (requires ^22.22.2 ||
+      # ^24.15.0 || >=26); all JS packages declare engines.node >=20, so
+      # Node 24 is compatible. With a trusted publisher configured on each
+      # package, npm publish exchanges the Actions OIDC token for publish
+      # credentials — no NPM_TOKEN secret involved.
       - name: Upgrade npm for Trusted Publishing
-        run: npm install -g npm@latest
+        run: npm install -g npm@11
 
       # tern-node is not a root workspace member, and its prepublishOnly
       # (`napi prepublish -t npm`) resolves the pinned @napi-rs/cli from
