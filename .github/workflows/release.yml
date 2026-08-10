@@ -26,7 +26,15 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      # Used to re-run the JS package publishes (core/react/solid) after a
+      # partial failure, when the tern-node addon packages already exist at
+      # the target version and a repeat `npm publish` would 409.
+      skip_native:
+        description: 'Skip publishing tern-node (addon already published at this version)'
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -178,8 +186,11 @@ jobs:
 
       # Publishes the tern-node-<platform> packages via the prepublishOnly
       # hook (`napi prepublish -t npm`), then the tern-node root package.
+      # Skipped on manual dispatch with skip_native=true, when the addon
+      # packages already exist at this version (re-publish would E409).
       - name: Publish tern-node
         working-directory: src/bindings/tern-node
+        if: ${{ !inputs.skip_native }}
         run: npm publish --access public
 
       # Root install must come after tern-node is published: @tern-tui/core
