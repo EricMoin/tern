@@ -1,6 +1,6 @@
 {
   "name": "@tern-tui/react",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "license": "MIT",
   "description": "tern react \u2014 react-reconciler custom renderer for tern",
@@ -30,7 +30,7 @@
     "build:tsc": "tsc --noEmit"
   },
   "dependencies": {
-    "@tern-tui/core": "0.1.0"
+    "@tern-tui/core": "0.2.0"
   },
   "peerDependencies": {
     "react": "^19.2.0",

@@ -176,7 +176,7 @@ jobs:
         run: npm publish --access public
 
       # Root install must come after tern-node is published: @tern-tui/core
-      # depends on tern-node@0.1.0, which resolves from the registry only
+      # depends on tern-node@0.2.0, which resolves from the registry only
       # once the addon root package exists.
       - name: Install JS workspace dependencies
         run: npm install

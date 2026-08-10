@@ -123,7 +123,7 @@ import {
 import { useApp } from "./reconciler.ts";
 
 export const name = "@tern-tui/react";
-export const version = "0.1.0";
+export const version = "0.2.0";
 
 // ---------------------------------------------------------------------------
 // Host component props
