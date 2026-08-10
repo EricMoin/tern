@@ -89,6 +89,7 @@ import {
   setSelectionClockForTesting,
   startPanelDrag,
   startSelection,
+  styledFramesEqual,
   syncStreamTail,
   tableKey,
   tabsKey,
@@ -105,6 +106,7 @@ import {
 import type {
   NodeProps,
   SelectOption,
+  StyleRunJs,
   TabSpec,
   TableColumn,
   TableState,
@@ -161,6 +163,11 @@ const fakeContentSizes = new Map<object, { width: number; height: number }>();
 /** The last `(width, height)` passed to the fake `render_to_buffer`, or
  * `null` when the snapshot method was never called. */
 let lastSnapshotSize: [number | undefined, number | undefined] | null = null;
+
+/** The last `(width, height)` passed to the fake
+ * `render_to_buffer_styled`, or `null` when the styled snapshot method was
+ * never called. */
+let lastStyledSnapshotSize: [number | undefined, number | undefined] | null = null;
 
 /** The last `FakeTuiRenderer` constructed (via the fake addon), or `null`.
  * Tests read its `renderCalls` to assert native render counts. */
@@ -272,6 +279,22 @@ class FakeTuiRenderer {
     const rows = paintSceneRows(this.rootHandle, w, h);
     this.lastRows = rows;
     return rows;
+  }
+  render_to_buffer_styled(width?: number, height?: number): StyleRunJs[][] {
+    lastStyledSnapshotSize = [width, height];
+    // Shares `render_to_buffer`'s viewport-recording semantics: the viewport
+    // actually painted at becomes the last painted viewport (the real
+    // binding records it identically for both snapshot methods).
+    const w = width ?? this.size.width;
+    const h = height ?? this.size.height;
+    this.size = { width: w, height: h };
+    const runs = paintSceneRuns(this.rootHandle, w, h);
+    // Concatenating a row's run texts reconstructs the plain row string —
+    // the binding's documented invariant — so the retained frame for
+    // `selection_text` / `selection_word_range` stays consistent with the
+    // plain snapshot path.
+    this.lastRows = runs.map((row) => row.map((run) => run.text).join(""));
+    return runs;
   }
   destroy(): void {
     this.destroyed = true;
@@ -409,6 +432,135 @@ function paintSceneRows(
   return rows;
 }
 
+/** The style a fake text leaf's props carry, in the `StyleRunJs` field
+ * shape: colors as-is, modifiers present only when set (the binding's
+ * "modifier keys are present only when set" contract). */
+interface FakeCellStyle {
+  fg?: string;
+  bg?: string;
+  bold?: boolean;
+  dim?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  reversed?: boolean;
+  strikethrough?: boolean;
+}
+
+/** The style lifted from a fake text leaf's props, or `null` for an
+ * unstyled leaf (or no leaf) — the fake's mirror of the binding lifting
+ * the recognized style keys into the node's style. `blink`/`hidden` have
+ * no `StyleRunJs` field, so they are dropped like the real surface. */
+function leafStyle(leaf: FakeNodeHandle | undefined): FakeCellStyle | null {
+  if (leaf === undefined) return null;
+  const p = leaf.props;
+  const style: FakeCellStyle = {};
+  if (typeof p.fg === "string") style.fg = p.fg;
+  if (typeof p.bg === "string") style.bg = p.bg;
+  if (p.bold === true) style.bold = true;
+  if (p.dim === true) style.dim = true;
+  if (p.italic === true) style.italic = true;
+  if (p.underline === true) style.underline = true;
+  if (p.reversed === true) style.reversed = true;
+  if (p.strikethrough === true) style.strikethrough = true;
+  return Object.keys(style).length === 0 ? null : style;
+}
+
+/** Whether two styled runs carry the same style — the merge rule behind
+ * `render_to_buffer_styled` ("adjacent cells with identical style merge
+ * into one run"), so `text` is excluded: the running run's text extends
+ * instead of opening a new run. */
+function fakeRunStyleEqual(a: StyleRunJs, b: StyleRunJs): boolean {
+  return (
+    a.fg === b.fg &&
+    a.bg === b.bg &&
+    a.bold === b.bold &&
+    a.dim === b.dim &&
+    a.italic === b.italic &&
+    a.underline === b.underline &&
+    a.reversed === b.reversed &&
+    a.strikethrough === b.strikethrough
+  );
+}
+
+/**
+ * Paint a captured fake scene into styled runs, standing in for the native
+ * `render_to_buffer_styled`.
+ *
+ * The styled counterpart of {@link paintSceneRows}: the same mini-compositor
+ * geometry (a content-sized box child at the origin, border glyphs at the
+ * rect edges, clusters painted whole with masked-continuation spaces), but
+ * each cell also carries the style lifted from the painted text leaf, and
+ * adjacent cells with identical style merge into one run — so concatenating
+ * a row's run texts reconstructs the `paintSceneRows` row string exactly,
+ * the binding's documented invariant. Border and padding cells are
+ * unstyled.
+ */
+function paintSceneRuns(
+  root: FakeNodeHandle,
+  width: number | undefined,
+  height: number | undefined,
+): StyleRunJs[][] {
+  const w = width ?? 6;
+  const h = height ?? 3;
+  const glyphs: Record<string, readonly [string, string, string, string, string, string]> = {
+    rounded: ["┌", "┐", "└", "┘", "─", "│"],
+    plain: ["+", "+", "+", "+", "-", "|"],
+    double: ["╔", "╗", "╚", "╝", "═", "║"],
+    thick: ["┏", "┓", "┗", "┛", "━", "┃"],
+  };
+  const rows: StyleRunJs[][] = [];
+  for (let y = 0; y < h; y++) {
+    const cells: Array<{ ch: string; style: FakeCellStyle | null }> = [];
+    for (let x = 0; x < w; x++) {
+      let ch = " ";
+      let style: FakeCellStyle | null = null;
+      for (const child of root.children) {
+        const textChild = child.children[0];
+        const text = typeof textChild?.props.text === "string" ? textChild.props.text : "";
+        const pad = typeof child.props.padding === "number" ? child.props.padding : 0;
+        const runs = fakeClusterRuns(text);
+        const innerWidth = runs.reduce((sum, run) => sum + run.width, 0);
+        const bw = innerWidth + 2 * pad;
+        const bh = 1 + 2 * pad;
+        if (x < bw && y < bh) {
+          const g = glyphs[String(child.props.border_style ?? "none")];
+          let c = " ";
+          if (g !== undefined) {
+            if (y === 0) c = x === 0 ? g[0] : x === bw - 1 ? g[1] : g[4];
+            else if (y === bh - 1) c = x === 0 ? g[2] : x === bw - 1 ? g[3] : g[4];
+            else c = x === 0 || x === bw - 1 ? g[5] : " ";
+          }
+          if (g !== undefined && y === pad && x >= pad && x < pad + innerWidth) {
+            c = clusterTextAt(runs, x - pad);
+            style = leafStyle(textChild);
+          } else if (g === undefined && y === 0 && x < innerWidth) {
+            // A borderless leaf (bare text / textarea / input) paints its
+            // first text child's clusters from the origin, styled.
+            c = clusterTextAt(runs, x);
+            style = leafStyle(textChild);
+          }
+          if (c !== " ") ch = c;
+        }
+      }
+      cells.push({ ch, style });
+    }
+    // Merge adjacent cells with identical style into runs — the binding's
+    // documented run-merge rule for `render_to_buffer_styled`.
+    const rowRuns: StyleRunJs[] = [];
+    for (const cell of cells) {
+      const run: StyleRunJs = { text: cell.ch, ...cell.style };
+      const last = rowRuns[rowRuns.length - 1];
+      if (last !== undefined && fakeRunStyleEqual(last, run)) {
+        last.text += cell.ch;
+      } else {
+        rowRuns.push(run);
+      }
+    }
+    rows.push(rowRuns);
+  }
+  return rows;
+}
+
 /** The display width of one character in terminal columns — the fake
  * painter's mirror of the core `charWidth` (combining marks 0, wide CJK /
  * emoji 2, else 1). */
@@ -504,6 +656,7 @@ function withFakeAddon<T>(fn: () => T): T {
   lastClipboard = null;
   lastRendererOptions = null;
   lastSnapshotSize = null;
+  lastStyledSnapshotSize = null;
   lastFakeRenderer = null;
   setAddonForTesting(fakeAddon);
   const result = fn();
@@ -1625,6 +1778,118 @@ Deno.test("snapshotFrame golden keeps a ZWJ family emoji intact on the caret lin
     }
     renderer.destroy();
   });
+});
+
+// ---------------------------------------------------------------------------
+// Styled frame snapshots (render_to_buffer_styled)
+// ---------------------------------------------------------------------------
+
+Deno.test("Renderer.snapshotStyled paints the scene to golden styled runs via render_to_buffer_styled", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    // The canonical golden scene (the same one snapshotFrame's golden test
+    // paints): a rounded-border box with 1-cell padding around a bold red
+    // Text('Hi'). The styled fake paints the same geometry into runs —
+    // border/padding cells unstyled, the inner text cells carrying the
+    // leaf's lifted style — and merges adjacent cells with identical
+    // style, mirroring the real render_to_buffer_styled (see the
+    // `render_to_buffer_styled_*` Rust unit tests in
+    // src/bindings/tern-node/src/lib.rs).
+    renderer.root.addChild(
+      Box({ border_style: "rounded", padding: 1 }, Text({ text: "Hi", fg: "#ff0000", bold: true })),
+    );
+    const frame = renderer.snapshotStyled(6, 3);
+    // Adjacent cells with identical style merge into one run: the unstyled
+    // border glyphs fold with the unstyled trailing padding spaces on each
+    // row, while the styled inner text stays its own run between the two
+    // unstyled `│` cells.
+    const expected: StyleRunJs[][] = [
+      [{ text: "┌──┐  " }],
+      [{ text: "│" }, { text: "Hi", fg: "#ff0000", bold: true }, { text: "│  " }],
+      [{ text: "└──┘  " }],
+    ];
+    if (!styledFramesEqual(frame, expected)) {
+      throw new Error(`unexpected styled runs: ${JSON.stringify(frame)}`);
+    }
+    // The viewport was forwarded to the native method.
+    if (
+      lastStyledSnapshotSize === null ||
+      lastStyledSnapshotSize[0] !== 6 ||
+      lastStyledSnapshotSize[1] !== 3
+    ) {
+      throw new Error(`viewport not forwarded: ${JSON.stringify(lastStyledSnapshotSize)}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("Renderer.snapshotStyled defaults the viewport to the native shared size", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Text({ text: "x" }));
+    // No viewport args: the native method falls back to its shared viewport,
+    // so the JS layer must delegate with undefined, undefined.
+    renderer.snapshotStyled();
+    if (
+      lastStyledSnapshotSize === null ||
+      lastStyledSnapshotSize[0] !== undefined ||
+      lastStyledSnapshotSize[1] !== undefined
+    ) {
+      throw new Error(`default viewport not forwarded: ${JSON.stringify(lastStyledSnapshotSize)}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("snapshotStyled run texts reconstruct the snapshotFrame rows", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(
+      Box({ border_style: "rounded", padding: 1 }, Text({ text: "Hi", fg: "#ff0000" })),
+    );
+    const styled = renderer.snapshotStyled(6, 3);
+    const plain = renderer.snapshotFrame(6, 3);
+    // The binding's documented invariant: concatenating a row's run texts
+    // reconstructs the plain render_to_buffer row string exactly.
+    const reconstructed = styled.map((row) => row.map((run) => run.text).join(""));
+    if (!framesEqual(reconstructed, plain)) {
+      throw new Error(
+        `styled runs do not reconstruct plain rows: ${JSON.stringify(reconstructed)} vs ${JSON.stringify(plain)}`,
+      );
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("styledFramesEqual compares row counts, run counts, run text and style fields", () => {
+  // Identical frames — the same rows, runs, texts and style fields.
+  if (!styledFramesEqual(
+    [[{ text: "│" }, { text: "Hi", fg: "#ff0000", bold: true }]],
+    [[{ text: "│" }, { text: "Hi", fg: "#ff0000", bold: true }]],
+  )) {
+    throw new Error("identical styled frames must be equal");
+  }
+  // Differing run text.
+  if (styledFramesEqual([[{ text: "Hi", fg: "#ff0000" }]], [[{ text: "Bye", fg: "#ff0000" }]])) {
+    throw new Error("differing run text must be unequal");
+  }
+  // Differing color field.
+  if (styledFramesEqual([[{ text: "Hi", fg: "#ff0000" }]], [[{ text: "Hi", fg: "#00ff00" }]])) {
+    throw new Error("differing fg must be unequal");
+  }
+  // Differing modifier field — a run with an explicit modifier differs from
+  // one that omits it (the binding only sets modifiers when applied).
+  if (styledFramesEqual([[{ text: "Hi", fg: "#ff0000" }]], [[{ text: "Hi", fg: "#ff0000", bold: true }]])) {
+    throw new Error("differing bold must be unequal");
+  }
+  // Differing run count within a row.
+  if (styledFramesEqual([[{ text: "Hi" }]], [[{ text: "H" }, { text: "i" }]])) {
+    throw new Error("differing run counts must be unequal");
+  }
+  // Differing row count.
+  if (styledFramesEqual([[{ text: "Hi" }]], [[{ text: "Hi" }], [{ text: "x" }]])) {
+    throw new Error("differing row counts must be unequal");
+  }
 });
 
 // ---------------------------------------------------------------------------
