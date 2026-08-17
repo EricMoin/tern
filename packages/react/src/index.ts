@@ -171,8 +171,10 @@ export interface StreamingTextProps extends TernNodeProps {
    */
   autoScroll?: boolean;
   /**
-   * Soft-wrap long spans at the node width (default `true`). The MVP
-   * compositor always soft-wraps, so the flag is accepted for API stability.
+   * Soft-wrap long spans at the node width (default `true`). When `false`
+   * the stream paints as a SINGLE row trimmed at the right edge (the core
+   * compositor's `wrap: false` single-row paint); pair with `ellipsis` to
+   * stamp `…` on the last visible cell when content is cut off.
    */
   wrap?: boolean;
 }

@@ -475,7 +475,8 @@ impl Compositor {
                     // scrolls its content inside its own fixed frame.
                     let frame = effective_region(scene, id, viewport, false);
                     let content = effective_region(scene, id, viewport, true);
-                    paint_node(node, rect, frame, content, &mut buffer);
+                    let pcr = parent_clip_right(scene, node, &rects);
+                    paint_node(node, rect, frame, content, &mut buffer, pcr);
                 }
             }
         }
@@ -697,7 +698,8 @@ impl Compositor {
                     continue;
                 }
                 if let Some(node) = scene.node(id) {
-                    paint_node(node, rect, frame, content, scratch);
+                    let pcr = parent_clip_right(scene, node, &rects);
+                    paint_node(node, rect, frame, content, scratch, pcr);
                     repainted += 1;
                 }
             }
@@ -1373,13 +1375,61 @@ fn painted_bounds_touch(rect: Rect, region: Region, u: &Rect) -> bool {
 /// Paint a single node into its laid-out rect, drawing its frame through
 /// `frame` (box background/border) and its content through `content` (text,
 /// stream spans).
-fn paint_node(node: &SceneNode, rect: Rect, frame: Region, content: Region, buffer: &mut Buffer) {
+fn paint_node(
+    node: &SceneNode,
+    rect: Rect,
+    frame: Region,
+    content: Region,
+    buffer: &mut Buffer,
+    parent_clip_right: Option<i32>,
+) {
     match node.kind {
         NodeKind::Root => {}
         NodeKind::Box => paint_box(node, rect, frame, buffer),
-        NodeKind::Text => paint_text(node, rect, content, buffer),
-        NodeKind::StreamingText => paint_streaming_text(node, rect, content, buffer),
+        NodeKind::Text => paint_text(node, rect, content, buffer, parent_clip_right),
+        NodeKind::StreamingText => {
+            paint_streaming_text(node, rect, content, buffer, parent_clip_right)
+        }
     }
+}
+
+/// The right edge a `wrap: false` single-row leaf must not paint past: the
+/// tightest padding-box right edge (border box minus the border width) along
+/// its ancestor chain. A single-row text is intrinsic-width (never
+/// flex-shrunk), so it — and any intermediate auto-width container — can
+/// overflow the enclosing frame; clipping at the tightest ancestor bound
+/// keeps every ancestor's border ring visible (the status-bar ellipsis case:
+/// the `…` lands on the last CONTENT cell of the frame instead of
+/// overwriting its border glyph). `None` when no ancestor has a laid-out
+/// rect — the region clip then bounds the paint as before.
+fn parent_clip_right(scene: &Scene, node: &SceneNode, rects: &HashMap<NodeId, Rect>) -> Option<i32> {
+    let mut tightest: Option<i32> = None;
+    let mut cur = node.parent;
+    while let Some(parent_id) = cur {
+        let Some(parent) = scene.node(parent_id) else {
+            break;
+        };
+        if parent.kind == NodeKind::Root {
+            break;
+        }
+        if let Some(prect) = rects.get(&parent_id) {
+            // The effective border width: the explicit `border` prop, else 1
+            // when the style declares a visible border ring (the ring is
+            // painted from the style alone, so it must inset children even
+            // without the prop — the binding injects `border: 1` for styled
+            // boxes, and raw Rust scenes get the same rule here).
+            let border = match parent.props.get("border") {
+                Some(PropValue::Int(b)) => *b as i32,
+                Some(PropValue::Float(f)) => *f as i32,
+                _ if parent.style.border_style != BorderStyle::None => 1,
+                _ => 0,
+            };
+            let edge = prect.right() - border.max(0);
+            tightest = Some(tightest.map_or(edge, |t| t.min(edge)));
+        }
+        cur = parent.parent;
+    }
+    tightest
 }
 
 /// Paint a box: background fill, optional border ring, then children (painted
@@ -1487,7 +1537,13 @@ fn paint_box(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) 
 /// stays on row 1. The caret position is mapped through the region like any
 /// other cell, so a scrolled/clipped text leaf scrolls its caret along with
 /// its content.
-fn paint_text(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) {
+fn paint_text(
+    node: &SceneNode,
+    rect: Rect,
+    region: Region,
+    buffer: &mut Buffer,
+    parent_clip_right: Option<i32>,
+) {
     // A rect with no interior rows (zero height) has no painted extent — its
     // cells are bounded by the rect mapped through the region, and the dirty
     // union is built from exactly those mapped rects, so a node must never
@@ -1503,7 +1559,8 @@ fn paint_text(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer)
         if wrap_enabled(node) {
             paint_text_wrapped(&content, node.style, rect, region, buffer);
         } else {
-            paint_text_single_row(&content, node.style, rect, region, buffer);
+            let ellipsis = matches!(node.props.get("ellipsis"), Some(PropValue::Bool(true)));
+            paint_text_single_row(&content, node.style, rect, region, buffer, ellipsis, parent_clip_right);
         }
     }
 
@@ -1586,7 +1643,21 @@ fn paint_text_wrapped(content: &str, style: Style, rect: Rect, region: Region, b
 /// split mid-glyph, multi-width aware. A hard `\n` ends the line (there is no
 /// next row in single-row mode). The row is drawn through `region` like any
 /// other cell.
-fn paint_text_single_row(content: &str, style: Style, rect: Rect, region: Region, buffer: &mut Buffer) {
+///
+/// When `ellipsis` is true and the content is trimmed (or would run past the
+/// right edge), the last visible cell paints the `…` glyph instead — the
+/// single-row truncation affordance (status bars, headers). The ellipsis is
+/// only drawn when something was actually cut off; content that fits exactly
+/// paints unchanged.
+fn paint_text_single_row(
+    content: &str,
+    style: Style,
+    rect: Rect,
+    region: Region,
+    buffer: &mut Buffer,
+    ellipsis: bool,
+    clip_right: Option<i32>,
+) {
     // The single row must land inside the clip (mirrors the pre-wrap guard).
     let y = rect.y;
     if region.map_y(y) < region.clip.y
@@ -1595,28 +1666,41 @@ fn paint_text_single_row(content: &str, style: Style, rect: Rect, region: Region
     {
         return;
     }
-    let right = rect.right().min(region.clip.right() + region.scroll_x);
+    let right = rect
+        .right()
+        .min(region.clip.right() + region.scroll_x)
+        .min(clip_right.unwrap_or(i32::MAX));
     if right <= rect.x {
         return;
     }
     let mut cx = rect.x;
+    let mut truncated = false;
     for cluster in clusters(content) {
-        if cx >= right || cluster.text == "\n" || cluster.text == "\r\n" {
-            return; // single-row: the line ends here
+        // single-row: a hard newline ends the line — the content up to it
+        // was painted in full, so no ellipsis.
+        if cluster.text == "\n" || cluster.text == "\r\n" {
+            return;
         }
         let w = cluster.width;
         if w == 0 {
             continue;
         }
-        // Trim: a glyph that would straddle the right edge is dropped whole
-        // (never mid-cluster); nothing after it fits either.
-        if cx + w as i32 > right {
-            return;
+        // Trim: a glyph at (or past) the right edge, or one that would
+        // straddle it, is dropped whole (never mid-cluster); nothing after
+        // it fits either.
+        if cx >= right || cx + w as i32 > right {
+            truncated = true;
+            break;
         }
         if cx >= 0 {
             buffer.set_cluster_region(cx, y, &cluster, style, region);
         }
         cx += w as i32;
+    }
+    // The truncation affordance: content was cut off, so the last visible
+    // cell reports it with `…` (overwriting whatever glyph it held).
+    if truncated && ellipsis && right - 1 >= rect.x {
+        buffer.set_char_region(right - 1, y, '…', style, region);
     }
 }
 
@@ -1654,7 +1738,13 @@ fn wrap_enabled(node: &SceneNode) -> bool {
 /// A node with `wrap: false` instead paints its whole stream as one
 /// single-row line, trimmed at the right edge (see
 /// [`paint_streaming_text_single_row`]).
-fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) {
+fn paint_streaming_text(
+    node: &SceneNode,
+    rect: Rect,
+    region: Region,
+    buffer: &mut Buffer,
+    parent_clip_right: Option<i32>,
+) {
     let Some(stream) = node.stream.as_deref() else {
         return;
     };
@@ -1662,7 +1752,8 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &m
         return;
     }
     if !wrap_enabled(node) {
-        return paint_streaming_text_single_row(stream, rect, region, buffer);
+        let ellipsis = matches!(node.props.get("ellipsis"), Some(PropValue::Bool(true)));
+        return paint_streaming_text_single_row(stream, rect, region, buffer, ellipsis, parent_clip_right);
     }
     let right = rect.right().min(region.clip.right() + region.scroll_x);
     // Content rows pan inside the node's own frame: the last content row that
@@ -1739,12 +1830,17 @@ fn paint_streaming_text_single_row(
     rect: Rect,
     region: Region,
     buffer: &mut Buffer,
+    ellipsis: bool,
+    clip_right: Option<i32>,
 ) {
     // A zero-height rect has no painted extent (see the `paint_text` guard).
     if rect.bottom() <= rect.y {
         return;
     }
-    let right = rect.right().min(region.clip.right() + region.scroll_x);
+    let right = rect
+        .right()
+        .min(region.clip.right() + region.scroll_x)
+        .min(clip_right.unwrap_or(i32::MAX));
     if right <= rect.x {
         return;
     }
@@ -1756,6 +1852,10 @@ fn paint_streaming_text_single_row(
         return;
     }
     let mut cx = rect.x;
+    let mut truncated = false;
+    // The style of the span whose content was cut off — the ellipsis paints
+    // with it.
+    let mut trim_style = Style::new();
     for span in stream {
         let text = strip_escapes(&span.text);
         for cluster in clusters(&text) {
@@ -1766,14 +1866,23 @@ fn paint_streaming_text_single_row(
             if w == 0 {
                 continue;
             }
-            // Trim: a glyph that would straddle the right edge is dropped
-            // whole (never mid-cluster); nothing after it fits either.
-            if cx + w as i32 > right {
-                return;
+            // Trim: a glyph at (or past) the right edge, or one that would
+            // straddle it, is dropped whole (never mid-cluster); nothing
+            // after it fits either.
+            if cx >= right || cx + w as i32 > right {
+                truncated = true;
+                trim_style = span.style;
+                break;
             }
             buffer.set_cluster_region(cx, rect.y, &cluster, span.style, region);
             cx += w as i32;
         }
+        if truncated {
+            break;
+        }
+    }
+    if truncated && ellipsis && right - 1 >= rect.x {
+        buffer.set_char_region(right - 1, rect.y, '…', trim_style, region);
     }
 }
 
@@ -1808,7 +1917,10 @@ fn display_width(content: &str) -> u32 {
 /// cluster never splits across rows.
 fn measure_wrapped(content: &str, width: u32) -> (u32, u32) {
     if content.is_empty() {
-        return (0, 0);
+        // An empty text leaf still occupies ONE row — the layout counterpart
+        // of a blank terminal line (and the reason an empty `<Text>` spacer
+        // keeps its row instead of collapsing the column layout).
+        return (0, 1);
     }
     let width = width.max(1);
     let mut lines: u32 = 1;
@@ -2289,6 +2401,91 @@ mod tests {
         assert_eq!(buffer.cell(2, 1).unwrap().ch, 'k');
         assert_eq!(buffer.cell(3, 2).unwrap().ch, '+'); // box bottom-right corner
         assert_eq!(buffer.cell(5, 0).unwrap().ch, ' '); // outside the box
+    }
+
+    #[test]
+    fn single_row_text_ellipsis_trims_at_parent_content_box() {
+        // The status-bar scenario: a `wrap: false` text whose intrinsic
+        // width overflows its parent box (it is never flex-shrunk). The
+        // paint must clip at the tightest ancestor padding-box edge — the
+        // frame's border ring stays visible and the `…` lands on the LAST
+        // content cell, not over the border glyph.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let frame = scene
+            .add_child(
+                root,
+                NodeKind::Box,
+                Style::new().border_style(BorderStyle::Rounded),
+            )
+            .unwrap();
+        scene.set_prop(frame, "padding", PropValue::Int(1));
+        scene.set_prop(frame, "flex_direction", PropValue::Str("column".into()));
+        scene.set_prop(frame, "width", PropValue::Str("100%".into()));
+        scene.set_prop(frame, "height", PropValue::Int(4));
+        let sb = scene.add_child(frame, NodeKind::Box, Style::new()).unwrap();
+        let text = scene.add_child(sb, NodeKind::Text, Style::new()).unwrap();
+        scene.set_prop(text, "text", PropValue::Str("x".repeat(80)));
+        scene.set_prop(text, "wrap", PropValue::Bool(false));
+        scene.set_prop(text, "ellipsis", PropValue::Bool(true));
+
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(30, 4));
+        // Frame spans the full 30-column viewport; its content box is
+        // columns 1..=28 (border + padding), so the single-row text paints
+        // x's at 1..=27 with the ellipsis at 28 and the border at 29.
+        assert_eq!(buffer.cell(0, 0).unwrap().ch, '┌');
+        assert_eq!(buffer.cell(29, 0).unwrap().ch, '┐');
+        assert_eq!(buffer.cell(1, 1).unwrap().ch, 'x');
+        assert_eq!(buffer.cell(27, 1).unwrap().ch, 'x');
+        assert_eq!(buffer.cell(28, 1).unwrap().ch, '…');
+        assert_eq!(buffer.cell(29, 1).unwrap().ch, '│'); // border survives
+        assert_eq!(buffer.cell(29, 3).unwrap().ch, '┘');
+    }
+
+    #[test]
+    fn single_row_text_ellipsis_only_when_truncated() {
+        // Content that fits paints unchanged: no ellipsis stamped.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let text = scene.add_child(root, NodeKind::Text, Style::new()).unwrap();
+        scene.set_prop(text, "text", PropValue::Str("short".into()));
+        scene.set_prop(text, "wrap", PropValue::Bool(false));
+        scene.set_prop(text, "ellipsis", PropValue::Bool(true));
+
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(10, 2));
+        assert_eq!(buffer.cell(0, 0).unwrap().ch, 's');
+        assert_eq!(buffer.cell(4, 0).unwrap().ch, 't');
+        assert_eq!(buffer.cell(5, 0).unwrap().ch, ' '); // nothing past the text
+    }
+
+    #[test]
+    fn single_row_text_clips_without_ellipsis_flag() {
+        // `wrap: false` alone trims at the parent box edge with a hard cut —
+        // no ellipsis glyph without the flag.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let box_ = scene
+            .add_child(root, NodeKind::Box, Style::new().border_style(BorderStyle::Plain))
+            .unwrap();
+        scene.set_prop(box_, "width", PropValue::Int(6));
+        scene.set_prop(box_, "padding", PropValue::Int(1));
+        let text = scene.add_child(box_, NodeKind::Text, Style::new()).unwrap();
+        scene.set_prop(text, "text", PropValue::Str("abcdefgh".into()));
+        scene.set_prop(text, "wrap", PropValue::Bool(false));
+
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(12, 4));
+        // Box spans 0..=5 with a plain border + 1 padding: the content box is
+        // columns 1..=4. The intrinsic-width text (8 cells) is clipped at the
+        // box's padding-box edge — 'a'..='d' paint, the border survives.
+        assert_eq!(buffer.cell(0, 0).unwrap().ch, '+');
+        assert_eq!(buffer.cell(5, 0).unwrap().ch, '+');
+        assert_eq!(buffer.cell(1, 1).unwrap().ch, 'a');
+        assert_eq!(buffer.cell(4, 1).unwrap().ch, 'd');
+        assert_eq!(buffer.cell(5, 1).unwrap().ch, '|'); // border survives
+        assert_eq!(buffer.cell(6, 1).unwrap().ch, ' '); // nothing past the box
     }
 
     #[test]
@@ -3520,9 +3717,11 @@ mod tests {
         let scene4 = streaming_scene(10, 1);
         let root4 = scene4.root_id();
         let s4 = scene4.children(root4).unwrap()[0];
+        // An empty stream still occupies one row (the empty-line rule — a
+        // blank spacer keeps its row in the layout).
         assert_eq!(
             comp.content_size(&scene4, s4, Size::new(10, 1)),
-            Some((0, 0))
+            Some((0, 1))
         );
 
         // A `wrap: false` leaf paints one trimmed row: content size collapses
@@ -3902,4 +4101,6 @@ mod tests {
             fresh2.content_size(&scene, ids.stream, Size::new(30, 8))
         );
     }
+
+
 }
