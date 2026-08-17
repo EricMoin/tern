@@ -4,6 +4,11 @@
   "private": false,
   "license": "MIT",
   "description": "tern solid \u2014 SolidJS custom renderer for tern",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EricMoin/tern.git",
+    "directory": "packages/solid"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
