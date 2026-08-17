@@ -448,7 +448,7 @@ fn build_node(
         return None;
     }
 
-    let style = scene_node_style(node, viewport, is_root);
+    let style = scene_node_style(scene, node, viewport, is_root);
 
     let children: Vec<TaffyNodeId> = visible_children(scene, node)
         .into_iter()
@@ -509,7 +509,7 @@ fn build_node(
 /// filling the viewport when it declares no own size. Shared by
 /// [`build_node`] and the incremental reconciler so the cached style always
 /// matches what was built.
-fn scene_node_style(node: &SceneNode, viewport: Size, is_root: bool) -> TaffyStyle {
+fn scene_node_style(scene: &Scene, node: &SceneNode, viewport: Size, is_root: bool) -> TaffyStyle {
     let mut style = props_to_style(&node.props);
 
     // A `wrap: false` text/streaming leaf is a single intrinsic-width line —
@@ -533,6 +533,7 @@ fn scene_node_style(node: &SceneNode, viewport: Size, is_root: bool) -> TaffySty
     }
     style
 }
+
 
 /// The node's visible children: every child that is not `display: none`; for
 /// `Text`/`StreamingText` leaves (which are taffy leaves), only the
@@ -628,7 +629,7 @@ fn reconcile_one(
     counters: &mut ReconcileCounters,
 ) -> Option<()> {
     let is_root = node.parent.is_none();
-    let style = scene_node_style(node, viewport, is_root);
+    let style = scene_node_style(scene, node, viewport, is_root);
     let content = match node.kind {
         NodeKind::Text => match node.props.get("text") {
             Some(PropValue::Str(s)) => Some(s.clone()),
@@ -825,7 +826,7 @@ fn snapshot_subtree(scene: &Scene, id: NodeId, viewport: Size, state: &mut Engin
         id,
         NodeSnapshot {
             kind: node.kind,
-            style: scene_node_style(node, viewport, is_root),
+            style: scene_node_style(scene, node, viewport, is_root),
             content: match node.kind {
                 NodeKind::Text => match node.props.get("text") {
                     Some(PropValue::Str(s)) => Some(s.clone()),
@@ -1175,7 +1176,11 @@ fn display_width(content: &str) -> usize {
 /// never splits across rows. An empty content reports `(0, 0)`.
 fn measure_wrapped(content: &str, width: u32) -> (u32, u32) {
     if content.is_empty() {
-        return (0, 0);
+        // An empty text leaf still occupies ONE row — the layout counterpart
+        // of a blank terminal line (and the reason an empty `<Text>` spacer
+        // keeps its row instead of collapsing the column layout). Mirrors
+        // the compositor's `measure_wrapped` empty rule.
+        return (0, 1);
     }
     let width = width.max(1);
     let mut lines: u32 = 1;
@@ -2131,4 +2136,5 @@ mod tests {
         assert_eq!(parse_percent("50 %"), None);
         assert_eq!(parse_percent(""), None);
     }
+
 }

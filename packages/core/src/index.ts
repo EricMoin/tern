@@ -5886,7 +5886,15 @@ export class Renderer {
     switch (event.type) {
       case "key":
         if (event.key !== undefined) {
-          for (const handler of this.#keyHandlers) handler(event.key);
+          // Snapshot the handler set BEFORE dispatching: a handler may
+          // synchronously re-render its tree (e.g. an approval dialog that
+          // resolves its promise on `y` remounts the input bar), and the
+          // remounted components subscribe DURING this loop. Iterating the
+          // live set would deliver the SAME key event to the freshly
+          // mounted handler — the decision keystroke would leak into the
+          // new input buffer. Dispatch goes to the handlers registered at
+          // dispatch time, exactly once each.
+          for (const handler of [...this.#keyHandlers]) handler(event.key);
         }
         break;
       case "resize":

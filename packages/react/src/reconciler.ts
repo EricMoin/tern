@@ -188,10 +188,11 @@ const THEME_PROPS = new Set(["role", "component"]);
 /**
  * Component-consumed props of `<StreamingText>` that must never reach a scene
  * node: `stream` is a non-scalar async iterable (the binding drops objects)
- * and `autoScroll` / `wrap` are component behavior flags, not tern node
- * props.
+ * and `autoScroll` is a component behavior flag. `wrap` IS a scene prop — the
+ * compositor honors `wrap: false` (single-row paint, trimmed at the right
+ * edge), so it flows through to the core factory.
  */
-const STREAMING_TEXT_PROPS = new Set(["stream", "autoScroll", "wrap"]);
+const STREAMING_TEXT_PROPS = new Set(["stream", "autoScroll"]);
 
 /**
  * Component-consumed props of `<Input>` that must never reach a scene node:
