@@ -73,9 +73,11 @@ import {
   type Node,
   type NodeProps,
   type PanelsProps,
+  type ProgressProps,
   type Renderer,
   type ScrollViewProps,
   type SelectProps,
+  type SpinnerProps,
   type TableProps,
   type TabsProps,
   type TextareaProps,
@@ -350,7 +352,10 @@ export const hostConfig: HostConfig = {
         // consumes; `TextareaProps` is an open record over `NodeProps`.
         return CoreTextarea(nodeProps as TextareaProps);
       case "spinner":
-        return CoreSpinner(nodeProps);
+        // The determinate bar width is a cell count the core factory
+        // consumes; `SpinnerProps` narrows it while `NodeProps` is an open
+        // record (its `width` also admits `"N%"` layout strings).
+        return CoreSpinner(nodeProps as SpinnerProps);
       case "status_bar":
         return CoreStatusBar(nodeProps);
       case "panels":
@@ -381,8 +386,10 @@ export const hostConfig: HostConfig = {
       case "progress":
         // The label / show_percentage keys are consumed by the core factory
         // (never scene props); `ProgressProps` is an open record over
-        // `NodeProps`, so no re-attach is needed here.
-        return CoreProgress(nodeProps);
+        // `NodeProps`, so no re-attach is needed here. The gauge width stays
+        // a cell count, so the widened `NodeProps.width` narrows at the
+        // factory boundary.
+        return CoreProgress(nodeProps as ProgressProps);
       case "modal":
         // The content node list is JS bookkeeping the core factory consumes
         // (mirroring `Panels`' `panels`); `toNodeProps` strips it above, so

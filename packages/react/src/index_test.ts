@@ -711,6 +711,31 @@ Deno.test("toNodeProps keeps tern props, drops children/key/ref/undefined", () =
   }
 });
 
+Deno.test("percentage size props pass through as strings", () => {
+  // `width` / `min_width` / `max_width` accept `"N%"` strings; they survive
+  // toNodeProps verbatim and reach the node's prop map through commitUpdate
+  // (the JS -> native binding maps them to Str props the layout engine reads).
+  const props: Record<string, unknown> = {
+    width: "50%",
+    min_width: "25%",
+    max_width: "75%",
+    height: 10,
+    children: [createElement(Text, { text: "kid" })],
+  };
+  const out = toNodeProps(props as TernProps);
+  if (out.width !== "50%" || out.min_width !== "25%" || out.max_width !== "75%") {
+    throw new Error(`percentage strings lost: ${JSON.stringify(out)}`);
+  }
+  if (out.height !== 10) throw new Error(`height = ${out.height}`);
+
+  const container = { root: CoreBox(), renderer: mockRenderer().renderer };
+  const node = hc.createInstance("box", { width: "50%" }, container, {}, null);
+  hc.commitUpdate(node, "box", { width: "50%" }, { width: "60%", min_width: "30%" }, null);
+  if (node.props.width !== "60%" || node.props.min_width !== "30%") {
+    throw new Error(`commitUpdate must apply the percentage props: ${JSON.stringify(node.props)}`);
+  }
+});
+
 Deno.test("toNodeProps strips component-level props for input and spinner", () => {
   const inputOut = toNodeProps(
     {

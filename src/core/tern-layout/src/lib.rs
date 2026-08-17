@@ -28,9 +28,9 @@
 //! | `padding_x` / `padding_y` | `Int` \| `Float` (cells; per-axis override of `padding`)      | `padding` / 0 |
 //! | `padding_top` / `padding_right` / `padding_bottom` / `padding_left` | `Int` \| `Float` (cells; per-side override of the axis/uniform padding) | `padding_x` / `padding_y` / `padding` / 0 |
 //! | `border`          | `Int` \| `Float` (cells, uniform border width)                       | 0      |
-//! | `width` / `height`| `Int` \| `Float` (cells)                                             | auto   |
-//! | `min_width` / `min_height` | `Int` \| `Float` (cells)                                      | auto   |
-//! | `max_width` / `max_height` | `Int` \| `Float` (cells)                                      | auto   |
+//! | `width` / `height`| `Int` \| `Float` (cells) \| `Str("N%")` (percent of the containing block's size) | auto   |
+//! | `min_width` / `min_height` | `Int` \| `Float` (cells) \| `Str("N%")` (percent of the containing block's size) | auto   |
+//! | `max_width` / `max_height` | `Int` \| `Float` (cells) \| `Str("N%")` (percent of the containing block's size) | auto   |
 //! | `flex_basis`      | `Int` \| `Float` (cells) — the item's initial main-axis size; flex grow/shrink resolves from it | auto   |
 //! | `position`        | `Str("relative"\|"absolute")`                                       | `"relative"` |
 //! | `top` / `right` / `bottom` / `left` | `Int` \| `Float` (cells, inset edges)                       | auto   |
@@ -984,10 +984,9 @@ fn props_to_style(props: &PropMap) -> TaffyStyle {
             .unwrap_or(LengthPercentageAuto::Auto),
     };
 
-    let (padding, border, size) = (
+    let (padding, border) = (
         prop_number(props, "padding"),
         prop_number(props, "border"),
-        (prop_number(props, "width"), prop_number(props, "height")),
     );
 
     // Per-side spacing overrides the per-axis prop, which overrides the
@@ -1055,24 +1054,32 @@ fn props_to_style(props: &PropMap) -> TaffyStyle {
             bottom: length_auto(margin_bottom.or(margin_y).or(margin).unwrap_or(0.0)),
             left: length_auto(margin_left.or(margin_x).or(margin).unwrap_or(0.0)),
         },
+        // Width/height (and the min/max clamps below) accept a number
+        // (length in cells) or a `"N%"` string (percent of the containing
+        // block's content-box size, via `LengthPercentage::Percent` — taffy
+        // stores the fraction, see `prop_length_percentage`).
         size: TaffySize {
-            width: size.0.map(dimension).unwrap_or(Dimension::Auto),
-            height: size.1.map(dimension).unwrap_or(Dimension::Auto),
+            width: prop_length_percentage(props, "width")
+                .map(Dimension::from)
+                .unwrap_or(Dimension::Auto),
+            height: prop_length_percentage(props, "height")
+                .map(Dimension::from)
+                .unwrap_or(Dimension::Auto),
         },
         min_size: TaffySize {
-            width: prop_number(props, "min_width")
-                .map(dimension)
+            width: prop_length_percentage(props, "min_width")
+                .map(Dimension::from)
                 .unwrap_or(Dimension::Auto),
-            height: prop_number(props, "min_height")
-                .map(dimension)
+            height: prop_length_percentage(props, "min_height")
+                .map(Dimension::from)
                 .unwrap_or(Dimension::Auto),
         },
         max_size: TaffySize {
-            width: prop_number(props, "max_width")
-                .map(dimension)
+            width: prop_length_percentage(props, "max_width")
+                .map(Dimension::from)
                 .unwrap_or(Dimension::Auto),
-            height: prop_number(props, "max_height")
-                .map(dimension)
+            height: prop_length_percentage(props, "max_height")
+                .map(Dimension::from)
                 .unwrap_or(Dimension::Auto),
         },
         // The item's initial main-axis size: taffy's flex algorithm grows or
@@ -1102,6 +1109,39 @@ fn prop_number(props: &PropMap, key: &str) -> Option<f32> {
         Some(PropValue::Float(f)) => Some(*f as f32),
         _ => None,
     }
+}
+
+/// Read a length-or-percentage property: a number is a length in cells, a
+/// `"N%"` string is a percentage of the containing block's size.
+///
+/// Percentage semantics follow taffy 0.7's `LengthPercentage::Percent`, which
+/// stores a **0..1 fraction** (50% -> 0.5) — see
+/// `taffy-0.7.7/src/style/dimension.rs:23-25` ("percentages are represented as
+/// a f32 value in the range [0.0, 1.0] NOT the range [0.0, 100.0]").
+///
+/// Degradation is predictable and panic-free: a string that does not match
+/// `${number}%` (e.g. `"50"`, `"50 %"`, `"abc"`, `""`) yields `None`, so the
+/// prop behaves exactly as if it were absent (the engine falls back to
+/// `Auto`). A `%` value is never clamped; taffy clamps resulting geometry to
+/// non-negative sizes.
+fn prop_length_percentage(props: &PropMap, key: &str) -> Option<LengthPercentage> {
+    match props.get(key) {
+        Some(PropValue::Int(i)) => Some(LengthPercentage::Length(*i as f32)),
+        Some(PropValue::Float(f)) => Some(LengthPercentage::Length(*f as f32)),
+        Some(PropValue::Str(s)) => parse_percent(s).map(LengthPercentage::Percent),
+        _ => None,
+    }
+}
+
+/// Parse a `"N%"` string into a 0..1 fraction (`"50%"` -> `0.5`). Returns
+/// `None` for anything that is not a plain decimal number followed by a single
+/// trailing `%` (no leading/trailing whitespace, no units). Negative values
+/// parse and pass through unchanged — the resulting geometry is clamped to
+/// non-negative sizes by taffy.
+fn parse_percent(s: &str) -> Option<f32> {
+    let num = s.strip_suffix('%')?;
+    let value: f32 = num.parse().ok()?;
+    Some(value / 100.0)
 }
 
 /// Read a boolean property.
@@ -1989,5 +2029,106 @@ mod tests {
         // a keeps the row-start slot; abs overlaps at x=15 without pushing it.
         assert_eq!(rect_of(&out, a), Rect::new(0, 0, 10, 10));
         assert_eq!(rect_of(&out, abs), Rect::new(15, 0, 10, 10));
+    }
+
+    #[test]
+    fn percent_width_resolves_against_the_containing_block() {
+        // A `width: "50%"` string maps to taffy `Dimension::Percent(0.5)`
+        // (taffy stores a 0..1 fraction), which resolves against the parent's
+        // content-box width: the root fills the 100-cell viewport, so the
+        // child lands at 50 cells.
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        let child = add_box(&mut scene, root);
+        set_prop(&mut scene, child, "width", PropValue::Str("50%".into()));
+        set_prop(&mut scene, child, "height", PropValue::Int(10));
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 50));
+        assert_eq!(rect_of(&out, child), Rect::new(0, 0, 50, 10));
+    }
+
+    #[test]
+    fn percent_width_tracks_root_width_changes() {
+        // The same engine re-layouts on a viewport change: the percentage
+        // re-resolves against the new containing-block width (100 -> 200
+        // cells yields 50 -> 100 cells), on both the incremental and the
+        // fresh-cache paths.
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        let child = add_box(&mut scene, root);
+        set_prop(&mut scene, child, "width", PropValue::Str("50%".into()));
+        set_prop(&mut scene, child, "height", PropValue::Int(10));
+
+        let mut engine = TaffyLayoutEngine::new();
+        let out = engine.compute(&scene, Size::new(100, 50));
+        assert_eq!(rect_of(&out, child).width, 50);
+
+        // Same scene, wider viewport — the incremental path re-resolves.
+        let out = engine.compute(&scene, Size::new(200, 50));
+        assert_eq!(rect_of(&out, child).width, 100);
+
+        // A fresh engine on the same scene (cold cache) agrees.
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(200, 50));
+        assert_eq!(rect_of(&out, child).width, 100);
+    }
+
+    #[test]
+    fn percent_min_and_max_clamp_the_size() {
+        // min_width/max_width accept the same `"N%"` strings as width: the
+        // resolved size is clamped against the percentage min/max.
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        let min_child = add_box(&mut scene, root);
+        set_prop(&mut scene, min_child, "width", PropValue::Str("20%".into()));
+        set_prop(&mut scene, min_child, "min_width", PropValue::Str("30%".into()));
+        let max_child = add_box(&mut scene, root);
+        set_prop(&mut scene, max_child, "width", PropValue::Str("20%".into()));
+        set_prop(&mut scene, max_child, "max_width", PropValue::Str("10%".into()));
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 50));
+        // 20% = 20 cells, clamped up to min 30% = 30 cells.
+        assert_eq!(rect_of(&out, min_child).width, 30);
+        // 20% = 20 cells, clamped down to max 10% = 10 cells.
+        assert_eq!(rect_of(&out, max_child).width, 10);
+    }
+
+    #[test]
+    fn malformed_percent_strings_fall_back_to_auto() {
+        // A string that does not match `${number}%` degrades to the absent
+        // prop: the style keeps `Dimension::Auto`, never panics.
+        for bad in ["50", "abc%", "50 %", "%", "", "5%%"] {
+            let style = props_to_style(&PropMap::from([(
+                "width".to_string(),
+                PropValue::Str(bad.into()),
+            )]));
+            assert_eq!(style.size.width, Dimension::Auto, "width = {bad:?}");
+        }
+
+        // And the layout-level observable: a malformed width lays out exactly
+        // like an unset width (content-sized).
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        let plain = add_box(&mut scene, root);
+        set_prop(&mut scene, plain, "height", PropValue::Int(10));
+        let malformed = add_box(&mut scene, root);
+        set_prop(&mut scene, malformed, "width", PropValue::Str("50".into()));
+        set_prop(&mut scene, malformed, "height", PropValue::Int(10));
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 50));
+        assert_eq!(rect_of(&out, malformed), rect_of(&out, plain));
+    }
+
+    #[test]
+    fn parse_percent_reads_the_fraction() {
+        // The `"N%"` -> 0..1 fraction conversion that backs
+        // `prop_length_percentage` (taffy Percent semantics).
+        assert_eq!(parse_percent("50%"), Some(0.5));
+        assert_eq!(parse_percent("100%"), Some(1.0));
+        assert_eq!(parse_percent("0%"), Some(0.0));
+        assert_eq!(parse_percent("25%"), Some(0.25));
+        assert_eq!(parse_percent("150%"), Some(1.5));
+        assert_eq!(parse_percent("50"), None);
+        assert_eq!(parse_percent("50 %"), None);
+        assert_eq!(parse_percent(""), None);
     }
 }
