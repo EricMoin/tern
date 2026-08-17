@@ -304,6 +304,15 @@ export interface CreateRendererOptions {
    */
   useAltScreen?: boolean;
   /**
+   * When `true` (default), the renderer pushes the kitty keyboard protocol
+   * enhancement (DISAMBIGUATE_ESCAPE_CODES) on construction and pops it on
+   * destroy, so modifier combinations like Shift-Enter arrive as distinct
+   * key events instead of collapsing into the unmodified key. Terminals
+   * without the protocol ignore the sequences. Maps to the native
+   * `keyboard_enhancement`.
+   */
+  keyboardEnhancement?: boolean;
+  /**
    * The terminal window title, applied when the renderer is constructed.
    * Maps to the native `title`.
    */
@@ -5733,6 +5742,8 @@ export class Renderer {
     };
     if (options.title !== undefined) nativeOptions.title = options.title;
     if (options.headless !== undefined) nativeOptions.headless = options.headless;
+    if (options.keyboardEnhancement !== undefined)
+      nativeOptions.keyboard_enhancement = options.keyboardEnhancement;
     if (options.size !== undefined) {
       nativeOptions.width = options.size.width;
       nativeOptions.height = options.size.height;

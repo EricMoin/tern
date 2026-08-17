@@ -32,7 +32,8 @@ use std::sync::OnceLock;
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture,
+    EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::style::{
     Attribute, Color as CrosstermColor, Print, ResetColor, SetAttribute, SetBackgroundColor,
@@ -222,6 +223,26 @@ impl Backend {
     pub fn disable_event_listening(&self) -> io::Result<()> {
         let mut out = io::stdout();
         disable_event_listening_to(&mut out)
+    }
+
+    /// Enable the kitty keyboard protocol (progressive enhancement,
+    /// DISAMBIGUATE_ESCAPE_CODES) so modifier combinations like Shift-Enter
+    /// are reported distinctly instead of collapsing into the unmodified
+    /// key. Terminals that do not support the protocol ignore the sequence.
+    /// Pair with [`exit_keyboard_enhancement`](Backend::exit_keyboard_enhancement).
+    pub fn enter_keyboard_enhancement(&self) -> io::Result<()> {
+        let mut out = io::stdout();
+        out.execute(PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        ))?;
+        out.flush()
+    }
+
+    /// Disable the kitty keyboard protocol (pop one enhancement level).
+    pub fn exit_keyboard_enhancement(&self) -> io::Result<()> {
+        let mut out = io::stdout();
+        out.execute(PopKeyboardEnhancementFlags)?;
+        out.flush()
     }
 
     /// The terminal size as `(columns, rows)`.
