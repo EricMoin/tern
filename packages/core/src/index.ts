@@ -190,8 +190,12 @@ export interface NodeProps {
   /** The text content of a `text` node. */
   text?: string;
   // Layout keywords (tern-components).
-  width?: number;
-  height?: number;
+  /** A length in cells, or a `"N%"` percentage of the containing block's
+   * size (passed through as a string prop to the layout engine). */
+  width?: number | `${number}%`;
+  /** A length in cells, or a `"N%"` percentage of the containing block's
+   * size (passed through as a string prop to the layout engine). */
+  height?: number | `${number}%`;
   padding?: number;
   padding_x?: number;
   padding_y?: number;
@@ -206,6 +210,18 @@ export interface NodeProps {
   margin_right?: number;
   margin_bottom?: number;
   margin_left?: number;
+  /** A length in cells, or a `"N%"` percentage of the containing block's
+   * size (passed through as a string prop to the layout engine). */
+  min_width?: number | `${number}%`;
+  /** A length in cells, or a `"N%"` percentage of the containing block's
+   * size (passed through as a string prop to the layout engine). */
+  min_height?: number | `${number}%`;
+  /** A length in cells, or a `"N%"` percentage of the containing block's
+   * size (passed through as a string prop to the layout engine). */
+  max_width?: number | `${number}%`;
+  /** A length in cells, or a `"N%"` percentage of the containing block's
+   * size (passed through as a string prop to the layout engine). */
+  max_height?: number | `${number}%`;
   flex_direction?: "row" | "column";
   // Style keys.
   fg?: string;

@@ -105,6 +105,7 @@ import {
 } from "./index.ts";
 import type {
   NodeProps,
+  ProgressProps,
   SelectOption,
   StyleRunJs,
   TabSpec,
@@ -973,6 +974,52 @@ Deno.test("setProps on an attached node sends only changed keys through set_prop
     }
     if (child.props.text !== "b" || child.props.bold !== true) {
       throw new Error("node.props must mirror the update");
+    }
+  });
+});
+
+Deno.test("percentage size props pass through as strings and snapshot headlessly", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const child = Box({ width: "50%", min_width: "25%", max_width: "75%", height: 10 });
+    renderer.root.addChild(child);
+    const handle = fakeHandleOf(child);
+    if (handle === null) throw new Error("attached child must have a native handle");
+    // The `"N%"` strings cross the JS -> native boundary verbatim: the
+    // binding's json_to_prop_value maps them to PropValue::Str, which
+    // tern-layout reads as a percentage of the containing block's size.
+    if (
+      handle.props.width !== "50%" ||
+      handle.props.min_width !== "25%" ||
+      handle.props.max_width !== "75%" ||
+      handle.props.height !== 10
+    ) {
+      throw new Error(
+        `percentage size props must reach the native handle, got ${JSON.stringify(handle.props)}`,
+      );
+    }
+    if (child.props.width !== "50%" || child.props.min_width !== "25%") {
+      throw new Error("node.props must mirror the percentage strings");
+    }
+    // A percentage-updated setProps goes through the single-key path (the
+    // other keys are kept, so no key is removed and no full-map set_props).
+    child.setProps({ width: "60%", min_width: "25%", max_width: "75%", height: 10 });
+    if (handle.propWrites.length !== 1 || handle.propWrites[0]![1] !== "60%") {
+      throw new Error(
+        `expected one set_prop("width", "60%"), got ${JSON.stringify(handle.propWrites)}`,
+      );
+    }
+    if (handle.fullWrites !== 0) {
+      throw new Error("no removals -> no full-map set_props");
+    }
+    const widthAfter: string = String(handle.props.width);
+    if (widthAfter !== "60%") {
+      throw new Error(`handle width = ${widthAfter}`);
+    }
+    // The headless snapshot paints the percentage-sized scene without error.
+    const frame = renderer.snapshotFrame(100, 10);
+    if (frame.length !== 10) {
+      throw new Error(`snapshotFrame must paint 10 rows, got ${frame.length}`);
     }
   });
 });
@@ -4738,8 +4785,12 @@ Deno.test("Progress resolves the progress component preset through resolveTheme"
   if (out.border_style !== "double") throw new Error(`border_style = ${out.border_style}`);
   if ("component" in out) throw new Error(`component leaked: ${JSON.stringify(out)}`);
   // The preset is stamped onto the framed box by the factory path (the
-  // explicit prop wins over the preset).
-  const node = Progress(resolveTheme(custom, { component: "progress", width: 6, value: 1, max: 4 }));
+  // explicit prop wins over the preset). The resolveTheme output is widened
+  // NodeProps (its `width` now also admits `"N%"` strings), so it narrows to
+  // ProgressProps at the call site — the same cast the react host uses.
+  const node = Progress(
+    resolveTheme(custom, { component: "progress", width: 6, value: 1, max: 4 }) as ProgressProps,
+  );
   if (node.props.fg !== "#98c379") throw new Error(`factory fg = ${node.props.fg}`);
   if (node.props.border_style !== "double") throw new Error(`factory border_style = ${node.props.border_style}`);
 });
