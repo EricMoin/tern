@@ -4,6 +4,11 @@
   "private": false,
   "license": "MIT",
   "description": "tern react \u2014 react-reconciler custom renderer for tern",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EricMoin/tern.git",
+    "directory": "packages/react"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -27,7 +32,8 @@
     "check:tsc": "tsc --noEmit",
     "test": "deno test --allow-env=NODE_ENV src",
     "build": "tsc -p tsconfig.build.json && node ../../tools/fix-dts.mjs dist",
-    "build:tsc": "tsc --noEmit"
+    "build:tsc": "tsc --noEmit",
+    "check:resolve": "node ../../tools/check-import-resolution.mjs"
   },
   "dependencies": {
     "@tern-tui/core": "0.2.0"

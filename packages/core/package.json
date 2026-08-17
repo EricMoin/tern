@@ -4,6 +4,11 @@
   "private": false,
   "license": "MIT",
   "description": "tern core \u2014 TypeScript bindings for the tern TUI engine",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EricMoin/tern.git",
+    "directory": "packages/core"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
