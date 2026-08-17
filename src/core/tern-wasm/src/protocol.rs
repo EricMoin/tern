@@ -40,6 +40,11 @@ pub fn apply_style_key(mut style: Style, key: &str, value: &Value) -> Option<Sty
                 style = style.border_style(parse_border_style(s));
             }
         }
+        "border_color" => {
+            if let Value::String(s) = value {
+                style = style.border_color(parse_color(s));
+            }
+        }
         "fg" => {
             if let Value::String(s) = value {
                 style = style.fg(parse_color(s));
@@ -139,13 +144,15 @@ mod tests {
     fn style_keys_lift_into_style_and_rest_into_props() {
         let (style, props) = props_to_style_map(map(
             r##"{"fg":"#ff0000","bg":"indexed:4","bold":true,"dim":false,
-                "border_style":"rounded","text":"hi","gap":2,"width":10.5}"##,
+                "border_style":"rounded","border_color":"#00ff00",
+                "text":"hi","gap":2,"width":10.5}"##,
         ));
         assert_eq!(style.fg, Color::Rgb(255, 0, 0));
         assert_eq!(style.bg, Color::Indexed(4));
         assert!(style.modifiers.contains(Modifiers::BOLD));
         assert!(!style.modifiers.contains(Modifiers::DIM));
         assert_eq!(style.border_style, BorderStyle::Rounded);
+        assert_eq!(style.border_color, Color::Rgb(0, 255, 0));
         assert_eq!(props.get("text"), Some(&PropValue::Str("hi".into())));
         assert_eq!(props.get("gap"), Some(&PropValue::Int(2)));
         assert_eq!(props.get("width"), Some(&PropValue::Float(10.5)));

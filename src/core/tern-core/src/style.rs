@@ -90,6 +90,11 @@ pub struct Style {
     pub modifiers: Modifiers,
     /// Border style used when the node is painted as a box.
     pub border_style: BorderStyle,
+    /// The color the node's box border glyphs are painted with. `Default`
+    /// (the default) leaves the border glyphs painted with the style's own
+    /// `fg` — the pre-existing behavior — so a style without a border color
+    /// paints byte-identically to before the field existed.
+    pub border_color: Color,
 }
 
 impl Style {
@@ -100,6 +105,7 @@ impl Style {
             bg: Color::Default,
             modifiers: Modifiers::EMPTY,
             border_style: BorderStyle::None,
+            border_color: Color::Default,
         }
     }
 
@@ -130,6 +136,13 @@ impl Style {
     /// Builder: set the border style.
     pub const fn border_style(mut self, border_style: BorderStyle) -> Self {
         self.border_style = border_style;
+        self
+    }
+
+    /// Builder: set the color the border glyphs are painted with. `Default`
+    /// restores the fallback (the style's own `fg`).
+    pub const fn border_color(mut self, border_color: Color) -> Self {
+        self.border_color = border_color;
         self
     }
 }
@@ -164,17 +177,20 @@ mod tests {
         assert_eq!(s.fg, Color::Default);
         assert_eq!(s.bg, Color::Default);
         assert_eq!(s.border_style, BorderStyle::None);
+        assert_eq!(s.border_color, Color::Default); // unset by default
         assert!(s.modifiers.is_empty());
 
         let s2 = Style::new()
             .fg(Color::Rgb(1, 2, 3))
             .bg(Color::Indexed(4))
             .add_modifier(Modifiers::BOLD)
-            .border_style(BorderStyle::Double);
+            .border_style(BorderStyle::Double)
+            .border_color(Color::Rgb(9, 8, 7));
         assert_eq!(s2.fg, Color::Rgb(1, 2, 3));
         assert_eq!(s2.bg, Color::Indexed(4));
         assert!(s2.modifiers.contains(Modifiers::BOLD));
         assert_eq!(s2.border_style, BorderStyle::Double);
+        assert_eq!(s2.border_color, Color::Rgb(9, 8, 7));
         assert_eq!(Color::Rgb(1, 2, 3).rgb(), Some((1, 2, 3)));
         assert_eq!(Color::Default.rgb(), None);
     }

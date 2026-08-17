@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Border color:** `Style::border_color` (tern-core) lets a box's border
+  glyphs paint with a dedicated color — surfaced as the `border_color` style
+  key in the tern-node binding (`setProps` / `setProp` / span styles), as the
+  `borderColor` camelCase prop on the `@tern-tui/core` `Box` factory and the
+  `@tern-tui/react` / `@tern-tui/solid` `<Box>` host components (translated to
+  `border_color` before reaching the native layer), and in styled snapshots
+  (`snapshotStyled` reports the colored border as its own run carrying the
+  color in `fg`). Unset (`Color::Default`), the border paints with the node's
+  `fg` exactly as before — additive and opt-in, so existing scenes paint
+  byte-identically.
+
 ## [0.2.0] - 2026-08-10
 
 ### Added

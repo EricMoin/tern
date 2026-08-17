@@ -241,8 +241,11 @@ fn buffer_rows(buffer: &Buffer) -> Vec<String> {
 /// The exposed style of a painted cell — the fields [`StyleRunJs`] carries:
 /// fg, bg, and the six surfaced modifiers. Two adjacent cells merge into one
 /// run exactly when their `RunStyle` keys are equal; border style and the
-/// unsurfaced blink/hidden modifiers do not split runs, so a box's border
-/// cells stay one run with its surrounding default-styled blanks.
+/// unsurfaced blink/hidden modifiers do not split runs, so an uncolored
+/// box's border cells stay one run with its surrounding default-styled
+/// blanks. A set `border_color` paints the border glyphs with that color as
+/// their foreground (see `paint_box`), so a colored border surfaces as its
+/// own `fg`-carrying run — the styled snapshot reports it through `fg`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RunStyle {
     fg: Color,
@@ -1567,11 +1570,12 @@ impl NodeHandle {
 
     /// Replace this node's props (and style keys) in the scene.
     ///
-    /// Recognized style keys are lifted out of the props object: `fg`, `bg`
-    /// (color strings), `border_style` (`none|plain|rounded|double|thick`),
-    /// and the boolean modifiers (`bold`, `dim`, `italic`, `underline`,
-    /// `blink`, `reversed`, `hidden`, `strikethrough`). Every other key lands
-    /// in the node's property map (`text`, layout keywords, ...).
+    /// Recognized style keys are lifted out of the props object: `fg`, `bg`,
+    /// `border_color` (color strings), `border_style`
+    /// (`none|plain|rounded|double|thick`), and the boolean modifiers
+    /// (`bold`, `dim`, `italic`, `underline`, `blink`, `reversed`, `hidden`,
+    /// `strikethrough`). Every other key lands in the node's property map
+    /// (`text`, layout keywords, ...).
     #[napi(js_name = "set_props")]
     pub fn set_props(&self, props: HashMap<String, serde_json::Value>) -> Result<()> {
         let (style, map) = props_to_style_map(props);
@@ -1590,10 +1594,10 @@ impl NodeHandle {
     /// counterpart of [`set_props`](Self::set_props): one key instead of the
     /// whole object.
     ///
-    /// Recognized style keys (`fg`, `bg`, `border_style`, the boolean
-    /// modifiers) are merged into the node's existing style; every other
-    /// scalar key lands in the node's property map. Non-scalar values (null,
-    /// arrays, objects) are dropped, exactly like `set_props`.
+    /// Recognized style keys (`fg`, `bg`, `border_color`, `border_style`, the
+    /// boolean modifiers) are merged into the node's existing style; every
+    /// other scalar key lands in the node's property map. Non-scalar values
+    /// (null, arrays, objects) are dropped, exactly like `set_props`.
     ///
     /// An equal-value write is a no-op: the scene is not mutated and its
     /// epoch is not bumped, so a renderer's cached frame stays valid.
@@ -1634,11 +1638,11 @@ impl NodeHandle {
     /// Append a styled span of text to a `streaming_text` node's stream.
     ///
     /// `style` follows the same style-key convention as `set_props` (`fg`,
-    /// `bg`, `border_style`, and the boolean modifiers are lifted into the
-    /// span's style; every other key is ignored). The span is appended to the
-    /// node's accumulated stream in the shared scene, in call order. Errors
-    /// when the node is detached from the scene or is not a `streaming_text`
-    /// node.
+    /// `bg`, `border_color`, `border_style`, and the boolean modifiers are
+    /// lifted into the span's style; every other key is ignored). The span is
+    /// appended to the node's accumulated stream in the shared scene, in call
+    /// order. Errors when the node is detached from the scene or is not a
+    /// `streaming_text` node.
     #[napi(js_name = "append_span")]
     pub fn append_span(
         &self,
@@ -1837,6 +1841,11 @@ fn apply_style_key(mut style: Style, key: &str, value: &serde_json::Value) -> Op
         "border_style" => {
             if let serde_json::Value::String(s) = value {
                 style = style.border_style(parse_border_style(s));
+            }
+        }
+        "border_color" => {
+            if let serde_json::Value::String(s) = value {
+                style = style.border_color(parse_color(s));
             }
         }
         "fg" => {
@@ -2180,6 +2189,7 @@ mod tests {
             ("width".to_string(), serde_json::json!(10)),
             ("flex_direction".to_string(), serde_json::json!("column")),
             ("border_style".to_string(), serde_json::json!("rounded")),
+            ("border_color".to_string(), serde_json::json!("#00ff00")),
             ("fg".to_string(), serde_json::json!("#ff0000")),
             ("bold".to_string(), serde_json::json!(true)),
             ("hidden".to_string(), serde_json::json!(true)),
@@ -2187,6 +2197,7 @@ mod tests {
         ]);
         let (style, map) = props_to_style_map(props);
         assert_eq!(style.border_style, BorderStyle::Rounded);
+        assert_eq!(style.border_color, _Color::Rgb(0, 255, 0));
         assert_eq!(style.fg, _Color::Rgb(255, 0, 0));
         assert!(style.modifiers.contains(Modifiers::BOLD));
         assert!(style.modifiers.contains(Modifiers::HIDDEN));
@@ -2495,6 +2506,45 @@ mod tests {
     }
 
     #[test]
+    fn render_to_buffer_styled_border_color_paints_border_runs_in_color() {
+        // A box with a `border_color` paints its border glyphs with that color
+        // as their foreground, so the styled snapshot reports it through the
+        // border runs' `fg`: the colored border splits from the default-styled
+        // blanks into its own `fg: "#ff0000"` run per row, while the glyphs
+        // and the inner text stay unchanged.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let box_id = scene
+            .add_child(
+                root,
+                NodeKind::Box,
+                Style::new()
+                    .border_style(BorderStyle::Rounded)
+                    .border_color(_Color::Rgb(255, 0, 0)),
+            )
+            .expect("add box");
+        scene.set_prop(box_id, "padding", PropValue::Int(1));
+        scene
+            .add_text(box_id, "Hi", Style::new())
+            .expect("add text");
+
+        let runs = paint_scene_runs_with_selection(&scene, Size::new(6, 3), None);
+        assert_eq!(
+            runs,
+            vec![
+                vec![red_border_run("┌──┐"), plain_run("  ")],
+                vec![
+                    red_border_run("│"),
+                    plain_run("Hi"),
+                    red_border_run("│"),
+                    plain_run("  "),
+                ],
+                vec![red_border_run("└──┘"), plain_run("  ")],
+            ]
+        );
+    }
+
+    #[test]
     fn render_to_buffer_styled_text_reconstructs_plain_rows() {
         // The styled snapshot must never change the painted text:
         // concatenating each row's run texts reproduces the
@@ -2609,6 +2659,22 @@ mod tests {
             fg: Some("#ff0000".to_string()),
             bg: None,
             bold: Some(true),
+            dim: None,
+            italic: None,
+            underline: None,
+            reversed: None,
+            strikethrough: None,
+        }
+    }
+
+    /// A run carrying `fg: "#ff0000"` — the border color the styled border
+    /// golden paints its border cells with.
+    fn red_border_run(text: &str) -> StyleRunJs {
+        StyleRunJs {
+            text: text.to_string(),
+            fg: Some("#ff0000".to_string()),
+            bg: None,
+            bold: None,
             dim: None,
             italic: None,
             underline: None,
