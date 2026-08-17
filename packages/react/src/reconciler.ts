@@ -37,6 +37,8 @@
  */
 
 import Reconciler from "react-reconciler";
+// The `.js` suffix is required: react-reconciler@0.33.x ships no `exports` map,
+// so the extension-less `react-reconciler/constants` fails under Node ESM.
 import {
   DefaultEventPriority,
   LegacyRoot,
