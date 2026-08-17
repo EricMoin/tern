@@ -68,8 +68,53 @@ export function setAddonForTesting(addon: TernAddon | null): void {
 }
 
 /**
- * Load the tern-node addon (cached). Tries the npm package-name candidate
- * first (`@tern-tui/node`, how the binding is published for npm-installed
+ * The embedded platform addon for bundler-compiled executables (bun build
+ * --compile). The literal dynamic imports below resolve at BUILD time: bun
+ * embeds the matching `.node` into the executable, and the platform/arch
+ * conditions fold per target so each binary carries exactly its own addon.
+ * Under plain Node the import of a `.node`-mained package fails
+ * (ERR_UNKNOWN_FILE_EXTENSION), under Deno it typically does not resolve —
+ * both rejections are caught and the runtime `createRequire` loader below
+ * serves those environments. The import runs at module load (top-level
+ * await) so `loadAddon` stays synchronous: by the time any consumer calls
+ * it, the embedded addon is resolved.
+ */
+async function loadEmbeddedAddon(): Promise<TernAddon | null> {
+  try {
+    if (process.platform === "darwin" && process.arch === "arm64") {
+      // @ts-expect-error — the platform package is `.node`-mained (untyped).
+      return (await import("@tern-tui/node-darwin-arm64")) as unknown as TernAddon;
+    }
+    if (process.platform === "darwin" && process.arch === "x64") {
+      // @ts-expect-error — the platform package is `.node`-mained (untyped).
+      return (await import("@tern-tui/node-darwin-x64")) as unknown as TernAddon;
+    }
+    if (process.platform === "linux" && process.arch === "x64") {
+      // @ts-expect-error — the platform package is `.node`-mained (untyped).
+      return (await import("@tern-tui/node-linux-x64-gnu")) as unknown as TernAddon;
+    }
+    if (process.platform === "linux" && process.arch === "arm64") {
+      // @ts-expect-error — the platform package is `.node`-mained (untyped).
+      return (await import("@tern-tui/node-linux-arm64-gnu")) as unknown as TernAddon;
+    }
+    if (process.platform === "win32" && process.arch === "x64") {
+      // @ts-expect-error — the platform package is `.node`-mained (untyped).
+      return (await import("@tern-tui/node-win32-x64-msvc")) as unknown as TernAddon;
+    }
+  } catch {
+    // No embeddable candidate (or the import failed): fall through to the
+    // runtime loader.
+  }
+  return null;
+}
+
+const embeddedAddon: TernAddon | null = await loadEmbeddedAddon();
+
+/**
+ * Load the tern-node addon (cached). A bundler-compiled executable uses the
+ * statically embedded platform addon (see [`loadEmbeddedAddon`]); every
+ * other runtime tries the npm package-name candidate first
+ * (`@tern-tui/node`, how the binding is published for npm-installed
  * consumers), then the napi-generated loader (`index.js`), and finally
  * falls back to requiring the platform `.node` directly.
  *
@@ -77,6 +122,10 @@ export function setAddonForTesting(addon: TernAddon | null): void {
  */
 export function loadAddon(): TernAddon {
   if (cached !== null) return cached;
+  if (embeddedAddon !== null) {
+    cached = embeddedAddon;
+    return cached;
+  }
   const require = createRequire(import.meta.url);
   const errors: string[] = [];
   const candidates = [
