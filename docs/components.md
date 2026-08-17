@@ -95,6 +95,36 @@ decomposed) are regression-tested to round-trip losslessly into a focused
 
 ---
 
+## Box
+
+**Purpose:** the container primitive — background fill, optional border ring,
+padding, and flex layout for its children (see [architecture.md](architecture.md)
+for the paint pipeline).
+
+**Border styling.** A box's border is enabled with the `border_style` key
+(`"none" | "plain" | "rounded" | "double" | "thick"`); its glyphs are chosen
+from the matching box-drawing set by the compositor (`border_glyphs` in
+`tern-components`). The border color is controlled independently of the box's
+`fg`/`bg`:
+
+- **`borderColor`** (camelCase alias — `@tern/core` / `@tern/react` /
+  `@tern/solid`) → **`border_color`** (the binding's style key, snake_case) —
+  a color string (`#rrggbb`, `indexed:N`, or `default`).
+- When set, the border ring paints with that color as its foreground (the
+  glyphs themselves are unchanged); every other cell keeps its own style. When
+  unset, the border paints with the node's `fg` exactly as before — the key is
+  additive and opt-in, so existing scenes paint byte-identically.
+
+```ts
+Box({ border_style: "rounded", borderColor: "#ff0000", padding: 1 }, Text({ text: "Hi" }))
+```
+
+In a styled snapshot (`Renderer.snapshotStyled`), a colored border surfaces as
+its own run carrying the border color in `fg` — split from the default-styled
+blanks — so `styledFramesEqual` golden comparisons can assert it.
+
+---
+
 ## StreamingText
 
 **Purpose:** render an incrementally growing stream of text — the dominant

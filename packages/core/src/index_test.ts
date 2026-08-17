@@ -531,6 +531,14 @@ function paintSceneRuns(
             else if (y === bh - 1) c = x === 0 ? g[2] : x === bw - 1 ? g[3] : g[4];
             else c = x === 0 || x === bw - 1 ? g[5] : " ";
           }
+          if (g !== undefined && c !== " " && !(y === pad && x >= pad && x < pad + innerWidth)) {
+            // A `border_color` on the box paints its border glyphs with that
+            // color as their fg (the real compositor swaps the cell style's
+            // fg — see paint_box), so the styled runs report it; interior and
+            // content cells keep their own styles.
+            const borderColor = child.props.border_color;
+            if (typeof borderColor === "string") style = { fg: borderColor };
+          }
           if (g !== undefined && y === pad && x >= pad && x < pad + innerWidth) {
             c = clusterTextAt(runs, x - pad);
             style = leafStyle(textChild);
@@ -1920,6 +1928,44 @@ Deno.test("Renderer.snapshotStyled paints the scene to golden styled runs via re
       lastStyledSnapshotSize[1] !== 3
     ) {
       throw new Error(`viewport not forwarded: ${JSON.stringify(lastStyledSnapshotSize)}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("Box borderColor paints the border cells' fg in snapshotStyled runs", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    // The canonical golden scene with a `borderColor`: the border glyphs now
+    // carry that color as their fg, so each border run splits from the
+    // default-styled blanks into its own `fg: "#ff0000"` run — the styled
+    // snapshot reports the border color (the real compositor swaps the border
+    // cells' fg — see the `render_to_buffer_styled_border_color_*` Rust unit
+    // tests in src/bindings/tern-node/src/lib.rs). The glyphs and the inner
+    // text stay unchanged.
+    renderer.root.addChild(
+      Box({ border_style: "rounded", borderColor: "#ff0000", padding: 1 }, Text({ text: "Hi" })),
+    );
+    const frame = renderer.snapshotStyled(6, 3);
+    const expected: StyleRunJs[][] = [
+      [{ text: "┌──┐", fg: "#ff0000" }, { text: "  " }],
+      [
+        { text: "│", fg: "#ff0000" },
+        { text: "Hi" },
+        { text: "│", fg: "#ff0000" },
+        { text: "  " },
+      ],
+      [{ text: "└──┘", fg: "#ff0000" }, { text: "  " }],
+    ];
+    if (!styledFramesEqual(frame, expected)) {
+      throw new Error(`unexpected styled runs: ${JSON.stringify(frame)}`);
+    }
+    // The camelCase alias reaches the native layer as the snake_case style
+    // key: the fake node mirror carries `border_color`.
+    const boxNode = renderer.root.children[0];
+    if (boxNode === undefined) throw new Error("the box child must be materialized");
+    if (boxNode.props.border_color !== "#ff0000") {
+      throw new Error(`border_color = ${JSON.stringify(boxNode.props.border_color)}`);
     }
     renderer.destroy();
   });

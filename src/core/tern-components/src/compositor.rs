@@ -1427,9 +1427,18 @@ fn paint_box(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) 
     }
 
     // Border ring: concrete glyphs are chosen here (tern-core carries only the
-    // style choice); the ring is clipped to the region (and the buffer).
+    // style choice); the ring is clipped to the region (and the buffer). A
+    // `border_color` set on the style replaces the glyphs' foreground — the
+    // ring then paints in that color while the rest of the style (background,
+    // modifiers) is unchanged; unset (`Color::Default`) the glyphs paint with
+    // the style's own `fg` exactly as before the field existed.
     let Some((tl, tr, bl, br, h, v)) = border_glyphs(node.style.border_style) else {
         return;
+    };
+    let border_style = if node.style.border_color != Color::Default {
+        node.style.fg(node.style.border_color)
+    } else {
+        node.style
     };
     let x0 = x0 as u16;
     let y0 = y0 as u16;
@@ -1438,26 +1447,34 @@ fn paint_box(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) 
     let last_x = x1 - 1;
     let last_y = y1 - 1;
     for x in x0..x1 {
-        buffer.set_char(x, y0, h, node.style); // top edge
-        buffer.set_char(x, last_y, h, node.style); // bottom edge
+        buffer.set_char(x, y0, h, border_style); // top edge
+        buffer.set_char(x, last_y, h, border_style); // bottom edge
     }
     for y in y0..y1 {
-        buffer.set_char(x0, y, v, node.style); // left edge
-        buffer.set_char(last_x, y, v, node.style); // right edge
+        buffer.set_char(x0, y, v, border_style); // left edge
+        buffer.set_char(last_x, y, v, border_style); // right edge
     }
     // Corners (overwrite the edge glyphs).
-    buffer.set_char(x0, y0, tl, node.style);
-    buffer.set_char(last_x, y0, tr, node.style);
-    buffer.set_char(x0, last_y, bl, node.style);
-    buffer.set_char(last_x, last_y, br, node.style);
+    buffer.set_char(x0, y0, tl, border_style);
+    buffer.set_char(last_x, y0, tr, border_style);
+    buffer.set_char(x0, last_y, bl, border_style);
+    buffer.set_char(last_x, last_y, br, border_style);
 }
 
 /// Paint a text leaf's content starting at its rect origin, through `region`
 /// (the content is shifted by the region's scroll offset and clipped to its
-/// clip rect — and to the buffer). Text advances grapheme cluster by cluster:
-/// a cluster that would straddle the right edge is dropped, never split
-/// mid-cluster (a ZWJ emoji or a combining sequence stays whole). ANSI/OSC/
-/// CSI escape sequences are stripped at ingestion
+/// clip rect — and to the buffer).
+///
+/// A wrap-enabled leaf (wrap unset or `true`) paints **one row per wrapped
+/// soft line**: a `\n`/`\r\n` forces a row break and long content soft-wraps
+/// at word boundaries exactly like `paint_streaming_text` (the same
+/// `paint_word` token-aware model), so layout, `content_size`, and paint all
+/// agree on the same rows. A `wrap: false` leaf paints its content as one
+/// single row trimmed at the right edge. Text advances grapheme cluster by
+/// cluster: a cluster that would straddle the right edge wraps whole to the
+/// next row — or is dropped whole when it cannot fit a fresh row either (a
+/// ZWJ emoji or a combining sequence stays whole, never split mid-cluster).
+/// ANSI/OSC/CSI escape sequences are stripped at ingestion
 /// ([`strip_escapes`](tern_core::cell::strip_escapes)): they occupy no
 /// columns and never reach the buffer.
 ///
@@ -2137,6 +2154,49 @@ mod tests {
 
         assert_eq!(buffer, expected);
         assert_eq!(render_rows(tree, Size::new(10, 4)), rows);
+    }
+
+    #[test]
+    fn golden_rounded_box_border_color_paints_border_cells_in_color() {
+        // A rounded-border box with a `border_color`: the border glyphs paint
+        // with that color as their foreground while every other cell keeps its
+        // own style — and the glyphs themselves are unchanged (the plain rows
+        // are identical to the uncolored golden).
+        let box_style = Style::new()
+            .border_style(BorderStyle::Rounded)
+            .border_color(Color::Rgb(255, 0, 0));
+        let tree = Box::new(box_style, vec![Text::new("Hi", Style::new()).into()]).padding(1);
+
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint(tree.clone(), Size::new(6, 3));
+
+        // Every border cell carries the border color as its fg.
+        for (x, y) in [
+            (0, 0),
+            (5, 0),
+            (2, 0), // top edge
+            (0, 1),
+            (5, 1), // left/right edges
+            (0, 2),
+            (5, 2),
+            (2, 2), // bottom edge
+        ] {
+            let cell = buffer.cell(x, y).expect("border cell in bounds");
+            assert_eq!(
+                cell.style.fg, Color::Rgb(255, 0, 0),
+                "border cell ({x},{y}) must carry the border color"
+            );
+        }
+        // Interior and content cells are untouched by the border color.
+        assert_eq!(buffer.cell(1, 1).unwrap().style.fg, Color::Default);
+        assert_eq!(buffer.cell(2, 1).unwrap().style.fg, Color::Default);
+        // The glyph grid is byte-identical to an uncolored border: a root
+        // box stretches to the viewport, so the ring fills the 6x3 buffer
+        // (matching the `golden_rounded_box_padding_hi_in_10x4` geometry).
+        assert_eq!(
+            render_rows(tree, Size::new(6, 3)),
+            vec!["┌────┐", "│Hi  │", "└────┘"]
+        );
     }
 
     #[test]

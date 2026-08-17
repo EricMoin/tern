@@ -846,6 +846,33 @@ Deno.test("createRoot renders a tree onto the scene root", async () => {
   }
 });
 
+Deno.test("<Box borderColor> passes through as the border_color scene prop", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(() => {
+    ternRoot.render(
+      createElement(
+        Box,
+        { border_style: "rounded", borderColor: "#ff0000" },
+        createElement(Text, { text: "hi" }),
+      ),
+    );
+  });
+
+  const box = root.children[0];
+  if (!box || box.type !== "box") throw new Error("expected a box child");
+  // The camelCase alias is translated to the binding's snake_case style key on
+  // the core node, so the scene receives `border_color` (the same treatment
+  // `border_style` gets — it is forwarded verbatim).
+  if (box.props.border_color !== "#ff0000") {
+    throw new Error(`border_color = ${JSON.stringify(box.props.border_color)}`);
+  }
+  if (box.props.border_style !== "rounded") {
+    throw new Error(`border_style = ${box.props.border_style}`);
+  }
+});
+
 Deno.test("updates reuse instances and commitUpdate applies new props", async () => {
   const { renderer, root } = mockRenderer();
   const ternRoot = createRoot(renderer);

@@ -35,11 +35,12 @@ export declare class NodeHandle {
   /**
    * Replace this node's props (and style keys) in the scene.
    *
-   * Recognized style keys are lifted out of the props object: `fg`, `bg`
-   * (color strings), `border_style` (`none|plain|rounded|double|thick`),
-   * and the boolean modifiers (`bold`, `dim`, `italic`, `underline`,
-   * `blink`, `reversed`, `hidden`, `strikethrough`). Every other key lands
-   * in the node's property map (`text`, layout keywords, ...).
+   * Recognized style keys are lifted out of the props object: `fg`, `bg`,
+   * `border_color` (color strings), `border_style`
+   * (`none|plain|rounded|double|thick`), and the boolean modifiers
+   * (`bold`, `dim`, `italic`, `underline`, `blink`, `reversed`, `hidden`,
+   * `strikethrough`). Every other key lands in the node's property map
+   * (`text`, layout keywords, ...).
    */
   set_props(props: Record<string, any>): void
   /**
@@ -47,10 +48,10 @@ export declare class NodeHandle {
    * counterpart of [`set_props`](Self::set_props): one key instead of the
    * whole object.
    *
-   * Recognized style keys (`fg`, `bg`, `border_style`, the boolean
-   * modifiers) are merged into the node's existing style; every other
-   * scalar key lands in the node's property map. Non-scalar values (null,
-   * arrays, objects) are dropped, exactly like `set_props`.
+   * Recognized style keys (`fg`, `bg`, `border_color`, `border_style`, the
+   * boolean modifiers) are merged into the node's existing style; every
+   * other scalar key lands in the node's property map. Non-scalar values
+   * (null, arrays, objects) are dropped, exactly like `set_props`.
    *
    * An equal-value write is a no-op: the scene is not mutated and its
    * epoch is not bumped, so a renderer's cached frame stays valid.
@@ -60,11 +61,11 @@ export declare class NodeHandle {
    * Append a styled span of text to a `streaming_text` node's stream.
    *
    * `style` follows the same style-key convention as `set_props` (`fg`,
-   * `bg`, `border_style`, and the boolean modifiers are lifted into the
-   * span's style; every other key is ignored). The span is appended to the
-   * node's accumulated stream in the shared scene, in call order. Errors
-   * when the node is detached from the scene or is not a `streaming_text`
-   * node.
+   * `bg`, `border_color`, `border_style`, and the boolean modifiers are
+   * lifted into the span's style; every other key is ignored). The span is
+   * appended to the node's accumulated stream in the shared scene, in call
+   * order. Errors when the node is detached from the scene or is not a
+   * `streaming_text` node.
    */
   append_span(text: string, style?: Record<string, any> | undefined | null): void
   /**

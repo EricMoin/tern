@@ -180,7 +180,7 @@ const NATIVE_KIND: Record<NodeType, NodeType> = {
 };
 
 /**
- * Props for a scene node. Style keys (`fg`, `bg`, `border_style`, the boolean
+ * Props for a scene node. Style keys (`fg`, `bg`, `border_color`, the boolean
  * modifiers) are lifted into the node's style by the binding; every other key
  * lands in the node's property map (`text`, layout keywords such as `width`,
  * `height`, `padding`, `flex_direction`, ...). Property values must be JSON
@@ -226,6 +226,14 @@ export interface NodeProps {
   // Style keys.
   fg?: string;
   bg?: string;
+  /**
+   * The color a box's border glyphs are painted with, as a color string
+   * (`#rrggbb`, `indexed:N`, or `default`). CamelCase alias for the binding's
+   * `border_color` style key: it is translated to `border_color` before the
+   * props reach the native layer, so `node.props` reports the snake_case key.
+   * Unset, the border glyphs paint with the node's `fg` (the default).
+   */
+  borderColor?: string;
   border_style?: "none" | "plain" | "rounded" | "double" | "thick";
   bold?: boolean;
   dim?: boolean;
@@ -326,6 +334,24 @@ export interface CreateRendererOptions {
 }
 
 /**
+ * Translate the camelCase `borderColor` alias to the binding's snake_case
+ * `border_color` style key before props reach the native layer. The alias is
+ * consumed (stripped), so the node's prop mirror holds the scene-facing key
+ * exactly like every other style key (`border_style`, `flex_direction`, ...).
+ * An `undefined` alias value is dropped (it has no scene representation,
+ * mirroring `setProps`' undefined stripping). The snake_case key itself flows
+ * through untouched.
+ */
+function toNativeProps(props: NodeProps): NodeProps {
+  if (!("borderColor" in props)) return props;
+  const out = { ...props };
+  const value = out.borderColor;
+  delete out.borderColor;
+  if (value !== undefined) out.border_color = value;
+  return out;
+}
+
+/**
  * A scene node. `Text`/`Box` build detached node objects (pure data — no
  * native calls); materialization into the shared scene happens lazily when a
  * node is attached under an attached parent (the scene root counts as
@@ -346,7 +372,7 @@ export class Node {
   private constructor(type: NodeType, props: NodeProps, children: Node[]) {
     this.type = type;
     this.#handle = null;
-    this.#props = { ...props };
+    this.#props = toNativeProps({ ...props });
     this.#children = [...children];
     this.#parent = null;
     this.#attached = false;
@@ -457,7 +483,7 @@ export class Node {
    * path, since a removal needs the table replace to clear the stale key.
    */
   setProps(props: NodeProps): void {
-    const next = { ...props };
+    const next = toNativeProps({ ...props });
     // `undefined` values have no scene representation (the binding drops
     // them), so strip them up front: absent and undefined are equivalent.
     for (const key of Object.keys(next)) {
@@ -499,6 +525,9 @@ export class Node {
    * scene holds it, cleared through the full-map path.
    */
   setProp(key: string, value: unknown): void {
+    // The camelCase `borderColor` alias routes to the snake_case style key
+    // (the scene-facing spelling), exactly like the whole-map path.
+    if (key === "borderColor") key = "border_color";
     if (value === undefined) {
       if (this.#handle !== null && key in this.#props) {
         const next = { ...this.#props };
