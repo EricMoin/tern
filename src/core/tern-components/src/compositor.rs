@@ -9,11 +9,14 @@
 //!   engine (children land inside `rect + border + padding`).
 //! * **Text** — paints its `text` prop content starting at the rect origin,
 //!   clipped to the rect (multi-width aware: a wide character never gets
-//!   truncated mid-glyph at the right edge). Text leaves are inherently
-//!   single-row: the line is trimmed at the right edge, so both `wrap: true`
-//!   (default) and `wrap: false` paint it the same way. A `caret` Int prop (a
-//!   display column) paints the block caret over the cell under the cursor,
-//!   using the node's style reversed.
+//!   truncated mid-glyph at the right edge). Text leaves are multi-row: a
+//!   `wrap: true` (default) leaf paints one row per wrapped soft line (`\n`
+//!   forces a row break; long content soft-wraps at word boundaries, the same
+//!   token-aware model `StreamingText` uses — layout sizes the leaf to the
+//!   same wrapped rows), while a `wrap: false` leaf paints a single row
+//!   trimmed at the right edge. A `caret` Int prop (a display column) paints
+//!   the block caret over the cell under the cursor, using the node's style
+//!   reversed.
 //! * **StreamingText** — paints its accumulated stream spans starting at the
 //!   rect origin, one row per wrapped soft line, honoring each span's style
 //!   (fg/bg/modifiers), clipping to the rect bottom and right. A `wrap: false`
@@ -934,11 +937,13 @@ impl Compositor {
     /// For `Text` and `StreamingText` leaves the size is the *wrapped content*
     /// size: the display width of the widest wrapped line and the wrapped line
     /// count at the node's laid-out width (the same token-aware wrapping the
-    /// paint pass uses, so a streaming node's height is how many rows its
-    /// content would occupy when displayed). A leaf declaring `wrap: false`
-    /// paints a single row trimmed at the rect's right edge, so its content
-    /// size is the rect width by one row. For every other node kind the size
-    /// is the laid-out rect size from the layout engine.
+    /// paint pass uses, so a node's height is how many rows its content would
+    /// occupy when displayed — and since the layout engine sizes wrap-enabled
+    /// leaves to those same wrapped rows, this agrees with the laid-out rect
+    /// too). A leaf declaring `wrap: false` paints a single row trimmed at the
+    /// rect's right edge, so its content size is the rect width by one row.
+    /// For every other node kind the size is the laid-out rect size from the
+    /// layout engine.
     ///
     /// Returns `None` when the node is missing or has no geometry (`display:
     /// none`).
@@ -1460,9 +1465,11 @@ fn paint_box(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) 
 /// [`Input`](crate::Input) component stamps it), the block caret is painted
 /// over the cell under the cursor using the node's own style reversed, via
 /// tern-core's [`Buffer::render_caret`] (subtask 3's caret machinery). The
-/// caret is painted even over the placeholder when the text is empty. The
-/// caret position is mapped through the region like any other cell, so a
-/// scrolled/clipped text leaf scrolls its caret along with its content.
+/// caret is painted even over the placeholder when the text is empty, and it
+/// always rides the leaf's first row — display rows below it wrap, the caret
+/// stays on row 1. The caret position is mapped through the region like any
+/// other cell, so a scrolled/clipped text leaf scrolls its caret along with
+/// its content.
 fn paint_text(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer) {
     // A rect with no interior rows (zero height) has no painted extent — its
     // cells are bounded by the rect mapped through the region, and the dirty
@@ -1475,30 +1482,11 @@ fn paint_text(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer)
         return;
     }
     if let Some(PropValue::Str(content)) = node.props.get("text") {
-        let y = rect.y;
-        if region.map_y(y) >= region.clip.y
-            && region.map_y(y) < region.clip.bottom()
-            && region.clip.bottom() > region.clip.y
-        {
-            let right = rect.right().min(region.clip.right() + region.scroll_x);
-            let mut cx = rect.x;
-            let content = strip_escapes(content);
-            for cluster in clusters(&content) {
-                if cx >= right || cluster.text == "\n" || cluster.text == "\r\n" {
-                    break;
-                }
-                let w = cluster.width;
-                if w == 0 {
-                    continue;
-                }
-                // Paint only fully visible glyphs: skip when the lead cell is
-                // off-screen to the left or the wide glyph crosses the right
-                // edge.
-                if cx >= 0 && cx + w as i32 <= right {
-                    buffer.set_cluster_region(cx, y, &cluster, node.style, region);
-                }
-                cx += w as i32;
-            }
+        let content = strip_escapes(content);
+        if wrap_enabled(node) {
+            paint_text_wrapped(&content, node.style, rect, region, buffer);
+        } else {
+            paint_text_single_row(&content, node.style, rect, region, buffer);
         }
     }
 
@@ -1514,6 +1502,104 @@ fn paint_text(node: &SceneNode, rect: Rect, region: Region, buffer: &mut Buffer)
                 buffer.render_caret(cursor);
             }
         }
+    }
+}
+
+/// Paint a wrap-enabled text leaf's content at the rect origin, one row per
+/// wrapped soft line, through `region` — the `Text` counterpart of
+/// `paint_streaming_text`'s wrap pass. A `\n`/`\r\n` forces a row break; a
+/// token (a whitespace-free run) that does not fit the current row wraps
+/// whole to the next row when it fits a fresh one; a token wider than the
+/// whole row is hard-broken across rows; a trailing space at a row's end is
+/// dropped. A wide glyph that would straddle the right edge — or that is
+/// wider than the row itself — wraps to the next row, or is dropped whole
+/// when it cannot fit a fresh row either; a cluster is never split
+/// mid-glyph. Painting stops at the rect's bottom edge; rows whose mapped
+/// position falls outside the node's own frame are skipped, so scrolled
+/// content stays inside the pane (see [`row_inside_frame`]).
+fn paint_text_wrapped(content: &str, style: Style, rect: Rect, region: Region, buffer: &mut Buffer) {
+    let right = rect.right().min(region.clip.right() + region.scroll_x);
+    // Content rows pan inside the node's own frame: the last content row that
+    // can map into the frame is `rect.bottom() + scroll_y - 1`, so the layout
+    // runs rows up to (exclusive) that bound. Rows whose mapped position
+    // falls outside the frame are skipped at paint time.
+    let bottom = rect.bottom() + region.scroll_y;
+    if right <= rect.x || bottom <= rect.y {
+        return;
+    }
+
+    let mut cursor = WrapCursor {
+        row: rect.y,
+        col: rect.x,
+    };
+    let mut word = String::new();
+    for cluster in clusters(content) {
+        match cluster.text {
+            // Hard break: flush the pending word, then start a new row.
+            // CRLF is a single grapheme cluster and breaks like LF.
+            "\n" | "\r\n" => {
+                paint_word(&word, style, rect, &mut cursor, region, buffer, false);
+                word.clear();
+                cursor.row += 1;
+                cursor.col = rect.x;
+                if cursor.row >= bottom {
+                    return;
+                }
+            }
+            // Soft break: flush the pending word, then place the space only
+            // when it fits; a trailing space at a row's end is dropped (the
+            // wrap would collapse it anyway).
+            " " => {
+                paint_word(&word, style, rect, &mut cursor, region, buffer, false);
+                word.clear();
+                if cursor.row < bottom && cursor.col < right {
+                    buffer.set_char_region(cursor.col, cursor.row, ' ', style, region);
+                    cursor.col += 1;
+                }
+            }
+            _ => word.push_str(cluster.text),
+        }
+    }
+    paint_word(&word, style, rect, &mut cursor, region, buffer, false);
+}
+
+/// Paint a `wrap: false` text leaf as a single row at the rect origin: the
+/// content paints left-to-right on `rect.y`, and the line is trimmed at the
+/// right edge (`right`), dropping any glyph that would straddle it — never
+/// split mid-glyph, multi-width aware. A hard `\n` ends the line (there is no
+/// next row in single-row mode). The row is drawn through `region` like any
+/// other cell.
+fn paint_text_single_row(content: &str, style: Style, rect: Rect, region: Region, buffer: &mut Buffer) {
+    // The single row must land inside the clip (mirrors the pre-wrap guard).
+    let y = rect.y;
+    if region.map_y(y) < region.clip.y
+        || region.map_y(y) >= region.clip.bottom()
+        || region.clip.bottom() <= region.clip.y
+    {
+        return;
+    }
+    let right = rect.right().min(region.clip.right() + region.scroll_x);
+    if right <= rect.x {
+        return;
+    }
+    let mut cx = rect.x;
+    for cluster in clusters(content) {
+        if cx >= right || cluster.text == "\n" || cluster.text == "\r\n" {
+            return; // single-row: the line ends here
+        }
+        let w = cluster.width;
+        if w == 0 {
+            continue;
+        }
+        // Trim: a glyph that would straddle the right edge is dropped whole
+        // (never mid-cluster); nothing after it fits either.
+        if cx + w as i32 > right {
+            return;
+        }
+        if cx >= 0 {
+            buffer.set_cluster_region(cx, y, &cluster, style, region);
+        }
+        cx += w as i32;
     }
 }
 
@@ -1586,7 +1672,7 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &m
                 // Hard break: flush the pending word, then start a new row.
                 // CRLF is a single grapheme cluster and breaks like LF.
                 "\n" | "\r\n" => {
-                    paint_word(&word, word_style, rect, &mut cursor, region, buffer);
+                    paint_word(&word, word_style, rect, &mut cursor, region, buffer, true);
                     word.clear();
                     cursor.row += 1;
                     cursor.col = rect.x;
@@ -1598,7 +1684,7 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &m
                 // only when it fits; a trailing space at a row's end is
                 // dropped (the wrap would collapse it anyway).
                 " " => {
-                    paint_word(&word, word_style, rect, &mut cursor, region, buffer);
+                    paint_word(&word, word_style, rect, &mut cursor, region, buffer, true);
                     word.clear();
                     if cursor.row < bottom
                         && cursor.col < right
@@ -1617,7 +1703,7 @@ fn paint_streaming_text(node: &SceneNode, rect: Rect, region: Region, buffer: &m
             }
         }
         // Span boundary: flush so per-span styles stay exact across spans.
-        paint_word(&word, word_style, rect, &mut cursor, region, buffer);
+        paint_word(&word, word_style, rect, &mut cursor, region, buffer, true);
         word.clear();
         if cursor.row >= bottom {
             return;
@@ -1783,9 +1869,14 @@ fn flush_word(word: &str, width: u32, col: &mut u32, lines: &mut u32, max_col: &
 /// a single 2-column glyph). The cursor advances past every token glyph,
 /// including dropped ones. Each glyph is drawn via
 /// [`Buffer::set_cluster_region`], so it is also shifted by the region's
-/// scroll and clipped to its clip rect; glyphs on a row whose mapped position
-/// falls outside `frame` (the node's own rect) are skipped, so scrolled
-/// content stays inside the pane.
+/// scroll and clipped to its clip rect.
+///
+/// `frame_check` gates the [`row_inside_frame`] test: a streaming leaf's
+/// content rows pan inside its own frame, so its rows are skipped when their
+/// mapped position falls outside the frame (scrolled content stays inside the
+/// pane). A text leaf paints its wrapped rows at its own rect rows (bounded
+/// by `bottom` and the region clip, exactly like the single-row painter), so
+/// its rows never frame-check.
 fn paint_word(
     word: &str,
     style: Style,
@@ -1793,6 +1884,7 @@ fn paint_word(
     cursor: &mut WrapCursor,
     region: Region,
     buffer: &mut Buffer,
+    frame_check: bool,
 ) {
     let line_start = frame.x;
     if word.is_empty() {
@@ -1830,7 +1922,7 @@ fn paint_word(
                 return;
             }
         }
-        if row_inside_frame(frame, region, cursor.row) {
+        if !frame_check || row_inside_frame(frame, region, cursor.row) {
             buffer.set_cluster_region(cursor.col, cursor.row, &cluster, style, region);
         }
         cursor.col += w as i32;
@@ -2806,6 +2898,111 @@ mod tests {
         }
 
         assert_eq!(buffer, expected);
+    }
+
+    #[test]
+    fn text_newlines_paint_every_row() {
+        // A wrap-enabled Text leaf holding 'ab\ncd': the hard `\n` forces a
+        // row break, so the leaf paints BOTH rows (and the layout engine sizes
+        // the leaf to 2 rows at its 4-cell width — height comes from the
+        // wrapped line count, not a hardcoded 1).
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let t = scene
+            .add_child(root, NodeKind::Text, Style::new())
+            .expect("add text");
+        scene.set_prop(t, "text", PropValue::Str("ab\ncd".to_string()));
+        scene.set_prop(t, "width", PropValue::Int(4));
+
+        let rows = render_scene_rows(&scene, Size::new(4, 2));
+        assert_eq!(rows, ["ab  ", "cd  "]);
+    }
+
+    #[test]
+    fn text_soft_wraps_continuation_rows() {
+        // A wrap-enabled Text leaf 'abcdef' at a 4-cell width: the token is
+        // wider than the row, so it hard-wraps onto continuation rows — the
+        // same token-aware model `StreamingText` uses. The layout engine sizes
+        // the leaf to 4x2, and paint fills both rows.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let t = scene
+            .add_child(root, NodeKind::Text, Style::new())
+            .expect("add text");
+        scene.set_prop(t, "text", PropValue::Str("abcdef".to_string()));
+        scene.set_prop(t, "width", PropValue::Int(4));
+
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(4, 2));
+
+        let mut expected = Buffer::new(4, 2);
+        for (x, ch) in "abcd".chars().enumerate() {
+            expected.set_char(x as u16, 0, ch, Style::new());
+        }
+        for (x, ch) in "ef".chars().enumerate() {
+            expected.set_char(x as u16, 1, ch, Style::new());
+        }
+        assert_eq!(buffer, expected);
+        assert_eq!(render_scene_rows(&scene, Size::new(4, 2)), ["abcd", "ef  "]);
+    }
+
+    #[test]
+    fn text_wrap_false_trims_to_a_single_row() {
+        // `wrap: false` paints the content as ONE row even when it overflows
+        // the rect: 'abcdef' at a 4-cell width shows 'abcd' on row 0 and the
+        // second row stays blank — no continuation rows, unlike the wrap-
+        // enabled leaf above.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let t = scene
+            .add_child(root, NodeKind::Text, Style::new())
+            .expect("add text");
+        scene.set_prop(t, "text", PropValue::Str("abcdef".to_string()));
+        scene.set_prop(t, "wrap", PropValue::Bool(false));
+        scene.set_prop(t, "width", PropValue::Int(4));
+
+        let rows = render_scene_rows(&scene, Size::new(4, 2));
+        assert_eq!(rows, ["abcd", "    "]);
+    }
+
+    #[test]
+    fn text_wrap_keeps_wide_glyphs_whole_per_row() {
+        // Per-row wide-glyph clipping: 'abコc' at a 3-cell width hard-wraps
+        // cluster by cluster — 'ab' on row 0, then the 2-column コ wraps whole
+        // to row 1 (lead + masked continuation) followed by 'c'. A cluster is
+        // never split across rows; the continuation cell is masked.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let t = scene
+            .add_child(root, NodeKind::Text, Style::new())
+            .expect("add text");
+        scene.set_prop(t, "text", PropValue::Str("abコc".to_string()));
+        scene.set_prop(t, "width", PropValue::Int(3));
+
+        let mut compositor = Compositor::new();
+        let buffer = compositor.paint_scene(&scene, Size::new(3, 2));
+        assert_eq!(buffer.cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(buffer.cell(1, 0).unwrap().ch, 'b');
+        let lead = buffer.cell(0, 1).expect("cluster lead");
+        assert_eq!(lead.ch, 'コ');
+        assert_eq!(lead.width, 2);
+        assert!(buffer.cell(1, 1).expect("mask").is_masked());
+        assert_eq!(buffer.cell(2, 1).unwrap().ch, 'c');
+        assert_eq!(buffer_rows_clusters(&buffer), vec!["ab ", "コ c"]);
+
+        // A wide glyph that cannot fit a fresh row is dropped whole: 'abコ' at
+        // a 1-row, 3-cell rect wraps the コ to row 1, which is past the
+        // bottom — so it is dropped, never truncated mid-glyph.
+        let mut scene2 = Scene::new();
+        let root2 = scene2.root_id();
+        let t2 = scene2
+            .add_child(root2, NodeKind::Text, Style::new())
+            .expect("add text");
+        scene2.set_prop(t2, "text", PropValue::Str("abコ".to_string()));
+        scene2.set_prop(t2, "width", PropValue::Int(3));
+        scene2.set_prop(t2, "height", PropValue::Int(1));
+        let rows2 = render_scene_rows(&scene2, Size::new(3, 1));
+        assert_eq!(rows2, ["ab "]);
     }
 
     /// A scene with an in-flow `5x5` bg box at the origin and an absolute

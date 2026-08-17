@@ -38,7 +38,7 @@
 //! | `z_index`         | `Int` — paint order; consumed by the compositor, not the engine      | 0      |
 //! | `clip_x` / `clip_y` / `clip_width` / `clip_height` | `Int` (cells) — a clip rect restricting the node's subtree drawing to a bounded region; consumed by the compositor | unset (no clip) |
 //! | `scroll_x` / `scroll_y` | `Int` (cells) — per-region scroll offset shifting content inside the clip rect; consumed by the compositor | 0 |
-//! | `wrap`               | `Bool` — text/streaming leaf wrapping; `false` keeps the line single-row (intrinsic width, no flex shrink) and the compositor trims overflow at the right edge; `true`/unset soft-wraps at word boundaries | `true` |
+//! | `wrap`               | `Bool` — text/streaming leaf wrapping; `false` keeps the line single-row (intrinsic width, no flex shrink) and the compositor trims overflow at the right edge; `true`/unset soft-wraps at word boundaries and the leaf is sized to its wrapped line count at the constrained width (`\n` forces row breaks) | `true` |
 //!
 //! ## Clip and scroll regions
 //!
@@ -130,9 +130,10 @@ pub struct TaffyLayoutEngine {
     taffy: TaffyTree<()>,
     /// tern node id -> taffy node id, for every node currently in the tree.
     node_map: HashMap<NodeId, TaffyNodeId>,
-    /// taffy node id -> measure content (a text leaf's `text` or a streaming
-    /// leaf's concatenated spans), consumed by the measure closure.
-    text_map: HashMap<TaffyNodeId, String>,
+    /// taffy node id -> measure input (a text leaf's `text` or a streaming
+    /// leaf's concatenated spans, plus whether the leaf soft-wraps), consumed
+    /// by the measure closure.
+    text_map: HashMap<TaffyNodeId, TextContent>,
     /// tern node id -> the layout-relevant state seen at the last compute.
     snapshots: HashMap<NodeId, NodeSnapshot>,
     /// The viewport the last layout ran at.
@@ -148,6 +149,22 @@ pub struct TaffyLayoutEngine {
     last_was_full_rebuild: bool,
 }
 
+/// The measure input of a text/streaming leaf: its display content and
+/// whether it soft-wraps. Kept in the [`TaffyLayoutEngine::text_map`] so the
+/// measure closure can size a wrap-enabled leaf to its wrapped line count at
+/// the constrained width (and keep `wrap: false` leaves at their single
+/// intrinsic line).
+#[derive(Debug, Clone, PartialEq)]
+struct TextContent {
+    /// The display content (a `Text` leaf's `text`, or a `StreamingText`
+    /// leaf's concatenated span texts).
+    text: String,
+    /// Whether the leaf soft-wraps: `wrap: false` keeps the single intrinsic
+    /// line; absent or `wrap: true` wraps at word boundaries (mirroring the
+    /// compositor's [`wrap_enabled`](tern_components) rule).
+    wrap: bool,
+}
+
 /// The layout-relevant state of a scene node, snapshotted per frame for
 /// change detection. Kept in lockstep with [`TaffyLayoutEngine::node_map`]:
 /// exactly the visible (non-`display: none`) nodes carry a snapshot.
@@ -161,6 +178,8 @@ struct NodeSnapshot {
     style: TaffyStyle,
     /// The `text` prop of a `Text` leaf (its measurement input).
     content: Option<String>,
+    /// The `wrap` prop of a `Text`/`StreamingText` leaf (its wrap mode).
+    wrap: Option<bool>,
     /// A cheap signature of a streaming leaf's content: `(span count, hash of
     /// the last span)`. Streams only grow via append in this codebase, so a
     /// length change catches every append; the last-span hash additionally
@@ -178,7 +197,7 @@ struct NodeSnapshot {
 struct EngineState<'a> {
     taffy: &'a mut TaffyTree<()>,
     node_map: &'a mut HashMap<NodeId, TaffyNodeId>,
-    text_map: &'a mut HashMap<TaffyNodeId, String>,
+    text_map: &'a mut HashMap<TaffyNodeId, TextContent>,
     snapshots: &'a mut HashMap<NodeId, NodeSnapshot>,
 }
 
@@ -285,15 +304,43 @@ impl TaffyLayoutEngine {
         // The measure closure runs for every leaf node: text leaves report
         // their content size, everything else falls back to taffy's default
         // zero measurement (matching `compute_layout`).
+        //
+        // A wrap-enabled leaf (wrap unset or `true`) is sized to its *wrapped*
+        // content at the constrained width: height = the wrapped line count
+        // (`\n`/`\r\n` force breaks; long tokens soft-wrap at word
+        // boundaries) and width = the widest wrapped line. The constrained
+        // width is the leaf's explicit `width` when it has one, else the
+        // definite available width (a column container's content box — flex
+        // items are measured at MaxContent/MinContent on their main axis, so
+        // the definite constraint only arrives on the cross axis), else the
+        // intrinsic single-line width (no constraint: one row unless `\n`
+        // breaks it). A `wrap: false` leaf keeps today's intrinsic single
+        // row. The wrap model mirrors the compositor's `measure_wrapped`, so
+        // layout, paint, and `content_size` agree on the same rows.
         let text_ref = &self.text_map;
         let _ = self.taffy.compute_layout_with_measure(
             taffy_root,
             available,
-            |known, _available_space, node_id, _node_context, _style| match text_ref.get(&node_id) {
-                Some(content) => TaffySize {
-                    width: known.width.unwrap_or(display_width(content) as f32),
-                    height: known.height.unwrap_or(1.0),
-                },
+            |known, available_space, node_id, _node_context, _style| match text_ref.get(&node_id) {
+                Some(content) => {
+                    let (w, h) = if content.wrap {
+                        let width = known
+                            .width
+                            .or(match available_space.width {
+                                AvailableSpace::Definite(w) => Some(w),
+                                _ => None,
+                            })
+                            .map(|w| w.max(1.0) as u32)
+                            .unwrap_or(display_width(&content.text) as u32);
+                        measure_wrapped(&content.text, width)
+                    } else {
+                        (display_width(&content.text) as u32, 1)
+                    };
+                    TaffySize {
+                        width: known.width.unwrap_or(w as f32),
+                        height: known.height.unwrap_or(h as f32),
+                    }
+                }
                 None => known.unwrap_or(TaffySize {
                     width: 0.0,
                     height: 0.0,
@@ -416,7 +463,13 @@ fn build_node(
                 state.taffy.new_with_children(style, &children).ok()?
             };
             if let Some(PropValue::Str(content)) = node.props.get("text") {
-                state.text_map.insert(t, content.clone());
+                state.text_map.insert(
+                    t,
+                    TextContent {
+                        text: content.clone(),
+                        wrap: prop_bool(&node.props, "wrap") != Some(false),
+                    },
+                );
             }
             t
         }
@@ -433,7 +486,13 @@ fn build_node(
                 .stream(id)
                 .map(|spans| spans.iter().map(|span| span.text.as_str()).collect())
                 .unwrap_or_default();
-            state.text_map.insert(t, content);
+            state.text_map.insert(
+                t,
+                TextContent {
+                    text: content,
+                    wrap: prop_bool(&node.props, "wrap") != Some(false),
+                },
+            );
             t
         }
         _ if children.is_empty() => state.taffy.new_leaf(style).ok()?,
@@ -456,8 +515,9 @@ fn scene_node_style(node: &SceneNode, viewport: Size, is_root: bool) -> TaffySty
     // A `wrap: false` text/streaming leaf is a single intrinsic-width line —
     // it must never be re-flowed by layout, so it is exempt from flex
     // shrinking (the compositor trims overflow at paint time instead).
-    // Wrapping leaves (wrap unset or `true`) may be constrained; the
-    // compositor soft-wraps them at word boundaries.
+    // Wrapping leaves (wrap unset or `true`) may be constrained; layout sizes
+    // them to their wrapped line count and the compositor soft-wraps them at
+    // word boundaries.
     if matches!(node.kind, NodeKind::Text | NodeKind::StreamingText)
         && prop_bool(&node.props, "wrap") == Some(false)
     {
@@ -576,6 +636,10 @@ fn reconcile_one(
         },
         _ => None,
     };
+    let wrap = match node.kind {
+        NodeKind::Text | NodeKind::StreamingText => prop_bool(&node.props, "wrap"),
+        _ => None,
+    };
     let stream_sig = match node.kind {
         NodeKind::StreamingText => scene.stream(id).map(stream_signature),
         _ => None,
@@ -610,11 +674,34 @@ fn reconcile_one(
     if prev.content != content {
         match content.clone() {
             Some(c) => {
-                state.text_map.insert(t, c);
+                state.text_map.insert(
+                    t,
+                    TextContent {
+                        text: c,
+                        wrap: wrap != Some(false),
+                    },
+                );
             }
             None => {
                 state.text_map.remove(&t);
             }
+        }
+        let _ = state.taffy.mark_dirty(t);
+        counters.changed += 1;
+    }
+    if prev.wrap != wrap {
+        // A wrap-mode toggle re-sizes the leaf without touching its content:
+        // refresh the stored wrap flag so the measure closure switches between
+        // wrapped rows and the single intrinsic line (the `wrap: false`
+        // flex-shrink exemption above also re-applies via the style change).
+        if let Some(c) = state.text_map.get(&t).cloned() {
+            state.text_map.insert(
+                t,
+                TextContent {
+                    text: c.text,
+                    wrap: wrap != Some(false),
+                },
+            );
         }
         let _ = state.taffy.mark_dirty(t);
         counters.changed += 1;
@@ -626,7 +713,13 @@ fn reconcile_one(
             .stream(id)
             .map(|spans| spans.iter().map(|span| span.text.as_str()).collect())
             .unwrap_or_default();
-        state.text_map.insert(t, c);
+        state.text_map.insert(
+            t,
+            TextContent {
+                text: c,
+                wrap: wrap != Some(false),
+            },
+        );
         let _ = state.taffy.mark_dirty(t);
         counters.changed += 1;
     }
@@ -667,6 +760,7 @@ fn reconcile_one(
             kind: node.kind,
             style,
             content,
+            wrap,
             stream_sig,
             children,
         },
@@ -737,6 +831,10 @@ fn snapshot_subtree(scene: &Scene, id: NodeId, viewport: Size, state: &mut Engin
                     Some(PropValue::Str(s)) => Some(s.clone()),
                     _ => None,
                 },
+                _ => None,
+            },
+            wrap: match node.kind {
+                NodeKind::Text | NodeKind::StreamingText => prop_bool(&node.props, "wrap"),
                 _ => None,
             },
             stream_sig: match node.kind {
@@ -1023,6 +1121,83 @@ fn prop_bool(props: &PropMap, key: &str) -> Option<bool> {
 /// text leaf measures its visible glyphs only.
 fn display_width(content: &str) -> usize {
     clusters(&strip_escapes(content)).map(|c| c.width as usize).sum()
+}
+
+/// The wrapped content size of `content` laid out at `width` cells: the
+/// display width of the widest wrapped line and the wrapped line count.
+///
+/// The wrap model mirrors the compositor's `measure_wrapped` exactly (so
+/// layout, paint, and `content_size` agree on the same rows): a token (a
+/// whitespace-free run) that does not fit on the current row wraps whole to
+/// the next row when it fits a fresh one; a token wider than the whole row is
+/// hard-broken across rows; a `\n`/`\r\n` forces a break; a trailing space at
+/// a row's end is dropped. Breaking is grapheme-cluster aware — a cluster
+/// never splits across rows. An empty content reports `(0, 0)`.
+fn measure_wrapped(content: &str, width: u32) -> (u32, u32) {
+    if content.is_empty() {
+        return (0, 0);
+    }
+    let width = width.max(1);
+    let mut lines: u32 = 1;
+    let mut max_col: u32 = 0;
+    let mut col: u32 = 0;
+    let mut word = String::new();
+    let content = strip_escapes(content);
+    for cluster in clusters(&content) {
+        match cluster.text {
+            "\n" | "\r\n" => {
+                flush_word(&word, width, &mut col, &mut lines, &mut max_col);
+                word.clear();
+                lines += 1;
+                col = 0;
+            }
+            " " => {
+                flush_word(&word, width, &mut col, &mut lines, &mut max_col);
+                word.clear();
+                // A trailing space at a row's end is dropped (the wrap would
+                // collapse it anyway), mirroring the compositor.
+                if col < width {
+                    col += 1;
+                    max_col = max_col.max(col);
+                }
+            }
+            _ => word.push_str(cluster.text),
+        }
+    }
+    flush_word(&word, width, &mut col, &mut lines, &mut max_col);
+    (max_col, lines)
+}
+
+/// Place one pending token onto the wrapped measurement, applying the same
+/// wrap rule as the compositor's `flush_word`: whole-token wrap when it does
+/// not fit the current row but fits a fresh one, hard cluster-by-cluster
+/// break when the token is wider than the whole row.
+fn flush_word(word: &str, width: u32, col: &mut u32, lines: &mut u32, max_col: &mut u32) {
+    if word.is_empty() {
+        return;
+    }
+    let tw = display_width(word) as u32;
+    if tw <= width {
+        if *col > 0 && *col + tw > width {
+            *lines += 1;
+            *col = 0;
+        }
+        *col += tw;
+        *max_col = (*max_col).max(*col);
+        return;
+    }
+    for cluster in clusters(&strip_escapes(word)) {
+        let w = cluster.width as u32;
+        if w == 0 {
+            continue;
+        }
+        if *col + w > width {
+            *lines += 1;
+            *col = 0;
+        }
+        *col += w;
+        *max_col = (*max_col).max(*col);
+    }
 }
 
 /// Map a taffy `Layout` (relative to its parent, so already in scene
@@ -1341,6 +1516,99 @@ mod tests {
         // 7-cell content width ('abc def') in a 5-wide container: the leaf
         // keeps its intrinsic width and overflows; height stays 1 (single row).
         assert_eq!(rect_of(&out, s), Rect::new(0, 0, 7, 1));
+    }
+
+    #[test]
+    fn wrap_enabled_text_leaf_heights_to_wrapped_rows_at_explicit_width() {
+        // A wrap-enabled Text leaf with an explicit width wraps at that width
+        // in LAYOUT: 'abcdef' (6 cells) at a 4-cell width occupies two rows of
+        // 4 + 2 cells, so the leaf is 4 wide and 2 tall (the same geometry the
+        // compositor paints and `content_size` reports).
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        set_prop(
+            &mut scene,
+            root,
+            "align_items",
+            PropValue::Str("flex-start".into()),
+        );
+        let t = scene
+            .add_text(root, "abcdef", CellStyle::new())
+            .expect("add text");
+        set_prop(&mut scene, t, "width", PropValue::Int(4));
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 10));
+        assert_eq!(rect_of(&out, t), Rect::new(0, 0, 4, 2));
+    }
+
+    #[test]
+    fn newlines_force_row_breaks_in_wrap_enabled_text() {
+        // `\n` forces a row break even without a width constraint: 'ab\ncd'
+        // is two rows at its intrinsic widest-line width (2 cells).
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        set_prop(
+            &mut scene,
+            root,
+            "align_items",
+            PropValue::Str("flex-start".into()),
+        );
+        let t = scene
+            .add_text(root, "ab\ncd", CellStyle::new())
+            .expect("add text");
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 10));
+        assert_eq!(rect_of(&out, t), Rect::new(0, 0, 2, 2));
+    }
+
+    #[test]
+    fn wrap_enabled_text_in_column_container_wraps_at_container_width() {
+        // In a column container the leaf's width constraint is the container's
+        // definite width (the cross-axis available space): 'abcdef' at 4 cells
+        // wraps to 2 rows even without an explicit width prop on the leaf.
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        set_prop(
+            &mut scene,
+            root,
+            "flex_direction",
+            PropValue::Str("column".into()),
+        );
+        set_prop(
+            &mut scene,
+            root,
+            "align_items",
+            PropValue::Str("flex-start".into()),
+        );
+        let t = scene
+            .add_text(root, "abcdef", CellStyle::new())
+            .expect("add text");
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(4, 10));
+        assert_eq!(rect_of(&out, t), Rect::new(0, 0, 4, 2));
+    }
+
+    #[test]
+    fn wrap_false_text_stays_single_row_at_constrained_width() {
+        // `wrap: false` keeps the intrinsic single row even with a constrained
+        // width: 'abcdef' at a 4-cell width stays one row (the compositor
+        // trims the overflow at paint time).
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        set_prop(
+            &mut scene,
+            root,
+            "align_items",
+            PropValue::Str("flex-start".into()),
+        );
+        let t = scene
+            .add_text(root, "abcdef", CellStyle::new())
+            .expect("add text");
+        set_prop(&mut scene, t, "width", PropValue::Int(4));
+        set_prop(&mut scene, t, "wrap", PropValue::Bool(false));
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 10));
+        assert_eq!(rect_of(&out, t), Rect::new(0, 0, 4, 1));
     }
 
     #[test]
