@@ -494,6 +494,14 @@ export interface TuiRendererOptions {
    */
   headless?: boolean
   /**
+   * Enable the kitty keyboard protocol (progressive enhancement) so
+   * modifier combinations like Shift-Enter arrive as distinct key events
+   * instead of collapsing into the unmodified key. Terminals that do not
+   * support the protocol ignore the sequences; the enhancement is popped
+   * on destroy. Default `true`.
+   */
+  keyboard_enhancement?: boolean
+  /**
    * The virtual width in cells for `headless` mode (default 80). Ignored
    * when `headless` is `false`.
    */

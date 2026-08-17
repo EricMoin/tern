@@ -117,6 +117,8 @@ trait RenderBackend: Send + Sync {
     fn set_clipboard(&self, text: &str) -> io::Result<()>;
     /// Stop mouse / focus-change / bracketed-paste event reporting.
     fn disable_event_listening(&self) -> io::Result<()>;
+    /// Disable the kitty keyboard protocol enhancement (pop one level).
+    fn exit_keyboard_enhancement(&self) -> io::Result<()>;
     /// Leave the alternate screen.
     fn exit_alt_screen(&self) -> io::Result<()>;
     /// Leave raw mode.
@@ -142,6 +144,10 @@ impl RenderBackend for Backend {
 
     fn disable_event_listening(&self) -> io::Result<()> {
         Backend::disable_event_listening(self)
+    }
+
+    fn exit_keyboard_enhancement(&self) -> io::Result<()> {
+        Backend::exit_keyboard_enhancement(self)
     }
 
     fn exit_alt_screen(&self) -> io::Result<()> {
@@ -197,6 +203,10 @@ impl RenderBackend for HeadlessBackend {
     }
 
     fn disable_event_listening(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn exit_keyboard_enhancement(&self) -> io::Result<()> {
         Ok(())
     }
 
@@ -676,6 +686,13 @@ pub struct TuiRendererOptions {
     /// `false`.
     #[napi(js_name = "headless")]
     pub headless: Option<bool>,
+    /// Enable the kitty keyboard protocol (progressive enhancement) so
+    /// modifier combinations like Shift-Enter arrive as distinct key events
+    /// instead of collapsing into the unmodified key. Terminals that do not
+    /// support the protocol ignore the sequences; the enhancement is popped
+    /// on destroy. Default `true`.
+    #[napi(js_name = "keyboard_enhancement")]
+    pub keyboard_enhancement: Option<bool>,
     /// The virtual width in cells for `headless` mode (default 80). Ignored
     /// when `headless` is `false`.
     #[napi(js_name = "width")]
@@ -761,6 +778,9 @@ struct RendererInner {
     /// alternate screen, event listening, or a window title (its backend is
     /// an in-memory no-op), so `destroy` must skip terminal teardown.
     headless: bool,
+    /// Whether the kitty keyboard protocol enhancement was pushed — `destroy`
+    /// pops it so the terminal returns to its previous state.
+    keyboard_enhancement: bool,
     destroyed: bool,
     /// The background push event loop (`push-events` feature): stopped when
     /// the renderer is destroyed so the loop thread exits and releases the
@@ -783,6 +803,7 @@ impl TuiRenderer {
         let use_alt_screen = options.use_alt_screen.unwrap_or(true);
         let title = options.title.clone();
         let headless = options.headless.unwrap_or(false);
+        let keyboard_enhancement = options.keyboard_enhancement.unwrap_or(true) && !headless;
         // A headless renderer never touches a terminal: no raw mode, no
         // alternate screen, no event listening, no title. Its in-memory
         // backend reports the configured virtual size (default 80x24) and
@@ -810,6 +831,13 @@ impl TuiRenderer {
                 }
                 return Err(Error::from_reason(format!("enter alternate screen: {e}")));
             }
+            if keyboard_enhancement {
+                // Best-effort: terminals without the kitty keyboard protocol
+                // ignore the sequence; a failed write here must not fail the
+                // constructor (the renderer works identically without it —
+                // only the Shift-modified key reporting degrades).
+                let _ = backend.enter_keyboard_enhancement();
+            }
             (
                 Box::new(Backend::new()) as Box<dyn RenderBackend>,
                 use_alt_screen,
@@ -832,6 +860,7 @@ impl TuiRenderer {
         exit_on_ctrl_c: options.exit_on_ctrl_c.unwrap_or(false),
                 use_alt_screen,
                 headless,
+                keyboard_enhancement,
                 destroyed: false,
                 #[cfg(feature = "push-events")]
                 event_loop: None,
@@ -1060,6 +1089,9 @@ impl TuiRenderer {
         // event listening, or a title — there is nothing to tear down (its
         // in-memory backend would no-op these anyway).
         if !inner.headless {
+            if inner.keyboard_enhancement {
+                let _ = inner.backend.exit_keyboard_enhancement();
+            }
             let _ = inner.backend.disable_event_listening();
             if inner.use_alt_screen {
                 let _ = inner.backend.exit_alt_screen();
@@ -2623,6 +2655,7 @@ mod tests {
             exit_on_ctrl_c: false,
             use_alt_screen: false,
             headless: false,
+            keyboard_enhancement: false,
             destroyed: true,
             #[cfg(feature = "push-events")]
             event_loop: None,
@@ -2742,6 +2775,7 @@ mod tests {
             exit_on_ctrl_c: false,
             use_alt_screen: false,
             headless: false,
+            keyboard_enhancement: false,
             destroyed: true,
             #[cfg(feature = "push-events")]
             event_loop: None,
@@ -3216,6 +3250,7 @@ mod tests {
             use_alt_screen: None,
             title: None,
             headless: Some(true),
+            keyboard_enhancement: None,
             width: None,
             height: None,
         })
@@ -3292,6 +3327,7 @@ mod tests {
             use_alt_screen: None,
             title: None,
             headless: Some(true),
+            keyboard_enhancement: None,
             width: Some(120),
             height: Some(30),
         })
@@ -3376,6 +3412,10 @@ mod tests {
             Ok(())
         }
 
+        fn exit_keyboard_enhancement(&self) -> io::Result<()> {
+            Ok(())
+        }
+
         fn exit_alt_screen(&self) -> io::Result<()> {
             Ok(())
         }
@@ -3418,6 +3458,7 @@ mod tests {
             exit_on_ctrl_c: false,
             use_alt_screen: false,
             headless: false,
+            keyboard_enhancement: false,
             destroyed: false,
             #[cfg(feature = "push-events")]
             event_loop: None,
