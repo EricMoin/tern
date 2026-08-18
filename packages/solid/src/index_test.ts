@@ -43,6 +43,11 @@ import {
   activateTab,
   closeTab,
   disposeTabsFocus,
+  Tree,
+  treeKey,
+  visibleTreeRows,
+  expandTreeNode,
+  disposeTreeFocus,
   useFocus,
   FocusManager,
   focusManager,
@@ -64,6 +69,7 @@ import {
   type KeyEvent,
   type Renderer,
   type Theme,
+  type TreeNode,
   renderer,
   rendererOptions,
   replaceNode,
@@ -2038,6 +2044,89 @@ Deno.test("tableKey moves the highlight and clamps the scroll window on a solid 
   if (up.highlight !== 0 || up.scroll_y !== 0) {
     throw new Error(`up = ${JSON.stringify(up)}`);
   }
+});
+
+// Tree: factory parity + treeKey routing through the FocusManager
+// ---------------------------------------------------------------------------
+
+Deno.test("Tree factory materializes the core element with windowed rows and glyphs", () => {
+  const nodes: TreeNode[] = [
+    { label: "src", children: [{ label: "index.ts" }, { label: "util.ts" }] },
+    { label: "package.json" },
+  ];
+  const tree = Tree({ nodes, clip_height: 5 });
+  if (tree.type !== "tree") throw new Error(`type = ${tree.type}`);
+  if (tree.props.flex_direction !== "column") throw new Error(`flex_direction = ${tree.props.flex_direction}`);
+  // The model + bookkeeping never reach the scene props.
+  if ("nodes" in tree.props || "expanded" in tree.props || "indent" in tree.props) {
+    throw new Error("nodes/expanded/indent must not reach the scene props");
+  }
+  // Collapsed: one leaf per top-level node; the first (highlighted) reversed.
+  if (tree.children.length !== 2) throw new Error(`rows = ${tree.children.length}`);
+  if (tree.children[0]?.props.reversed !== true) throw new Error("row 0 must be highlighted");
+  // The renderer surface maps the roadmap tag (as an empty tree).
+  if (createElement("tree").type !== "tree") throw new Error("createElement(tree) mapping");
+});
+
+Deno.test("treeKey routes through the FocusManager to a focused tree node", () => {
+  const { renderer, keyHandlers } = mockRenderer();
+  const manager = new FocusManager();
+  const tree = Tree({
+    nodes: [
+      { label: "src", children: [{ label: "index.ts" }, { label: "util.ts" }] },
+      { label: "package.json" },
+    ],
+  });
+  const changes: Array<{ highlight: number; count: number }> = [];
+  const changeCount = () => changes.length;
+  const highlightOf = () => tree.props.highlight as number;
+  const rowCount = () => tree.children.length;
+
+  const focusHandle = useFocus("s-tree", tree, (event) => {
+    const beforeHighlight = highlightOf();
+    const beforeScroll = (tree.props.scroll_y as number) ?? 0;
+    const beforeRows = rowCount();
+    const next = treeKey(tree, event);
+    const changed = next.highlight !== beforeHighlight ||
+      next.scroll_y !== beforeScroll ||
+      rowCount() !== beforeRows;
+    if (changed) changes.push(next);
+  }, manager);
+  const dispose = subscribeInput(renderer, () => {}, { focusManager: manager });
+
+  if (!manager.has("s-tree")) throw new Error("useFocus must register the id");
+
+  // Not focused: keys fall through (a no-op here).
+  for (const handler of keyHandlers) handler(keyEvent({ name: "down" }));
+  if (changeCount() !== 0 || highlightOf() !== 0) {
+    throw new Error("unfocused tree must not receive keys");
+  }
+
+  // Focused: right expands the highlighted `src` branch (2 children appear).
+  if (!manager.focus("s-tree")) throw new Error("focus(s-tree) must succeed");
+  for (const handler of keyHandlers) handler(keyEvent({ name: "right" }));
+  if (changeCount() !== 1 || changes[0]!.count !== 4) {
+    throw new Error(`expand = ${JSON.stringify(changes)}`);
+  }
+  if (rowCount() !== 4) throw new Error(`rows after expand = ${rowCount()}`);
+
+  // down walks into the first child.
+  for (const handler of keyHandlers) handler(keyEvent({ name: "down" }));
+  if (highlightOf() !== 1) throw new Error(`down highlight = ${highlightOf()}`);
+  if (visibleTreeRows(tree)[1]?.node.label !== "index.ts") {
+    throw new Error(`child row = ${visibleTreeRows(tree)[1]?.node.label}`);
+  }
+
+  focusHandle.dispose();
+  disposeTreeFocus(tree);
+  dispose();
+});
+
+Deno.test("expandTreeNode drives a solid tree node in place", () => {
+  const tree = Tree({ nodes: [{ label: "root", children: [{ label: "child" }] }] });
+  if (visibleTreeRows(tree).length !== 1) throw new Error("starts collapsed");
+  if (expandTreeNode(tree, "0") !== true) throw new Error("expand must report a change");
+  if (visibleTreeRows(tree).length !== 2) throw new Error(`after expand = ${visibleTreeRows(tree).length}`);
 });
 
 // Tabs: factory parity + tabsKey routing through the FocusManager

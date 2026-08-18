@@ -94,6 +94,15 @@ import {
   tableKey,
   tabsKey,
   tick,
+  toggleTreeNode,
+  expandTreeNode,
+  collapseTreeNode,
+  Tree,
+  treeKey,
+  TREE_COLLAPSED_GLYPH,
+  TREE_EXPANDED_GLYPH,
+  TREE_GUIDE_VERTICAL,
+  visibleTreeRows,
   togglePanel,
   useFocus,
   version,
@@ -112,6 +121,8 @@ import type {
   TableColumn,
   TableState,
   TextareaProps,
+  TreeNode,
+  TreeRow,
   Theme,
   ThemeOverrides,
   ThemeResolvableProps,
@@ -4627,6 +4638,170 @@ Deno.test("tabsKey ctrl+w closes the active tab and re-clamps the active index",
   const untouched = tabsKey(tabs, { name: "char", char: "q", ctrl: false, ...base });
   if (untouched.active !== 1 || untouched.count !== 2) {
     throw new Error(`unknown key = ${JSON.stringify(untouched)}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Tree: composition, indentation guides, expand/collapse glyphs, keyboard, windowing
+// ---------------------------------------------------------------------------
+
+/** The base modifier flags shared by every synthetic Tree key event. */
+const treeKeyBase = { ctrl: false, alt: false, shift: false } as const;
+
+/** A small fixture tree:
+ *   ▶ src            (branch: index.ts, components)
+ *   ▶ docs           (branch: readme.md)
+ *     package.json   (leaf)
+ */
+function treeFixture(): TreeNode[] {
+  return [
+    {
+      label: "src",
+      children: [
+        { label: "index.ts" },
+        {
+          label: "components",
+          children: [{ label: "button.ts" }, { label: "input.ts" }],
+        },
+      ],
+    },
+    { label: "docs", children: [{ label: "readme.md" }] },
+    { label: "package.json" },
+  ];
+}
+
+/** The text of every materialized row leaf, in scene order. */
+function treeRowTexts(tree: Node): string[] {
+  return tree.children.map((leaf) => (typeof leaf.props.text === "string" ? leaf.props.text : ""));
+}
+
+Deno.test("Tree composes one collapsed leaf per top-level node with glyphs", () => {
+  const tree = Tree({ nodes: treeFixture() });
+  if (tree.type !== "tree") throw new Error(`type = ${tree.type}`);
+  if (tree.props.flex_direction !== "column") throw new Error(`flex_direction = ${tree.props.flex_direction}`);
+  if (tree.props.highlight !== 0) throw new Error(`highlight = ${tree.props.highlight}`);
+  // The model / bookkeeping keys never reach the scene props.
+  if ("nodes" in tree.props || "expanded" in tree.props || "indent" in tree.props) {
+    throw new Error("nodes/expanded/indent must not reach the scene props");
+  }
+  // All collapsed: only the three top-level rows materialize.
+  const rows = treeRowTexts(tree);
+  if (rows.length !== 3) throw new Error(`rows = ${JSON.stringify(rows)}`);
+  // Branches carry the collapsed glyph + space; the leaf carries two spaces.
+  if (rows[0] !== `${TREE_COLLAPSED_GLYPH} src`) throw new Error(`row0 = ${JSON.stringify(rows[0])}`);
+  if (rows[1] !== `${TREE_COLLAPSED_GLYPH} docs`) throw new Error(`row1 = ${JSON.stringify(rows[1])}`);
+  if (rows[2] !== "  package.json") throw new Error(`row2 = ${JSON.stringify(rows[2])}`);
+  // The highlighted (first) row is reversed; the others are not.
+  if (tree.children[0]?.props.reversed !== true) throw new Error("row 0 must be reversed");
+  if (tree.children[1]?.props.reversed === true) throw new Error("only the highlighted row may be reversed");
+});
+
+Deno.test("Tree indentation guides draw a vertical bar under a continuing ancestor", () => {
+  // Expand `src` and its `components` child so nested rows appear.
+  const tree = Tree({ nodes: treeFixture(), expanded: ["0", "0.1"] });
+  const rows = treeRowTexts(tree);
+  // Visible order: src, index.ts, components, button.ts, input.ts, docs, package.json.
+  // `src` has a following sibling (docs), so its children draw a `│ ` guide.
+  if (rows[0] !== `${TREE_EXPANDED_GLYPH} src`) throw new Error(`row0 = ${JSON.stringify(rows[0])}`);
+  if (rows[1] !== `${TREE_GUIDE_VERTICAL} ` + "  index.ts") throw new Error(`row1 = ${JSON.stringify(rows[1])}`);
+  if (rows[2] !== `${TREE_GUIDE_VERTICAL} ${TREE_EXPANDED_GLYPH} components`) {
+    throw new Error(`row2 = ${JSON.stringify(rows[2])}`);
+  }
+  // Depth-2 leaves: one guide from `src` (has next sibling -> bar) + one from
+  // `components` (last child of src -> gap), then the leaf glyph slot.
+  if (rows[3] !== `${TREE_GUIDE_VERTICAL} ` + "    button.ts") throw new Error(`row3 = ${JSON.stringify(rows[3])}`);
+  if (rows[4] !== `${TREE_GUIDE_VERTICAL} ` + "    input.ts") throw new Error(`row4 = ${JSON.stringify(rows[4])}`);
+  if (rows[5] !== `${TREE_COLLAPSED_GLYPH} docs`) throw new Error(`row5 = ${JSON.stringify(rows[5])}`);
+  if (rows[6] !== "  package.json") throw new Error(`row6 = ${JSON.stringify(rows[6])}`);
+});
+
+Deno.test("treeKey right/left/enter expand, collapse, and walk the tree", () => {
+  const tree = Tree({ nodes: treeFixture() });
+  // right on a collapsed branch expands it (src has 2 children).
+  const expanded = treeKey(tree, { name: "right", ...treeKeyBase });
+  if (expanded.count !== 5) throw new Error(`count after expand = ${expanded.count}`);
+  if (visibleTreeRows(tree)[1]?.node.label !== "index.ts") {
+    throw new Error(`first child = ${visibleTreeRows(tree)[1]?.node.label}`);
+  }
+  // right again on the (expanded) branch steps into the first child.
+  const stepIn = treeKey(tree, { name: "right", ...treeKeyBase });
+  if (stepIn.highlight !== 1) throw new Error(`step-in highlight = ${stepIn.highlight}`);
+  // down to `components`, then enter expands it (2 more children).
+  treeKey(tree, { name: "down", ...treeKeyBase });
+  const openComponents = treeKey(tree, { name: "enter", ...treeKeyBase });
+  if (openComponents.count !== 7) throw new Error(`count after enter = ${openComponents.count}`);
+  // left on the expanded `components` collapses it back.
+  const collapse = treeKey(tree, { name: "left", ...treeKeyBase });
+  if (collapse.count !== 5) throw new Error(`count after collapse = ${collapse.count}`);
+  const row = visibleTreeRows(tree)[collapse.highlight];
+  if (row?.node.label !== "components" || row.expanded !== false) {
+    throw new Error(`highlight row = ${JSON.stringify(row?.node.label)} expanded=${row?.expanded}`);
+  }
+  // left on a collapsed node jumps to its parent (`src`).
+  const toParent = treeKey(tree, { name: "left", ...treeKeyBase });
+  if (visibleTreeRows(tree)[toParent.highlight]?.node.label !== "src") {
+    throw new Error(`parent = ${visibleTreeRows(tree)[toParent.highlight]?.node.label}`);
+  }
+});
+
+Deno.test("expandTreeNode / collapseTreeNode / toggleTreeNode drive expand state by key", () => {
+  const tree = Tree({ nodes: treeFixture() });
+  if (expandTreeNode(tree, "0") !== true) throw new Error("expand must report a change");
+  if (expandTreeNode(tree, "0") !== false) throw new Error("re-expand must be a no-op");
+  if (visibleTreeRows(tree).length !== 5) throw new Error(`after expand = ${visibleTreeRows(tree).length}`);
+  if (collapseTreeNode(tree, "0") !== true) throw new Error("collapse must report a change");
+  if (visibleTreeRows(tree).length !== 3) throw new Error(`after collapse = ${visibleTreeRows(tree).length}`);
+  if (toggleTreeNode(tree, "0") !== true) throw new Error("toggle must report a change");
+  if (visibleTreeRows(tree)[0]?.expanded !== true) throw new Error("toggle must expand");
+  // A custom id keys the expand state instead of the index path.
+  const keyed = Tree({ nodes: [{ id: "root", label: "root", children: [{ label: "child" }] }] });
+  if (expandTreeNode(keyed, "0") !== false) throw new Error("index-path key must miss a custom-id node");
+  if (expandTreeNode(keyed, "root") !== true) throw new Error("custom id must expand");
+  if (visibleTreeRows(keyed).length !== 2) throw new Error(`keyed expand = ${visibleTreeRows(keyed).length}`);
+});
+
+Deno.test("treeKey up/down move the highlight and clamp at the ends", () => {
+  const tree = Tree({ nodes: treeFixture() });
+  const down = treeKey(tree, { name: "down", ...treeKeyBase });
+  if (down.highlight !== 1) throw new Error(`down = ${down.highlight}`);
+  const up = treeKey(tree, { name: "up", ...treeKeyBase });
+  if (up.highlight !== 0) throw new Error(`up = ${up.highlight}`);
+  const upClamp = treeKey(tree, { name: "up", ...treeKeyBase });
+  if (upClamp.highlight !== 0) throw new Error(`up clamp = ${upClamp.highlight}`);
+  for (let i = 0; i < 5; i++) treeKey(tree, { name: "down", ...treeKeyBase });
+  if ((tree.props.highlight as number) !== 2) throw new Error(`down clamp = ${tree.props.highlight}`);
+  // The reversed leaf follows the highlight.
+  if (tree.children[2]?.props.reversed !== true) throw new Error("last row must be reversed");
+});
+
+Deno.test("a large tree materializes only the visible window and clamps scroll", () => {
+  // 1000 top-level branches, each with 3 children.
+  const nodes: TreeNode[] = [];
+  for (let i = 0; i < 1000; i++) {
+    nodes.push({ label: `dir-${i}`, children: [{ label: "a" }, { label: "b" }, { label: "c" }] });
+  }
+  const tree = Tree({ nodes, clip_height: 5 });
+  // Collapsed: 1000 visible rows, but only 5 materialize.
+  if (tree.children.length !== 5) throw new Error(`window = ${tree.children.length}`);
+  if (visibleTreeRows(tree).length !== 5) throw new Error(`visible = ${visibleTreeRows(tree).length}`);
+  if (treeRowTexts(tree)[0] !== `${TREE_COLLAPSED_GLYPH} dir-0`) {
+    throw new Error(`row0 = ${JSON.stringify(treeRowTexts(tree)[0])}`);
+  }
+  // Drive down well past the window: the window still holds 5 leaves and the
+  // highlighted row stays inside it.
+  for (let i = 0; i < 40; i++) treeKey(tree, { name: "down", ...treeKeyBase });
+  if (tree.children.length !== 5) throw new Error(`window after scroll = ${tree.children.length}`);
+  if ((tree.props.highlight as number) !== 40) throw new Error(`highlight = ${tree.props.highlight}`);
+  if ((tree.props.scroll_y as number) !== 36) throw new Error(`scroll_y = ${tree.props.scroll_y}`);
+  if (treeRowTexts(tree)[4] !== `${TREE_COLLAPSED_GLYPH} dir-40`) {
+    throw new Error(`bottom row = ${JSON.stringify(treeRowTexts(tree)[4])}`);
+  }
+  // Expanding one branch inserts its 3 children into the visible-row count;
+  // dir-0 has a following sibling, so its children draw a `│ ` guide.
+  const first = Tree({ nodes, clip_height: 5 });
+  expandTreeNode(first, "0");
+  if (treeRowTexts(first)[1] !== `${TREE_GUIDE_VERTICAL} ` + "  a") {
+    throw new Error(`expanded child = ${JSON.stringify(treeRowTexts(first)[1])}`);
   }
 });
 

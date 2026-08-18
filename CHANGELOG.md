@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tree / TreeView widget (roadmap Phase 8):** a `Tree` element in
+  `@tern-tui/core` — a flex column of text leaves, one per *visible* row of a
+  hierarchical node model: an indentation guide (`│ ` under a continuing
+  ancestor, `  ` otherwise), an expand/collapse glyph (`▼`/`▶`, two spaces for
+  a leaf so labels align), and the node label; the highlighted row reversed.
+  Only the window `rows[scroll_y, scroll_y + clip_height)` is materialized, so
+  a large tree never creates one scene node per node (the full model and the
+  expanded-key `Set` stay JS bookkeeping — never scene props; no new napi node
+  kind, materializes as a `box`). Driven by `treeKey` (up/down move +
+  auto-scroll, `left`/`right` and `enter`/`space` collapse/expand, `left` jumps
+  to the parent, `right` steps into the first child) and the imperative
+  `toggleTreeNode` / `expandTreeNode` / `collapseTreeNode`; the visible window
+  reads back through `visibleTreeRows`. Host components ship in `@tern-tui/react`
+  (`<Tree focusId onChange>`) and `@tern-tui/solid` (`Tree` + `disposeTreeFocus`),
+  both routing keys through the core `treeKey` via the `FocusManager`.
 - **Border color:** `Style::border_color` (tern-core) lets a box's border
   glyphs paint with a dedicated color — surfaced as the `border_color` style
   key in the tern-node binding (`setProps` / `setProp` / span styles), as the

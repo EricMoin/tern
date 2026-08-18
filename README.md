@@ -322,6 +322,7 @@ Each demo renders a scene, asserts it against the scene tree, and quits on
 - [docs/architecture.md](docs/architecture.md) — render pipeline and repository conventions
 - [docs/components.md](docs/components.md) — code-agent component roadmap and status
 - [docs/roadmap.md](docs/roadmap.md) — post-MVP phases
+- [docs/todo.md](docs/todo.md) — remaining work toward a complete TUI library, staged as a TODO checklist
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [CONTRIBUTING.md](CONTRIBUTING.md) — build / test / smoke gates and engineering rules
 

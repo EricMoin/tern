@@ -67,6 +67,7 @@ import {
   Tabs as CoreTabs,
   Text,
   Textarea as CoreTextarea,
+  Tree as CoreTree,
   focusManager,
   type DiffViewProps,
   type FocusManager,
@@ -83,6 +84,7 @@ import {
   type TableProps,
   type TabsProps,
   type TextareaProps,
+  type TreeProps,
 } from "@tern-tui/core";
 
 // ---------------------------------------------------------------------------
@@ -382,6 +384,11 @@ export const hostConfig: HostConfig = {
         // The column/row model is JS bookkeeping the core factory consumes;
         // `TableProps` requires it while `NodeProps` is an open record.
         return CoreTable(nodeProps as TableProps);
+      case "tree":
+        // The node model + expand bookkeeping is JS state the core factory
+        // consumes; `TreeProps` requires `nodes` while `NodeProps` is an open
+        // record.
+        return CoreTree(nodeProps as TreeProps);
       case "tabs":
         // The tab spec list is JS bookkeeping the core factory consumes;
         // `TabsProps` requires it while `NodeProps` is an open record.
