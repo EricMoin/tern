@@ -96,6 +96,7 @@ import {
   syncStreamTail,
   tabsKey,
   tick,
+  treeKey,
   useFocus as coreUseFocus,
   wheelScroll,
   type FocusManager,
@@ -115,6 +116,8 @@ import {
   type TableColumn,
   type TabsState,
   type TextareaState,
+  type TreeNode,
+  type TreeState,
   type Theme,
   type ThemeComponent,
   type ThemeOverrides,
@@ -356,6 +359,7 @@ const HOST_DIFF: string = "diff";
 const HOST_SELECT: string = "select";
 const HOST_SCROLL_VIEW: string = "scroll_view";
 const HOST_TABLE: string = "table";
+const HOST_TREE: string = "tree";
 const HOST_TABS: string = "tabs";
 const HOST_PROGRESS: string = "progress";
 const HOST_MODAL: string = "modal";
@@ -873,6 +877,83 @@ export function Table(props: TableProps): ReactElement<TableProps> {
     HOST_TABLE,
     resolveTheme(theme, { ...props, component: "table" }) as TableProps,
   );
+}
+
+/**
+ * Props for `<Tree>`: the tern node props plus the hierarchical node model,
+ * the interactive state and the focus/callback wiring. `nodes` / `expanded` /
+ * `indent` flow to the core `Tree` factory (the model + expand bookkeeping are
+ * JS state and never reach the scene props); the remaining keys are consumed
+ * by the component.
+ */
+export interface TreeProps extends TernNodeProps {
+  /** The root nodes, in display order (top to bottom). */
+  nodes: TreeNode[];
+  /** The highlighted visible-row index (default 0). */
+  highlight?: number;
+  /** The vertical scroll offset in rows (default 0). */
+  scroll_y?: number;
+  /** The viewport height in rows (default unset — every visible row shows). */
+  clip_height?: number;
+  /** The keys of nodes expanded initially (default none — all collapsed). */
+  expanded?: string[];
+  /** Cells of indentation per depth level (default 2). */
+  indent?: number;
+  /**
+   * Register the tree with a `FocusManager` under this id so routed keys (via
+   * `useInput`) drive it through the core `treeKey`. Omit to leave the tree
+   * inert to keys.
+   */
+  focusId?: string;
+  /** The `FocusManager` to register with (defaults to the tree's current
+   *  manager — `useFocusManager()`). */
+  focusManager?: FocusManager;
+  /** Fired after a routed key changes the tree (move / expand / collapse). */
+  onChange?: (state: TreeState) => void;
+}
+
+/**
+ * The `<Tree>` host component: a flex column of text leaves — one leaf per
+ * *visible* row of the hierarchical `nodes` model, each an indentation guide +
+ * an expand/collapse glyph (`▼`/`▶`) + the node label, the highlighted row
+ * reversed (core `Tree` factory). Only the visible window is materialized, so
+ * a large tree does not create one scene node per node. When `focusId` is
+ * given, the tree registers with a `FocusManager` on mount and routed keys
+ * (via `useInput`) drive it through the core `treeKey` — up/down move the
+ * highlight, left/right and enter/space collapse/expand — firing `onChange`
+ * after each change. The tree's ref is managed internally; the element takes
+ * no React children — its composition is fixed by the factory.
+ */
+export function Tree(props: TreeProps): ReactElement<TreeProps> {
+  const theme = useTheme();
+  const nodeRef = useRef<Node | null>(null);
+  const manager = props.focusManager ?? useFocusManager();
+  const onChangeRef = useRef(props.onChange);
+  onChangeRef.current = props.onChange;
+
+  useEffect(() => {
+    const node = nodeRef.current;
+    if (node === null || props.focusId === undefined) return;
+    return coreUseFocus(props.focusId, node, (event) => {
+      const before = node.props as TreeProps;
+      const beforeHighlight = typeof before.highlight === "number" ? before.highlight : 0;
+      const beforeScroll = typeof before.scroll_y === "number" ? before.scroll_y : 0;
+      // The materialized window count changes when an expand/collapse adds or
+      // removes visible rows (with no `clip_height`); highlight/scroll cover
+      // navigation and auto-scroll.
+      const beforeRows = node.children.length;
+      const next = treeKey(node, event);
+      const changed = next.highlight !== beforeHighlight ||
+        next.scroll_y !== beforeScroll ||
+        node.children.length !== beforeRows;
+      if (changed) onChangeRef.current?.(next);
+    }, manager).dispose;
+  }, [props.focusId, manager]);
+
+  return createElement(HOST_TREE, {
+    ...(resolveTheme(theme, props) as TreeProps),
+    ref: nodeRef,
+  });
 }
 
 /**
@@ -1413,6 +1494,9 @@ export type {
   TableState,
   TabsState,
   TextareaState,
+  TreeNode,
+  TreeRow,
+  TreeState,
 } from "@tern-tui/core";
 // Core values re-exported: the focus machinery, the element edit helpers
 // used by the roadmap host components (including the paste counterparts
@@ -1460,6 +1544,11 @@ export {
   tableKey,
   tabsKey,
   tick,
+  toggleTreeNode,
+  expandTreeNode,
+  collapseTreeNode,
+  treeKey,
+  visibleTreeRows,
   visibleTableRows,
   wheelScroll,
 } from "@tern-tui/core";

@@ -67,6 +67,8 @@ import {
   render,
   tableKey,
   toNodeProps,
+  Tree,
+  treeKey,
   useApp,
   useClickToFocus,
   useFocus,
@@ -382,6 +384,37 @@ Deno.test("createInstance maps table to the core Table factory", () => {
   if (region.children[1]?.children.every((cell) => cell.props.reversed === true) !== true) {
     throw new Error("the highlighted row's cells must be reversed");
   }
+});
+
+Deno.test("createInstance maps tree to the core Tree factory; treeKey drives it", () => {
+  const container = { root: CoreBox(), renderer: mockRenderer().renderer };
+  const tree = hc.createInstance(
+    "tree",
+    {
+      nodes: [
+        { label: "src", children: [{ label: "index.ts" }] },
+        { label: "package.json" },
+      ],
+      clip_height: 5,
+    } as never,
+    container,
+    {},
+    null,
+  );
+  if (tree.type !== "tree") throw new Error(`type = ${tree.type}`);
+  // The node model + expand bookkeeping is JS state, never scene props.
+  if ("nodes" in tree.props || "expanded" in tree.props || "indent" in tree.props) {
+    throw new Error("nodes/expanded/indent must not reach the scene props");
+  }
+  // Collapsed: one leaf per top-level node (2), not the nested child.
+  const collapsedRows = tree.children.length;
+  if (collapsedRows !== 2) throw new Error(`rows = ${collapsedRows}`);
+  if (tree.children[0]?.props.reversed !== true) throw new Error("row 0 must be highlighted");
+  // treeKey expands the highlighted branch in place (its child appears).
+  const next = treeKey(tree, { name: "right", ctrl: false, alt: false, shift: false });
+  if (next.count !== 3) throw new Error(`count after expand = ${next.count}`);
+  const expandedRows = tree.children.length;
+  if (expandedRows !== 3) throw new Error(`rows after expand = ${expandedRows}`);
 });
 
 Deno.test("createInstance maps modal to the core Modal factory", () => {

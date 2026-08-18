@@ -100,6 +100,7 @@ import {
   Tabs as TernTabs,
   Text as TernText,
   Textarea as TernTextarea,
+  Tree as TernTree,
   copySelection,
   defaultTheme,
   dragPanels,
@@ -119,6 +120,7 @@ import {
   syncStreamTail,
   tabsKey,
   tick,
+  treeKey,
   useFocus,
   wheelScroll,
   type DiffViewProps,
@@ -145,6 +147,9 @@ import {
   type TabsState,
   type TextareaProps as CoreTextareaProps,
   type TextareaState,
+  type TreeNode,
+  type TreeProps as CoreTreeProps,
+  type TreeState,
   type Theme,
   type ThemeOverrides,
 } from "@tern-tui/core";
@@ -189,6 +194,9 @@ export type {
   TabSpec,
   TabsState,
   TextareaState,
+  TreeNode,
+  TreeRow,
+  TreeState,
 } from "@tern-tui/core";
 
 // The @tern-tui/core values behind the roadmap elements and the focus wiring:
@@ -241,9 +249,14 @@ export {
   tableKey,
   tabsKey,
   tick,
+  toggleTreeNode,
+  expandTreeNode,
+  collapseTreeNode,
+  treeKey,
   togglePanel,
   useFocus,
   visibleTableRows,
+  visibleTreeRows,
   wheelScroll,
 } from "@tern-tui/core";
 
@@ -359,6 +372,10 @@ const options: RendererOptions<Node> = {
         // `columns` / `rows` are required props of the core factory; empty
         // model lists yield a valid, empty table.
         return TernTable({ columns: [], rows: [] });
+      case "tree":
+        // `nodes` is the one required prop of the core factory; an empty
+        // model yields a valid, empty tree.
+        return TernTree({ nodes: [] });
       case "tabs":
         // `tabs` is the one required prop of the core factory; an empty
         // spec list yields a valid, empty tabs (bar + empty region).
@@ -371,7 +388,7 @@ const options: RendererOptions<Node> = {
         return TernModal({});
       default:
         throw new Error(
-          `@tern-tui/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "textarea", "spinner", "status_bar", "panels", "diff", "select", "scroll_view", "table", "tabs", "progress", or "modal")`,
+          `@tern-tui/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "textarea", "spinner", "status_bar", "panels", "diff", "select", "scroll_view", "table", "tree", "tabs", "progress", or "modal")`,
         );
     }
   },
@@ -879,6 +896,84 @@ export function Tabs(props: TabsProps): Node {
       }
     }, manager);
     tabsFocus.set(node, handle);
+  }
+  return node;
+}
+
+/**
+ * Props for the solid `Tree` factory: the core tree props plus the
+ * focus/callback wiring, mirroring the `@tern-tui/react` `<Tree>` host
+ * component. `focusId` / `focusManager` / `onChange` are consumed by the
+ * factory — they never reach the scene node; the remaining keys flow to the
+ * core `Tree` factory (the `nodes` model, the `expanded` / `indent`
+ * bookkeeping, and the `highlight` / `scroll_y` state props).
+ */
+export interface TreeProps extends CoreTreeProps {
+  /**
+   * Register the tree with a `FocusManager` under this id so routed keys
+   * (via `subscribeInput`) drive it through the core `treeKey`. Omit to
+   * leave the tree inert to keys.
+   */
+  focusId?: string;
+  /** The `FocusManager` to register with (defaults to the core
+   *  `focusManager`). */
+  focusManager?: FocusManager;
+  /** Fired after a routed key changes the tree (move / expand / collapse). */
+  onChange?: (state: TreeState) => void;
+}
+
+/** The focus handles of tree nodes registered by the {@link Tree} factory
+ * (keyed by node, like {@link tabsFocus}). The factory owns the registration;
+ * the caller disposes it with {@link disposeTreeFocus} when the node leaves
+ * the scene. */
+const treeFocus = new WeakMap<Node, FocusHandle>();
+
+/**
+ * Dispose a tree node's focus registration. The {@link Tree} factory registers
+ * the node with its `FocusManager` under `focusId` at creation; the
+ * registration is released here when the node is discarded. A node registered
+ * without a `focusId` (or already disposed) is a no-op.
+ */
+export function disposeTreeFocus(node: Node): void {
+  treeFocus.get(node)?.dispose();
+  treeFocus.delete(node);
+}
+
+/**
+ * Create a `tree` scene node: the core `Tree` factory materialized with
+ * `props` — a flex column of text leaves, one leaf per *visible* row of the
+ * hierarchical `nodes` model (an indentation guide + an expand/collapse glyph
+ * `▼`/`▶` + the node label, the highlighted row reversed). Only the visible
+ * window is materialized, so a large tree does not create one scene node per
+ * node.
+ *
+ * When `focusId` is given, the tree registers with the `FocusManager` (the
+ * `focusManager` prop, defaulting to the core `focusManager`) — the
+ * Solid-flavored equivalent of the `@tern-tui/react` `<Tree focusId>`
+ * registration. Routed keys (via `subscribeInput`) drive it through the core
+ * `treeKey`: `up` / `down` move the highlight, `left` / `right` and
+ * `enter` / `space` collapse/expand — `onChange` fires after each change.
+ * Dispose the registration with {@link disposeTreeFocus} when the node leaves
+ * the scene.
+ */
+export function Tree(props: TreeProps): Node {
+  // The focus/callback keys are component-consumed (mirroring `Tabs`): they
+  // must never reach the core factory, or they would leak onto the scene node.
+  const { focusId, focusManager: manager, onChange, ...nodeProps } = props;
+  const node = TernTree(resolveTheme(getTheme(), nodeProps) as CoreTreeProps);
+  if (focusId !== undefined) {
+    const handle = useFocus(focusId, node, (event) => {
+      const before = node.props as TreeProps;
+      const beforeHighlight = typeof before.highlight === "number" ? before.highlight : 0;
+      const beforeScroll = typeof before.scroll_y === "number" ? before.scroll_y : 0;
+      const beforeRows = node.children.length;
+      const next = treeKey(node, event);
+      const changed = next.highlight !== beforeHighlight ||
+        next.scroll_y !== beforeScroll ||
+        node.children.length !== beforeRows;
+      if (changed) onChange?.(next);
+    }, manager);
+    treeFocus.set(node, handle);
   }
   return node;
 }
