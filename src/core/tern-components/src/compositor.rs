@@ -27,7 +27,8 @@
 //!
 //! The roadmap components ([`Input`](crate::Input),
 //! [`Textarea`](crate::Textarea), [`Spinner`](crate::Spinner),
-//! [`Panels`](crate::Panels), [`StatusBar`](crate::StatusBar)) materialize as
+//! [`Panels`](crate::Panels), [`StatusBar`](crate::StatusBar),
+//! [`Canvas`](crate::Canvas)) materialize as
 //! `Box`/`Text` subtrees and need no special paint handling; when one is
 //! painted as the tree root, its frame is promoted to the scene root so it
 //! fills the viewport (and a `StatusBar`/`Input`/`Textarea` root is given the

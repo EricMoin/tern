@@ -1,4 +1,5 @@
 use super::*;
+use crate::canvas::Canvas;
 use crate::input::Input;
 use crate::panels::{Panel, Panels};
 use crate::renderable::{Box, Text};

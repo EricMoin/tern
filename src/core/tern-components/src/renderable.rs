@@ -6,7 +6,8 @@
 //! optional border glyphs, and a padding inset around its children. The
 //! roadmap components — [`Input`](crate::Input), [`Textarea`](crate::Textarea),
 //! [`Spinner`](crate::Spinner), [`Panels`](crate::Panels),
-//! [`StatusBar`](crate::StatusBar) — layer richer interaction state on top of
+//! [`StatusBar`](crate::StatusBar), [`Canvas`](crate::Canvas) — layer richer
+//! interaction state on top of
 //! the same pattern: each is a plain-data struct with builder helpers and
 //! editing/mutation methods that materializes as a subtree of `Box`/`Text`
 //! scene nodes (see `docs/components.md`).
@@ -20,6 +21,7 @@
 use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene};
 use tern_core::{Color, Modifiers, Style};
 
+use crate::canvas::Canvas;
 use crate::input::Input;
 use crate::panels::Panels;
 use crate::spinner::Spinner;
@@ -44,6 +46,8 @@ pub enum Renderable {
     Panels(Panels),
     /// A bottom status strip ([`StatusBar`]).
     StatusBar(StatusBar),
+    /// A sub-cell dot matrix rendered as braille characters ([`Canvas`]).
+    Canvas(Canvas),
 }
 
 impl Renderable {
@@ -86,6 +90,7 @@ impl Renderable {
             Renderable::Spinner(s) => Some(s.frame()),
             Renderable::Panels(p) => Some(p.frame()),
             Renderable::StatusBar(sb) => Some(sb.frame()),
+            Renderable::Canvas(c) => Some(c.frame()),
             Renderable::Text(_) => None,
         }
     }
@@ -105,6 +110,7 @@ impl Renderable {
             Renderable::Spinner(s) => s.materialize_content(scene, parent),
             Renderable::Panels(p) => p.materialize_content(scene, parent),
             Renderable::StatusBar(sb) => sb.materialize_content(scene, parent),
+            Renderable::Canvas(c) => c.materialize_content(scene, parent),
             Renderable::Text(_) => {}
         }
     }

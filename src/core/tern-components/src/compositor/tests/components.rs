@@ -123,6 +123,39 @@ fn status_bar_pins_left_and_right_segments_to_the_edges() {
 }
 
 #[test]
+fn golden_canvas_diagonal_braille() {
+    // A 2x2-cell canvas (4 sub-cell columns x 8 sub-cell rows) with dots on
+    // the sub-cell diagonal (x, x) plus one at (0, 7), painted as the root
+    // into a same-sized viewport. Expected rows hand-computed from the
+    // U+2800 dot->bit map (dots 1..8 -> bits 0x01..0x80):
+    //   cell (0,0): dots 1 + 6 = 0x21 -> U+2821 '⠡'
+    //   cell (1,0): dots 3 + 8 = 0x84 -> U+2884 '⢄'
+    //   cell (0,1): dot 4        = 0x08 -> U+2808 '⠈'
+    //   cell (1,1): empty        = 0x00 -> U+2800 '⠀'
+    let mut canvas = Canvas::new(2, 2);
+    for x in 0..4 {
+        canvas.set(x, x);
+    }
+    canvas.set(0, 7);
+    assert_eq!(render_rows(canvas, Size::new(2, 2)), ["⠡⢄", "⠈⠀"]);
+}
+
+#[test]
+fn golden_canvas_filled_rectangle_all_dots() {
+    // Every dot set in every cell: each cell's 8 bits -> 0xFF -> U+28FF
+    // '⣿'. A 3x2-cell canvas painted as the root rasterizes to two rows of
+    // three '⣿' each — the top 4 sub-rows of every cell make row 0, the
+    // bottom 4 make row 1.
+    let mut canvas = Canvas::new(3, 2);
+    for x in 0..6 {
+        for y in 0..8 {
+            canvas.set(x, y);
+        }
+    }
+    assert_eq!(render_rows(canvas, Size::new(3, 2)), ["⣿⣿⣿", "⣿⣿⣿"]);
+}
+
+#[test]
 fn status_bar_root_pins_to_the_bottom_row() {
     // A root StatusBar is a single-row strip, not a viewport-filling box:
     // it pins to the bottom row of a 20x3 viewport, leaving rows 0-1

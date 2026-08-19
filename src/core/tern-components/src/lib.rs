@@ -11,8 +11,8 @@
 //!   clipped to its laid-out rect; a [`Box`] paints its background, optional
 //!   border glyphs, and a padding inset around its children.
 //! * **Roadmap components** — [`Input`], [`Textarea`], [`Spinner`],
-//!   [`Panels`], and [`StatusBar`], the Rust renderable half of the
-//!   `docs/components.md` widget roadmap. Each is plain state plus
+//!   [`Panels`], [`StatusBar`], and [`Canvas`], the Rust renderable half of
+//!   the `docs/components.md` widget roadmap. Each is plain state plus
 //!   builder/editing methods that materializes as a `Box`/`Text` subtree;
 //!   [`Input`] and [`Textarea`] stamp a `caret` prop the compositor paints as
 //!   a block caret ([`Textarea`] soft-wraps its lines and scrolls vertically
@@ -23,6 +23,7 @@
 
 #![forbid(unsafe_code)]
 
+mod canvas;
 mod compositor;
 mod input;
 mod panels;
@@ -31,6 +32,7 @@ mod spinner;
 mod statusbar;
 mod textarea;
 
+pub use canvas::Canvas;
 pub use compositor::Compositor;
 pub use input::{Input, Key, KeyAction};
 pub use panels::{Panel, Panels};
