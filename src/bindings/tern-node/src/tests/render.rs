@@ -223,6 +223,8 @@ fn render_to_buffer_styled_errors_when_destroyed() {
         last_painted_viewport: NO_VIEWPORT,
         selection: None,
         last_painted_selection: None,
+        cursor: None,
+        last_painted_cursor: None,
         cached_size: None,
         last_flush_bytes: 0,
         #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
@@ -296,6 +298,8 @@ fn render_to_buffer_errors_when_destroyed() {
         last_painted_viewport: NO_VIEWPORT,
         selection: None,
         last_painted_selection: None,
+        cursor: None,
+        last_painted_cursor: None,
         cached_size: None,
         last_flush_bytes: 0,
         #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
@@ -314,4 +318,82 @@ fn render_to_buffer_errors_when_destroyed() {
         .render_to_buffer(None, None)
         .expect_err("destroyed renderer must error");
     assert!(err.to_string().contains("destroyed"), "{err}");
+}
+
+#[test]
+fn set_cursor_routes_renders_through_the_cursor_aware_flush_and_clear_restores_legacy() {
+    // `set_cursor` stores the caret override; the next render flushes
+    // through the cursor-aware path with exactly that cursor (position,
+    // shape, visibility, blink), and a later `clear_cursor` falls back to
+    // the legacy position-only flush. Both edits invalidate the render fast
+    // path — exactly like a selection edit — so the cursor change reaches
+    // the terminal even when the scene is unchanged, and once the cursor
+    // state settles the no-op fast path returns.
+    use tern_core::cursor::CursorShape;
+
+    let backend = CountingBackend::default();
+    let probe = backend.clone();
+    let (renderer, _scene) = counting_renderer(backend);
+
+    renderer
+        .set_cursor(3, 2, "bar".to_string(), true, true)
+        .expect("set cursor");
+    renderer.render().expect("render with cursor");
+    // The cursor-aware flush ran; the legacy flush did not.
+    assert_eq!(probe.flush_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.cursor_flush_calls.load(Ordering::Relaxed), 1);
+    let flushed = probe
+        .flushed_cursor()
+        .expect("the cursor-aware flush must carry the cursor");
+    assert_eq!(flushed.position(), (3, 2));
+    assert_eq!(flushed.shape, CursorShape::Bar);
+    assert!(flushed.blinking);
+    assert!(flushed.is_visible());
+
+    // clear_cursor + render (scene unchanged): the legacy flush is used
+    // again — the cursor edit forced the repaint.
+    renderer.clear_cursor().expect("clear cursor");
+    renderer.render().expect("render without cursor");
+    assert_eq!(probe.cursor_flush_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.flush_calls.load(Ordering::Relaxed), 1);
+
+    // With no cursor set and everything else unchanged, the no-op fast path
+    // is back: a third render touches the backend not at all.
+    renderer.render().expect("no-op render");
+    assert_eq!(probe.flush_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.cursor_flush_calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn set_cursor_hides_and_rejects_unknown_shapes() {
+    // `visible: false` hides the caret and an unrecognized shape string is
+    // rejected without mutating the stored cursor.
+    use tern_core::cursor::CursorShape;
+
+    let backend = CountingBackend::default();
+    let probe = backend.clone();
+    let (renderer, _scene) = counting_renderer(backend);
+
+    renderer
+        .set_cursor(1, 1, "underline".to_string(), false, false)
+        .expect("set hidden underline cursor");
+    renderer.render().expect("render with hidden cursor");
+    let flushed = probe
+        .flushed_cursor()
+        .expect("the cursor-aware flush must carry the cursor");
+    assert_eq!(flushed.shape, CursorShape::Underline);
+    assert!(!flushed.is_visible());
+    assert!(!flushed.blinking);
+
+    // An unknown shape is an error that leaves the stored cursor untouched:
+    // the next render still sees the previous cursor, and — with everything
+    // else unchanged — hits the no-op fast path (zero flushes), which is
+    // exactly what an unchanged cursor state must produce.
+    let err = renderer
+        .set_cursor(0, 0, "diamond".to_string(), true, false)
+        .expect_err("unknown shape must error");
+    assert!(err.to_string().contains("invalid cursor shape"), "{err}");
+    renderer.render().expect("render after rejected shape");
+    assert_eq!(probe.cursor_flush_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.flush_calls.load(Ordering::Relaxed), 0);
 }
