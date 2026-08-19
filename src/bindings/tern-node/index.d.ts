@@ -412,7 +412,10 @@ export interface SelectionRange {
  *
  * Colors surface as `"#rrggbb"` (truecolor) or `"indexed:<n>"` (ANSI
  * palette) strings; every modifier key is present only when set, so an
- * unstyled run carries just `text`.
+ * unstyled run carries just `text`. A run whose cells carry a hyperlink
+ * reports the link target as `hyperlink` — the value the engine threads
+ * from the `href` style key into `Style::hyperlink` (see
+ * [`apply_style_key`](crate::convert::apply_style_key)).
  */
 export interface StyleRunJs {
   /** The run's text content. */
@@ -421,6 +424,11 @@ export interface StyleRunJs {
   fg?: string
   /** The background color, when the cells carry one. */
   bg?: string
+  /**
+   * The hyperlink target (a URL) the run's cells paint as an OSC 8
+   * hyperlink, present only when the cells carry one.
+   */
+  hyperlink?: string
   /** Whether the run is bold. */
   bold?: boolean
   /** Whether the run is dim. */

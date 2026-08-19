@@ -397,7 +397,7 @@ impl Compositor {
                 if cell.is_masked() {
                     continue;
                 }
-                cell.style = cell.style.add_modifier(Modifiers::REVERSED);
+                cell.style = cell.style.clone().add_modifier(Modifiers::REVERSED);
             }
         }
     }

@@ -109,6 +109,24 @@ export type {
   TuiRendererOptions,
 } from "@tern-tui/node";
 
+/**
+ * The `hyperlink` style surface on {@link StyleRunJs}: a run whose cells
+ * carry a hyperlink reports the link target as `hyperlink` (the value the
+ * engine threads from the `href` style key into `Style::hyperlink`, and the
+ * field name the styled snapshot surfaces it under). Declared here — on the
+ * JS surface — alongside the binding's generated fields, mirroring how the
+ * `hyperlink` NodeProps alias maps to the native `href` style key: the prop
+ * is camelCase, the scene key is snake_case `href`, and the painted run
+ * carries the value as `hyperlink`.
+ */
+declare module "@tern-tui/node" {
+  interface StyleRunJs {
+    /** The hyperlink target (a URL) the run's cells paint as an OSC 8
+     * hyperlink, present only when the cells carry one. */
+    hyperlink?: string;
+  }
+}
+
 export const name = "@tern-tui/core";
 export const version = "0.2.0";
 
@@ -236,6 +254,14 @@ export interface NodeProps {
    * Unset, the border glyphs paint with the node's `fg` (the default).
    */
   borderColor?: string;
+  /**
+   * The hyperlink target (a URL) for the node's text, painted as an OSC 8
+   * hyperlink by the engine. CamelCase alias for the binding's `href` style
+   * key: it is translated to `href` before the props reach the native layer,
+   * so `node.props` reports the snake_case key. Unset, the text paints as a
+   * plain run (no OSC 8 sequences).
+   */
+  hyperlink?: string;
   border_style?: "none" | "plain" | "rounded" | "double" | "thick";
   bold?: boolean;
   dim?: boolean;
@@ -264,7 +290,10 @@ export type PasteHandler = (text: string) => void;
  * `Node.appendSpan`. `style` follows the same scalar-prop JSON convention as
  * `NodeProps` (and `setProps`): the recognized style keys (`fg`, `bg`,
  * `border_style`, the boolean modifiers) are lifted into the span's style by
- * the binding; every other key is ignored.
+ * the binding; every other key is ignored. `style.hyperlink` (the camelCase
+ * alias for the binding's `href` style key, exactly as on `NodeProps`) links
+ * the span's text to a URL: the binding lifts it into the span style's
+ * hyperlink, and the compositor paints the span as an OSC 8 hyperlink.
  */
 export interface Span {
   /** The span's text content. */
@@ -345,20 +374,23 @@ export interface CreateRendererOptions {
 }
 
 /**
- * Translate the camelCase `borderColor` alias to the binding's snake_case
- * `border_color` style key before props reach the native layer. The alias is
- * consumed (stripped), so the node's prop mirror holds the scene-facing key
- * exactly like every other style key (`border_style`, `flex_direction`, ...).
- * An `undefined` alias value is dropped (it has no scene representation,
- * mirroring `setProps`' undefined stripping). The snake_case key itself flows
- * through untouched.
+ * Translate the camelCase aliases (`borderColor` → `border_color`,
+ * `hyperlink` → `href`) to the binding's snake_case style keys before props
+ * reach the native layer. Each alias is consumed (stripped), so the node's
+ * prop mirror holds the scene-facing key exactly like every other style key
+ * (`border_style`, `flex_direction`, ...). An `undefined` alias value is
+ * dropped (it has no scene representation, mirroring `setProps`' undefined
+ * stripping). The snake_case keys themselves flow through untouched.
  */
 function toNativeProps(props: NodeProps): NodeProps {
-  if (!("borderColor" in props)) return props;
+  if (!("borderColor" in props) && !("hyperlink" in props)) return props;
   const out = { ...props };
-  const value = out.borderColor;
+  const borderValue = out.borderColor;
   delete out.borderColor;
-  if (value !== undefined) out.border_color = value;
+  if (borderValue !== undefined) out.border_color = borderValue;
+  const hrefValue = out.hyperlink;
+  delete out.hyperlink;
+  if (hrefValue !== undefined) out.href = hrefValue;
   return out;
 }
 
@@ -536,9 +568,11 @@ export class Node {
    * scene holds it, cleared through the full-map path.
    */
   setProp(key: string, value: unknown): void {
-    // The camelCase `borderColor` alias routes to the snake_case style key
-    // (the scene-facing spelling), exactly like the whole-map path.
+    // The camelCase aliases (`borderColor` → `border_color`, `hyperlink` →
+    // `href`) route to the snake_case style keys (the scene-facing spellings),
+    // exactly like the whole-map path.
     if (key === "borderColor") key = "border_color";
+    if (key === "hyperlink") key = "href";
     if (value === undefined) {
       if (this.#handle !== null && key in this.#props) {
         const next = { ...this.#props };
@@ -568,10 +602,16 @@ export class Node {
    * so appending to a `Text`/`Box` node surfaces that error at attach time.
    */
   appendSpan(text: string, style?: NodeProps): void {
+    // The camelCase aliases translate here too: the binding's `append_span`
+    // lifts the span style through the same `props_to_style_map` as node
+    // props, which recognizes `href` (not `hyperlink`), so the span style is
+    // normalized to the scene-facing spellings at ingestion — the recorded
+    // and the flushed span agree with what the native layer receives.
+    const nativeStyle = style === undefined ? undefined : toNativeProps(style);
     if (this.#attached && this.#handle !== null) {
-      this.#handle.append_span(text, style);
+      this.#handle.append_span(text, nativeStyle);
     } else {
-      this.#spans.push(style === undefined ? { text } : { text, style });
+      this.#spans.push(nativeStyle === undefined ? { text } : { text, style: nativeStyle });
     }
   }
 
@@ -6615,7 +6655,9 @@ export function styledFramesEqual(a: StyleRunJs[][], b: StyleRunJs[][]): boolean
 
 /** Whether two styled runs are identical: the same text and every style
  * field. Field-wise strict comparison (`undefined` vs a set modifier or
- * color differs), so a styled run is never equal to a plain one. */
+ * color differs), so a styled run is never equal to a plain one. `hyperlink`
+ * participates like the other style fields — mirroring the engine's style
+ * equality, where a hyperlink change splits runs at the link boundary. */
 function styledRunsEqual(a: StyleRunJs, b: StyleRunJs): boolean {
   if (a.text !== b.text) return false;
   if (a.fg !== b.fg) return false;
@@ -6626,5 +6668,6 @@ function styledRunsEqual(a: StyleRunJs, b: StyleRunJs): boolean {
   if (a.underline !== b.underline) return false;
   if (a.reversed !== b.reversed) return false;
   if (a.strikethrough !== b.strikethrough) return false;
+  if (a.hyperlink !== b.hyperlink) return false;
   return true;
 }

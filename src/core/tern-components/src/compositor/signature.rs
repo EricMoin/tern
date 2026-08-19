@@ -82,7 +82,7 @@ pub(super) fn paint_sig_of(scene: &Scene, id: NodeId) -> Option<PaintSig> {
         None
     };
     Some(PaintSig {
-        style: node.style,
+        style: node.style.clone(),
         display_none: matches!(prop_str_scene(scene, id, "display"), Some("none")),
         text: match node.props.get("text") {
             Some(PropValue::Str(s)) => Some(s.clone()),

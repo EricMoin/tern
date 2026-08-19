@@ -48,10 +48,10 @@ pub(super) fn paint_text(
     if let Some(PropValue::Str(content)) = node.props.get("text") {
         let content = strip_escapes(content);
         if wrap_enabled(node) {
-            paint_text_wrapped(&content, node.style, rect, region, buffer);
+            paint_text_wrapped(&content, node.style.clone(), rect, region, buffer);
         } else {
             let ellipsis = matches!(node.props.get("ellipsis"), Some(PropValue::Bool(true)));
-            paint_text_single_row(&content, node.style, rect, region, buffer, ellipsis, parent_clip_right);
+            paint_text_single_row(&content, node.style.clone(), rect, region, buffer, ellipsis, parent_clip_right);
         }
     }
 
@@ -62,7 +62,7 @@ pub(super) fn paint_text(
             let bx = region.map_x(cx);
             let by = region.map_y(cy);
             if bx >= 0 && by >= 0 {
-                let caret_style = node.style.add_modifier(Modifiers::REVERSED);
+                let caret_style = node.style.clone().add_modifier(Modifiers::REVERSED);
                 let cursor = Cursor::new(bx as u16, by as u16).styled(caret_style);
                 buffer.render_caret(cursor);
             }
@@ -103,7 +103,7 @@ pub(super) fn paint_text_wrapped(content: &str, style: Style, rect: Rect, region
             // Hard break: flush the pending word, then start a new row.
             // CRLF is a single grapheme cluster and breaks like LF.
             "\n" | "\r\n" => {
-                paint_word(&word, style, rect, &mut cursor, region, buffer, false);
+                paint_word(&word, style.clone(), rect, &mut cursor, region, buffer, false);
                 word.clear();
                 cursor.row += 1;
                 cursor.col = rect.x;
@@ -115,17 +115,17 @@ pub(super) fn paint_text_wrapped(content: &str, style: Style, rect: Rect, region
             // when it fits; a trailing space at a row's end is dropped (the
             // wrap would collapse it anyway).
             " " => {
-                paint_word(&word, style, rect, &mut cursor, region, buffer, false);
+                paint_word(&word, style.clone(), rect, &mut cursor, region, buffer, false);
                 word.clear();
                 if cursor.row < bottom && cursor.col < right {
-                    buffer.set_char_region(cursor.col, cursor.row, ' ', style, region);
+                    buffer.set_char_region(cursor.col, cursor.row, ' ', style.clone(), region);
                     cursor.col += 1;
                 }
             }
             _ => word.push_str(cluster.text),
         }
     }
-    paint_word(&word, style, rect, &mut cursor, region, buffer, false);
+    paint_word(&word, style.clone(), rect, &mut cursor, region, buffer, false);
 }
 
 /// Paint a `wrap: false` text leaf as a single row at the rect origin: the
@@ -184,7 +184,7 @@ pub(super) fn paint_text_single_row(
             break;
         }
         if cx >= 0 {
-            buffer.set_cluster_region(cx, y, &cluster, style, region);
+            buffer.set_cluster_region(cx, y, &cluster, style.clone(), region);
         }
         cx += w as i32;
     }
@@ -271,7 +271,7 @@ pub(super) fn paint_streaming_text(
                 // Hard break: flush the pending word, then start a new row.
                 // CRLF is a single grapheme cluster and breaks like LF.
                 "\n" | "\r\n" => {
-                    paint_word(&word, word_style, rect, &mut cursor, region, buffer, true);
+                    paint_word(&word, word_style.clone(), rect, &mut cursor, region, buffer, true);
                     word.clear();
                     cursor.row += 1;
                     cursor.col = rect.x;
@@ -283,26 +283,26 @@ pub(super) fn paint_streaming_text(
                 // only when it fits; a trailing space at a row's end is
                 // dropped (the wrap would collapse it anyway).
                 " " => {
-                    paint_word(&word, word_style, rect, &mut cursor, region, buffer, true);
+                    paint_word(&word, word_style.clone(), rect, &mut cursor, region, buffer, true);
                     word.clear();
                     if cursor.row < bottom
                         && cursor.col < right
                         && row_inside_frame(rect, region, cursor.row)
                     {
-                        buffer.set_char_region(cursor.col, cursor.row, ' ', span.style, region);
+                        buffer.set_char_region(cursor.col, cursor.row, ' ', span.style.clone(), region);
                         cursor.col += 1;
                     }
                 }
                 _ => {
                     if word.is_empty() {
-                        word_style = span.style;
+                        word_style = span.style.clone();
                     }
                     word.push_str(cluster.text);
                 }
             }
         }
         // Span boundary: flush so per-span styles stay exact across spans.
-        paint_word(&word, word_style, rect, &mut cursor, region, buffer, true);
+        paint_word(&word, word_style.clone(), rect, &mut cursor, region, buffer, true);
         word.clear();
         if cursor.row >= bottom {
             return;
@@ -362,10 +362,10 @@ pub(super) fn paint_streaming_text_single_row(
             // after it fits either.
             if cx >= right || cx + w as i32 > right {
                 truncated = true;
-                trim_style = span.style;
+                trim_style = span.style.clone();
                 break;
             }
-            buffer.set_cluster_region(cx, rect.y, &cluster, span.style, region);
+            buffer.set_cluster_region(cx, rect.y, &cluster, span.style.clone(), region);
             cx += w as i32;
         }
         if truncated {
@@ -543,7 +543,7 @@ pub(super) fn paint_word(
             }
         }
         if !frame_check || row_inside_frame(frame, region, cursor.row) {
-            buffer.set_cluster_region(cursor.col, cursor.row, &cluster, style, region);
+            buffer.set_cluster_region(cursor.col, cursor.row, &cluster, style.clone(), region);
         }
         cursor.col += w as i32;
     }

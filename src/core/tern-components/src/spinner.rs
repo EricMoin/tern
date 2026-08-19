@@ -176,14 +176,14 @@ impl Spinner {
 
     /// The root frame as a bare box (style + layout props, no children).
     pub(crate) fn frame(&self) -> Box {
-        Box::new(self.style, vec![]).row().gap(self.gap as i64)
+        Box::new(self.style.clone(), vec![]).row().gap(self.gap as i64)
     }
 
     /// Materialize the current glyph/bar text under `parent`.
     pub(crate) fn materialize_content(&self, scene: &mut Scene, parent: NodeId) {
         let text = self.render_text();
         scene
-            .add_text(parent, &text, self.style)
+            .add_text(parent, &text, self.style.clone())
             .expect("spinner text leaf under its frame");
     }
 }

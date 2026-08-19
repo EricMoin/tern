@@ -239,11 +239,11 @@ fn segments_from_captures(source: &str, captures: &[Capture]) -> Vec<Span> {
         // interval wins (tree-sitter cuts on char boundaries, so slicing is
         // safe); on an equal range the later capture wins.
         let mut best: Option<(usize, Style)> = None;
-        for &(cstart, cend, style) in captures {
-            if cstart <= start && cend >= end {
-                let len = cend - cstart;
-                if best.is_none_or(|(blen, _)| len <= blen) {
-                    best = Some((len, style));
+        for (cstart, cend, style) in captures {
+            if *cstart <= start && *cend >= end {
+                let len = *cend - *cstart;
+                if best.as_ref().is_none_or(|(blen, _)| len <= *blen) {
+                    best = Some((len, style.clone()));
                 }
             }
         }
@@ -457,7 +457,7 @@ mod tests {
                 if row >= height {
                     break;
                 }
-                buf.set_char(col, row, ch, span.style);
+                buf.set_char(col, row, ch, span.style.clone());
                 col += w;
             }
         }
@@ -518,23 +518,23 @@ mod tests {
         let default = Style::new();
         let pin = |buf: &mut Buffer, y: u16, text: &str, style: Style| {
             for (x, ch) in text.chars().enumerate() {
-                buf.set_char(x as u16, y, ch, style);
+                buf.set_char(x as u16, y, ch, style.clone());
             }
         };
-        pin(&mut expected, 0, "fn main() {", default);
+        pin(&mut expected, 0, "fn main() {", default.clone());
         // fn (keyword), main (function) — write the pinned styles cell by cell.
         for x in 0..2 {
             expected.set_char(x, 0, "fn".chars().nth(x as usize).unwrap(), fg(KEYWORD_FG));
         }
-        expected.set_char(2, 0, ' ', default);
+        expected.set_char(2, 0, ' ', default.clone());
         for (i, ch) in "main".chars().enumerate() {
             expected.set_char(3 + i as u16, 0, ch, fg(FUNCTION_FG));
         }
-        expected.set_char(7, 0, '(', default);
-        expected.set_char(8, 0, ')', default);
-        expected.set_char(9, 0, ' ', default);
-        expected.set_char(10, 0, '{', default);
-        pin(&mut expected, 1, "    let x = 42; // the answer", default);
+        expected.set_char(7, 0, '(', default.clone());
+        expected.set_char(8, 0, ')', default.clone());
+        expected.set_char(9, 0, ' ', default.clone());
+        expected.set_char(10, 0, '{', default.clone());
+        pin(&mut expected, 1, "    let x = 42; // the answer", default.clone());
         for (i, ch) in "let".chars().enumerate() {
             expected.set_char(4 + i as u16, 1, ch, fg(KEYWORD_FG));
         }
@@ -548,17 +548,17 @@ mod tests {
                 fg(COMMENT_FG).add_modifier(Modifiers::ITALIC),
             );
         }
-        pin(&mut expected, 2, "    println!(\"ok\");", default);
+        pin(&mut expected, 2, "    println!(\"ok\");", default.clone());
         for (i, ch) in "println!".chars().enumerate() {
             expected.set_char(4 + i as u16, 2, ch, fg(FUNCTION_FG));
         }
-        expected.set_char(12, 2, '(', default);
+        expected.set_char(12, 2, '(', default.clone());
         for (i, ch) in "\"ok\"".chars().enumerate() {
             expected.set_char(13 + i as u16, 2, ch, fg(STRING_FG));
         }
-        expected.set_char(17, 2, ')', default);
-        expected.set_char(18, 2, ';', default);
-        pin(&mut expected, 3, "}", default);
+        expected.set_char(17, 2, ')', default.clone());
+        expected.set_char(18, 2, ';', default.clone());
+        pin(&mut expected, 3, "}", default.clone());
 
         assert_eq!(buffer, expected);
     }

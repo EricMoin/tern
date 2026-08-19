@@ -27,6 +27,7 @@ fn plain_run(text: &str) -> StyleRunJs {
         text: text.to_string(),
         fg: None,
         bg: None,
+        hyperlink: None,
         bold: None,
         dim: None,
         italic: None,
@@ -43,6 +44,7 @@ fn bold_red_run(text: &str) -> StyleRunJs {
         text: text.to_string(),
         fg: Some("#ff0000".to_string()),
         bg: None,
+        hyperlink: None,
         bold: Some(true),
         dim: None,
         italic: None,
@@ -59,6 +61,24 @@ fn red_border_run(text: &str) -> StyleRunJs {
         text: text.to_string(),
         fg: Some("#ff0000".to_string()),
         bg: None,
+        hyperlink: None,
+        bold: None,
+        dim: None,
+        italic: None,
+        underline: None,
+        reversed: None,
+        strikethrough: None,
+    }
+}
+
+/// A run carrying `hyperlink: "https://example.com"` — the link target the
+/// linked golden text's cells paint as an OSC 8 hyperlink.
+fn linked_run(text: &str) -> StyleRunJs {
+    StyleRunJs {
+        text: text.to_string(),
+        fg: None,
+        bg: None,
+        hyperlink: Some("https://example.com".to_string()),
         bold: None,
         dim: None,
         italic: None,

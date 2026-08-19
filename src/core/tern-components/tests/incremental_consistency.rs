@@ -285,7 +285,7 @@ fn incremental_buffer_parity_on_non_layout_style_change() {
             } else {
                 ids.text
             };
-            assert!(scene.set_style(target, styles[frame - 1]));
+            assert!(scene.set_style(target, styles[frame - 1].clone()));
         },
     );
 }

@@ -173,7 +173,7 @@ impl StatusBar {
     /// occupies exactly one viewport row wherever it sits, which is what lets
     /// the compositor pin it to the reserved bottom row.
     pub(crate) fn frame(&self) -> Box {
-        Box::new(self.style, vec![])
+        Box::new(self.style.clone(), vec![])
             .row()
             .justify_content("space-between")
             .align_items("center")
@@ -193,7 +193,7 @@ impl StatusBar {
         scene.set_prop(id, "gap", PropValue::Int(self.gap as i64));
         for seg in segs {
             scene
-                .add_text(id, &seg.text, seg.style)
+                .add_text(id, &seg.text, seg.style.clone())
                 .expect("segment text under group");
         }
     }

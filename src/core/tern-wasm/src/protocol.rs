@@ -17,7 +17,7 @@ pub fn props_to_style_map(props: serde_json::Map<String, Value>) -> (Style, Prop
     let mut style = Style::new();
     let mut map = PropMap::new();
     for (key, value) in props {
-        match apply_style_key(style, &key, &value) {
+        match apply_style_key(style.clone(), &key, &value) {
             Some(updated) => style = updated,
             None => {
                 let Some(pv) = json_to_prop_value(value) else {
@@ -55,6 +55,11 @@ pub fn apply_style_key(mut style: Style, key: &str, value: &Value) -> Option<Sty
                 style = style.bg(parse_color(s));
             }
         }
+        "href" => {
+            if let Value::String(s) = value {
+                style = style.hyperlink(Some(s.as_str().into()));
+            }
+        }
         "bold" => style = apply_modifier(style, value, Modifiers::BOLD),
         "dim" => style = apply_modifier(style, value, Modifiers::DIM),
         "italic" => style = apply_modifier(style, value, Modifiers::ITALIC),
@@ -74,7 +79,8 @@ fn apply_modifier(style: Style, value: &Value, modifier: Modifiers) -> Style {
     if value.as_bool() == Some(true) {
         style.add_modifier(modifier)
     } else {
-        style.modifier(style.modifiers.remove(modifier))
+        let cleared = style.modifiers.remove(modifier);
+        style.modifier(cleared)
     }
 }
 
@@ -173,10 +179,40 @@ mod tests {
         merged = apply_style_key(merged, "bold", &serde_json::json!(true)).unwrap();
         assert_eq!(merged, full_style);
         // A false modifier clears it.
-        let cleared = apply_style_key(merged, "bold", &serde_json::json!(false)).unwrap();
+        let cleared = apply_style_key(merged.clone(), "bold", &serde_json::json!(false)).unwrap();
         assert!(!cleared.modifiers.contains(Modifiers::BOLD));
         // Unknown keys fall through as prop keys.
         assert!(apply_style_key(merged, "gap", &serde_json::json!(2)).is_none());
+    }
+
+    #[test]
+    fn href_lifts_into_style_hyperlink() {
+        let (style, props) = props_to_style_map(map(
+            r##"{"href":"https://example.com","fg":"#ff0000"}"##,
+        ));
+        assert_eq!(style.hyperlink.as_deref(), Some("https://example.com"));
+        assert_eq!(style.fg, Color::Rgb(255, 0, 0), "other keys still lift");
+        assert!(!props.contains_key("href"), "href is a style key, not a prop");
+    }
+
+    #[test]
+    fn href_absent_or_non_string_leaves_hyperlink_none() {
+        // No href key: the style carries no hyperlink.
+        let (plain, _) = props_to_style_map(map(r##"{"fg":"#ff0000"}"##));
+        assert!(plain.hyperlink.is_none());
+
+        // A non-string href value is dropped, exactly like other style keys.
+        let (non_string, _) = props_to_style_map(map(r#"{"href":42}"#));
+        assert!(non_string.hyperlink.is_none());
+    }
+
+    #[test]
+    fn single_key_href_merge_matches_full_map() {
+        let (full_style, _) = props_to_style_map(map(r##"{"href":"https://example.com"}"##));
+        let mut merged = Style::new();
+        merged = apply_style_key(merged, "href", &serde_json::json!("https://example.com")).unwrap();
+        assert_eq!(merged, full_style);
+        assert_eq!(merged.hyperlink.as_deref(), Some("https://example.com"));
     }
 
     #[test]

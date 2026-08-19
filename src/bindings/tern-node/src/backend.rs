@@ -152,17 +152,19 @@ pub(crate) fn buffer_rows(buffer: &Buffer) -> Vec<String> {
 }
 
 /// The exposed style of a painted cell — the fields [`StyleRunJs`] carries:
-/// fg, bg, and the six surfaced modifiers. Two adjacent cells merge into one
-/// run exactly when their `RunStyle` keys are equal; border style and the
-/// unsurfaced blink/hidden modifiers do not split runs, so an uncolored
-/// box's border cells stay one run with its surrounding default-styled
-/// blanks. A set `border_color` paints the border glyphs with that color as
-/// their foreground (see `paint_box`), so a colored border surfaces as its
-/// own `fg`-carrying run — the styled snapshot reports it through `fg`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// fg, bg, the hyperlink target, and the six surfaced modifiers. Two
+/// adjacent cells merge into one run exactly when their `RunStyle` keys are
+/// equal; border style and the unsurfaced blink/hidden modifiers do not
+/// split runs, so an uncolored box's border cells stay one run with its
+/// surrounding default-styled blanks. A set `border_color` paints the
+/// border glyphs with that color as their foreground (see `paint_box`), so
+/// a colored border surfaces as its own `fg`-carrying run — the styled
+/// snapshot reports it through `fg`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RunStyle {
     fg: Color,
     bg: Color,
+    hyperlink: Option<Box<str>>,
     bold: bool,
     dim: bool,
     italic: bool,
@@ -177,6 +179,7 @@ impl RunStyle {
         Self {
             fg: style.fg,
             bg: style.bg,
+            hyperlink: style.hyperlink,
             bold: style.modifiers.contains(Modifiers::BOLD),
             dim: style.modifiers.contains(Modifiers::DIM),
             italic: style.modifiers.contains(Modifiers::ITALIC),
@@ -193,6 +196,7 @@ impl RunStyle {
             text,
             fg: color_to_string(self.fg),
             bg: color_to_string(self.bg),
+            hyperlink: self.hyperlink.map(|h| h.into_string()),
             bold: self.bold.then_some(true),
             dim: self.dim.then_some(true),
             italic: self.italic.then_some(true),
@@ -231,7 +235,7 @@ pub(crate) fn buffer_runs(buffer: &Buffer) -> Vec<Vec<StyleRunJs>> {
                 } else {
                     cell.symbol_str().into_owned()
                 };
-                let style = RunStyle::of(cell.style);
+                let style = RunStyle::of(cell.style.clone());
                 if let Some((last_style, last_text)) = runs.last_mut() {
                     if *last_style == style {
                         last_text.push_str(&text);

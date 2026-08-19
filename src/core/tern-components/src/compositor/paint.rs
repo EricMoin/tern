@@ -101,7 +101,7 @@ pub(super) fn paint_box(node: &SceneNode, rect: Rect, region: Region, buffer: &m
         let y1 = y1 as u16;
         for y in y0..y1 {
             for x in x0..x1 {
-                buffer.set_cell(x, y, Cell::styled(' ', node.style));
+                buffer.set_cell(x, y, Cell::styled(' ', node.style.clone()));
             }
         }
     }
@@ -116,9 +116,9 @@ pub(super) fn paint_box(node: &SceneNode, rect: Rect, region: Region, buffer: &m
         return;
     };
     let border_style = if node.style.border_color != Color::Default {
-        node.style.fg(node.style.border_color)
+        node.style.clone().fg(node.style.border_color)
     } else {
-        node.style
+        node.style.clone()
     };
     let x0 = x0 as u16;
     let y0 = y0 as u16;
@@ -127,18 +127,18 @@ pub(super) fn paint_box(node: &SceneNode, rect: Rect, region: Region, buffer: &m
     let last_x = x1 - 1;
     let last_y = y1 - 1;
     for x in x0..x1 {
-        buffer.set_char(x, y0, h, border_style); // top edge
-        buffer.set_char(x, last_y, h, border_style); // bottom edge
+        buffer.set_char(x, y0, h, border_style.clone()); // top edge
+        buffer.set_char(x, last_y, h, border_style.clone()); // bottom edge
     }
     for y in y0..y1 {
-        buffer.set_char(x0, y, v, border_style); // left edge
-        buffer.set_char(last_x, y, v, border_style); // right edge
+        buffer.set_char(x0, y, v, border_style.clone()); // left edge
+        buffer.set_char(last_x, y, v, border_style.clone()); // right edge
     }
     // Corners (overwrite the edge glyphs).
-    buffer.set_char(x0, y0, tl, border_style);
-    buffer.set_char(last_x, y0, tr, border_style);
-    buffer.set_char(x0, last_y, bl, border_style);
-    buffer.set_char(last_x, last_y, br, border_style);
+    buffer.set_char(x0, y0, tl, border_style.clone());
+    buffer.set_char(last_x, y0, tr, border_style.clone());
+    buffer.set_char(x0, last_y, bl, border_style.clone());
+    buffer.set_char(last_x, last_y, br, border_style.clone());
 }
 
 /// The concrete glyph set for a border style: top-left, top-right,

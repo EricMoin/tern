@@ -10,7 +10,7 @@ use crate::style::Style;
 /// shown after the frame is flushed; `style` drives the block-caret painting
 /// done by [`Buffer::render_caret`](crate::Buffer::render_caret) — typically
 /// a reversed-video (or blinking) highlight of the cell under the cursor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cursor {
     /// Column (0-based cell column).
     pub x: u16,
@@ -77,18 +77,18 @@ impl Cursor {
     }
 
     /// Builder: set the style the caret renders with.
-    pub const fn styled(mut self, style: Style) -> Self {
+    pub fn styled(mut self, style: Style) -> Self {
         self.style = style;
         self
     }
 
     /// Whether the caret is currently visible.
-    pub const fn is_visible(self) -> bool {
+    pub const fn is_visible(&self) -> bool {
         self.visible
     }
 
     /// The caret position as `(x, y)`.
-    pub const fn position(self) -> (u16, u16) {
+    pub const fn position(&self) -> (u16, u16) {
         (self.x, self.y)
     }
 }
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn styled_sets_render_style() {
         let reversed = Style::new().add_modifier(Modifiers::REVERSED);
-        let c = Cursor::new(3, 3).styled(reversed);
+        let c = Cursor::new(3, 3).styled(reversed.clone());
         assert_eq!(c.style, reversed);
         assert!(c.style.modifiers.contains(Modifiers::REVERSED));
 

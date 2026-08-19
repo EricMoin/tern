@@ -190,7 +190,7 @@ impl Buffer {
             self.cells[i] = Cell {
                 ch,
                 symbol: None,
-                style,
+                style: style.clone(),
                 width: 2,
             };
             self.cells[i + 1] = Cell::mask(style);
@@ -229,7 +229,7 @@ impl Buffer {
             self.cells[i] = Cell {
                 ch,
                 symbol,
-                style,
+                style: style.clone(),
                 width: 2,
             };
             self.cells[i + 1] = Cell::mask(style);
@@ -271,7 +271,7 @@ impl Buffer {
             if cx + w as u16 > self.width {
                 break;
             }
-            self.set_cluster(cx, y, &cluster, style);
+            self.set_cluster(cx, y, &cluster, style.clone());
             cx += w as u16;
         }
     }
@@ -305,7 +305,7 @@ impl Buffer {
             self.cells[i] = Cell {
                 ch,
                 symbol: None,
-                style,
+                style: style.clone(),
                 width: 2,
             };
             self.cells[i + 1] = Cell::mask(style);
@@ -369,7 +369,7 @@ impl Buffer {
             self.cells[i] = Cell {
                 ch,
                 symbol,
-                style,
+                style: style.clone(),
                 width: 2,
             };
             self.cells[i + 1] = Cell::mask(style);
@@ -417,7 +417,7 @@ impl Buffer {
             if bx + w as i32 > region.clip.right() {
                 break;
             }
-            self.set_cluster_region(cx, y, &cluster, style, region);
+            self.set_cluster_region(cx, y, &cluster, style.clone(), region);
             cx += w as i32;
         }
     }
@@ -456,9 +456,11 @@ impl Buffer {
             cursor.style.bg
         };
         // Colors override when the caret sets them; the caret's modifiers are
-        // added on top of the cell's own (e.g. REVERSED on a bold title).
+        // added on top of the cell's own (e.g. REVERSED on a bold title). The
+        // clone preserves the cell's style — including its hyperlink.
         cell.style = cell
             .style
+            .clone()
             .fg(fg)
             .bg(bg)
             .add_modifier(cursor.style.modifiers);
@@ -602,7 +604,7 @@ pub fn diff(prev: &Buffer, next: &Buffer) -> Vec<CellUpdate> {
                         y,
                         ch: n.ch,
                         symbol: n.symbol.clone(),
-                        style: n.style,
+                        style: n.style.clone(),
                         width: 2,
                         masked: false,
                     });
@@ -619,7 +621,7 @@ pub fn diff(prev: &Buffer, next: &Buffer) -> Vec<CellUpdate> {
                                 y,
                                 ch: ncell.ch,
                                 symbol: ncell.symbol.clone(),
-                                style: ncell.style,
+                                style: ncell.style.clone(),
                                 width: ncell.width,
                                 masked: ncell.width == 0,
                             });
@@ -633,7 +635,7 @@ pub fn diff(prev: &Buffer, next: &Buffer) -> Vec<CellUpdate> {
                         y,
                         ch: n.ch,
                         symbol: n.symbol.clone(),
-                        style: n.style,
+                        style: n.style.clone(),
                         width: 0,
                         masked: true,
                     });
@@ -645,7 +647,7 @@ pub fn diff(prev: &Buffer, next: &Buffer) -> Vec<CellUpdate> {
                         y,
                         ch: n.ch,
                         symbol: n.symbol.clone(),
-                        style: n.style,
+                        style: n.style.clone(),
                         width: 1,
                         masked: false,
                     });

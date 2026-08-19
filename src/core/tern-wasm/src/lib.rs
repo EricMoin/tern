@@ -314,7 +314,7 @@ impl WasmState {
             }
             return self.fail(format!("unknown child handle {child}"));
         };
-        let Some(id) = self.scene.add_child(parent_id, kind, style) else {
+        let Some(id) = self.scene.add_child(parent_id, kind, style.clone()) else {
             self.handles.insert(
                 child,
                 HandleState::Detached { kind, style, props },
@@ -336,7 +336,7 @@ impl WasmState {
                 let Some(n) = self.scene.node(*id) else {
                     return self.fail("node missing from scene");
                 };
-                let (kind, style, props) = (n.kind, n.style, n.props.clone());
+                let (kind, style, props) = (n.kind, n.style.clone(), n.props.clone());
                 let removed = self.scene.remove(*id);
                 self.handles
                     .insert(handle, HandleState::Detached { kind, style, props });
@@ -380,7 +380,7 @@ impl WasmState {
         };
         match self.handles.get_mut(&handle) {
             Some(HandleState::Detached { style, props, .. }) => {
-                if let Some(updated) = apply_style_key(*style, key, &value) {
+                if let Some(updated) = apply_style_key(style.clone(), key, &value) {
                     *style = updated;
                 } else if let Some(pv) = json_to_prop_value(value) {
                     props.insert(key.to_string(), pv);
@@ -392,7 +392,7 @@ impl WasmState {
                 if let Some(updated) = self
                     .scene
                     .node(id)
-                    .map(|n| apply_style_key(n.style, key, &value))
+                    .map(|n| apply_style_key(n.style.clone(), key, &value))
                     .unwrap_or(None)
                 {
                     self.scene.set_style(id, updated);

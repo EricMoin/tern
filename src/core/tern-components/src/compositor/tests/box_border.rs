@@ -6,7 +6,7 @@ fn golden_rounded_box_padding_hi_in_10x4() {
     // into a 10x4 buffer: the box fills the viewport, so the border glyphs
     // (┌┐└┘│─) sit at the edges of the buffer.
     let box_style = Style::new().border_style(BorderStyle::Rounded);
-    let tree = Box::new(box_style, vec![Text::new("Hi", Style::new()).into()]).padding(1);
+    let tree = Box::new(box_style.clone(), vec![Text::new("Hi", Style::new()).into()]).padding(1);
 
     let mut compositor = Compositor::new();
     let buffer = compositor.paint(tree.clone(), Size::new(10, 4));
@@ -21,7 +21,7 @@ fn golden_rounded_box_padding_hi_in_10x4() {
     for (y, row) in rows.iter().enumerate() {
         for (x, ch) in row.chars().enumerate() {
             let style = if "┌┐└┘│─".contains(ch) {
-                box_style
+                box_style.clone()
             } else {
                 Style::new()
             };
