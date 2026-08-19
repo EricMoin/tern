@@ -203,13 +203,16 @@ jobs:
 
   napi-build:
     # Multi-platform native addon strategy (napi-rs distribution model):
-    # build tern-node for every target in `napi.targets` (tern-node
-    # package.json). Each row uploads its <platform>-<arch>.node binary;
-    # publish.yml wires the per-platform binaries via optionalDependencies
-    # as tern-node-<platform> packages. Cross-compiled rows skip the native
-    # load-check because the binary arch differs from the runner arch.
-    # `npm run build` now resolves to the RELEASE profile — these binaries
-    # are the release artifacts consumed by publish.yml.
+    # build tern-node for the five most common targets in `napi.targets`
+    # (tern-node package.json) — the same rows as release.yml's build job,
+    # which carries the full expanded matrix (musl, FreeBSD, riscv64,
+    # Android, Windows arm64) at release time. Each row uploads its
+    # <platform>-<arch>.node binary; release.yml wires the per-platform
+    # binaries via optionalDependencies as tern-node-<platform> packages.
+    # Cross-compiled rows skip the native load-check because the binary
+    # arch differs from the runner arch. `npm run build` resolves to the
+    # RELEASE profile — these binaries are the release artifacts consumed
+    # by release.yml.
     name: napi addon — ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
     needs: changes
@@ -224,11 +227,20 @@ jobs:
             load_check: true
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            build: npm run build -- --target aarch64-unknown-linux-gnu --use-napi-cross
+            # Mirrors release.yml: npm run build -- <args> appends args to
+            # the LAST command of the script chain (node fix-dts.mjs), so
+            # cross rows invoke the napi CLI directly to pass --target.
+            # --use-napi-cross is avoided (its toolchain was not installed
+            # by npm in CI — npm/cli#4828 class of bug) in favor of the
+            # deterministic apt cross gcc; see the release.yml row comment
+            # for the full rationale and glibc-floor trade-off.
+            build: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu && CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc npx napi build --platform --release --target aarch64-unknown-linux-gnu && node fix-dts.mjs
             load_check: false
           - host: macos-latest
             target: x86_64-apple-darwin
-            build: npm run build -- --target x86_64-apple-darwin
+            # Direct napi invocation (arg forwarding as above); the macos
+            # runner cross-links x86_64 natively with no cross flag.
+            build: npx napi build --platform --release --target x86_64-apple-darwin && node fix-dts.mjs
             load_check: false
           - host: macos-latest
             target: aarch64-apple-darwin
@@ -247,7 +259,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
-          targets: ${{ matrix.settings.target }}
+          target: ${{ matrix.settings.target }}
           # Cargo caching is handled by Swatinem/rust-cache below; disabling
           # the built-in cache (default on) avoids two overlapping cache
           # entries for the same cargo registry and target dirs.

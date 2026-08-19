@@ -29,7 +29,13 @@
       "aarch64-unknown-linux-gnu",
       "x86_64-apple-darwin",
       "aarch64-apple-darwin",
-      "x86_64-pc-windows-msvc"
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl",
+      "x86_64-unknown-freebsd",
+      "riscv64gc-unknown-linux-gnu",
+      "aarch64-linux-android",
+      "aarch64-pc-windows-msvc"
     ]
   },
   "optionalDependencies": {
@@ -37,7 +43,13 @@
     "@tern-tui/node-linux-arm64-gnu": "0.2.0",
     "@tern-tui/node-darwin-x64": "0.2.0",
     "@tern-tui/node-darwin-arm64": "0.2.0",
-    "@tern-tui/node-win32-x64-msvc": "0.2.0"
+    "@tern-tui/node-win32-x64-msvc": "0.2.0",
+    "@tern-tui/node-linux-x64-musl": "0.2.0",
+    "@tern-tui/node-linux-arm64-musl": "0.2.0",
+    "@tern-tui/node-freebsd-x64": "0.2.0",
+    "@tern-tui/node-linux-riscv64-gnu": "0.2.0",
+    "@tern-tui/node-android-arm64": "0.2.0",
+    "@tern-tui/node-win32-arm64-msvc": "0.2.0"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.8.2"
