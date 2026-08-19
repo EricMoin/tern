@@ -7,9 +7,9 @@
 # (https://napi.rs/docs/deep-dive/release):
 #
 #   Phase 1 (build) — build the tern-node napi addon for every target in
-#     napi.targets on its native host (or via napi-cross for the Linux arm64
-#     row), load-check the rows whose runner arch matches the target, and
-#     upload each binary as a workflow artifact.
+#     napi.targets (cross rows via the napi-rs cross-build recipes, see the
+#     build job), load-check the rows whose runner arch matches the target,
+#     and upload each binary as a workflow artifact.
 #   Phase 2 (release) — collect the artifacts into the per-platform npm
 #     packages (napi create-npm-dirs + napi artifacts), publish the tern-node
 #     root package (prepublishOnly runs `napi prepublish -t npm`, publishing
@@ -44,6 +44,26 @@ jobs:
     # arch differs from the runner arch. `npm run build` resolves to the
     # RELEASE profile — these binaries are the release artifacts consumed
     # by the release job below.
+    #
+    # Cross-build recipes follow the napi-rs cross-build docs
+    # (https://napi.rs/docs/cross-build). Per-target verification status on
+    # GitHub hosted runners (rows without a native load-check are build-only):
+    #   fully load-checked: linux-gnu x64, darwin arm64, win32-x64 msvc
+    #   build-only:
+    #     - linux-gnu arm64 — apt cross gcc; no arm64 runner (see the row
+    #       comment for the --use-napi-cross rationale and glibc-floor
+    #       trade-off)
+    #     - linux-musl x64/arm64 — zig via -x; a musl runtime (e.g. a
+    #       node:alpine container, as the napi-rs template tests musl
+    #       bindings) is required to load-check
+    #     - freebsd x64 — zig via -x; no FreeBSD hosted runner (napi-rs's
+    #       reference builds natively in a FreeBSD 15 VM via
+    #       cross-platform-actions/action)
+    #     - win32-arm64 msvc — MSVC cross-links on the x64 windows runner; a
+    #       native load-check is possible on the windows-11-arm hosted runner
+    #     - riscv64 gnu — no riscv64 hosted runner / official Node runtime
+    #     - android arm64 — NDK preinstalled on ubuntu-latest; no Android
+    #       runtime on hosted runners (verify on-device, e.g. Termux)
     name: Build tern-node — ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
     strategy:
@@ -57,11 +77,56 @@ jobs:
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             # npm run build -- <args> appends args to the LAST command of the
-            # script chain (node fix-dts.mjs), so cross rows must invoke the
-            # napi CLI directly to pass --target. --use-napi-cross is avoided:
-            # its toolchain ships as an npm optionalDependency that fails to
-            # install in CI (npm/cli#4828); the apt cross gcc is deterministic.
+            # script chain (node fix-dts.mjs), so cross rows invoke the napi
+            # CLI directly to pass --target. The apt cross gcc is used instead
+            # of --use-napi-cross: that flag's toolchain resolves as optional
+            # peerDependencies of @napi-rs/cross-toolchain, which npm skipped
+            # in CI (npm/cli#4828 class of bug), failing the build. Trade-off:
+            # the apt sysroot glibc (2.39 on ubuntu-24.04) becomes the binary's
+            # floor, vs glibc 2.17 with --use-napi-cross
+            # (https://napi.rs/docs/cross-build) — revisit --use-napi-cross if
+            # the toolchain resolution is fixed. ci.yml mirrors this command.
             build: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu && CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc npx napi build --platform --release --target aarch64-unknown-linux-gnu && node fix-dts.mjs
+            load_check: false
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            # musl: -x routes through cargo-zigbuild (zig on PATH, set up
+            # below); the CLI auto-appends -C target-feature=-crt-static, so
+            # the binary is static musl — no glibc floor. Build-only here: a
+            # musl runtime is required to load-check (napi-rs template tests
+            # musl bindings inside a node:alpine container).
+            zig: true
+            build: npx napi build --platform --release --target x86_64-unknown-linux-musl --cross-compile && node fix-dts.mjs
+            load_check: false
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            zig: true
+            build: npx napi build --platform --release --target aarch64-unknown-linux-musl --cross-compile && node fix-dts.mjs
+            load_check: false
+          - host: ubuntu-latest
+            target: x86_64-unknown-freebsd
+            # FreeBSD: no hosted FreeBSD runner, so -x + zig cross-compiles
+            # from Linux (cargo-zigbuild). Build-only; napi-rs's reference
+            # setup builds natively inside a FreeBSD 15 VM
+            # (cross-platform-actions/action) if native verification is wanted.
+            zig: true
+            build: npx napi build --platform --release --target x86_64-unknown-freebsd --cross-compile && node fix-dts.mjs
+            load_check: false
+          - host: ubuntu-latest
+            target: riscv64gc-unknown-linux-gnu
+            # riscv64: napi-rs ships no generated CI job for it — the recipe
+            # is "no flag + a cross gcc you install" (decision matrix). No
+            # riscv64 hosted runner / official Node runtime → build-only.
+            build: sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu && CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc npx napi build --platform --release --target riscv64gc-unknown-linux-gnu && node fix-dts.mjs
+            load_check: false
+          - host: ubuntu-latest
+            target: aarch64-linux-android
+            # Android/Termux: no cross flag — the CLI configures the NDK
+            # toolchain from ANDROID_NDK_LATEST_HOME (preinstalled on
+            # ubuntu-latest runners) and stops before Cargo if it is missing.
+            # Build-only: no Android runtime on hosted runners; verify
+            # on-device (e.g. Termux).
+            build: npx napi build --platform --release --target aarch64-linux-android && node fix-dts.mjs
             load_check: false
           - host: macos-latest
             target: x86_64-apple-darwin
@@ -75,6 +140,14 @@ jobs:
             target: x86_64-pc-windows-msvc
             build: npm run build
             load_check: true
+          - host: windows-latest
+            target: aarch64-pc-windows-msvc
+            # MSVC cross-links all Windows arches on the x64 windows runner —
+            # no cross flag (napi-rs reference setup). Build-only here; a
+            # native load-check is possible on the windows-11-arm hosted
+            # runner (the napi-rs template tests the arm64 binding there).
+            build: npx napi build --platform --release --target aarch64-pc-windows-msvc && node fix-dts.mjs
+            load_check: false
     steps:
       - uses: actions/checkout@v7
 
@@ -91,6 +164,21 @@ jobs:
           cache: false
 
       - uses: Swatinem/rust-cache@v2
+
+      # zig is the cross linker for the musl and FreeBSD rows (-x routes
+      # through cargo-zigbuild, which the CLI auto-installs; the explicit
+      # install below pins the version like the napi-rs generated CI).
+      - uses: mlugg/setup-zig@v2
+        if: ${{ matrix.settings.zig }}
+        with:
+          version: 0.14.1
+
+      - uses: taiki-e/install-action@v2
+        if: ${{ matrix.settings.zig }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tool: cargo-zigbuild
 
       - uses: actions/setup-node@v7
         with:
