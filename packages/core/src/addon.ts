@@ -40,6 +40,37 @@ export interface TernAddon {
   create_node: (type: string, props?: Record<string, unknown> | null) => NativeNodeHandle;
   /** Token-highlight `source` in `language` (a fence info string). */
   highlight: (language: string, source: string) => HighlightSpanJs[];
+  /**
+   * The incremental highlighter class: buffers the accumulated source and
+   * re-parses only the tail on each `append`, so a growing fence re-parses
+   * just its new tail instead of the whole source (the one-shot `highlight`
+   * above re-parses everything per call).
+   */
+  IncrementalHighlighter: new (language: string) => NativeIncrementalHighlighter;
+}
+
+/**
+ * The result of one incremental `append`: the *complete* span stream over
+ * the accumulated source (concatenating the span texts reconstructs it
+ * exactly), plus the `[start, end)` byte range the incremental re-parse
+ * actually reworked — absent before the first append, when there was no
+ * previous parse to change. A pure tail append reports a range within the
+ * appended chunk.
+ */
+export interface HighlightAppendJs {
+  /** The complete span stream over the accumulated source. */
+  spans: HighlightSpanJs[];
+  /** The `[start, end)` byte range the re-parse reworked, absent before the
+   * first append. */
+  changed?: number[];
+}
+
+/** The native incremental highlighter instance surface. */
+export interface NativeIncrementalHighlighter {
+  /** Append `chunk`; returns the full stream over the accumulated source. */
+  append(chunk: string): HighlightAppendJs;
+  /** Drop the buffered source and tree; the next append is a fresh parse. */
+  reset(): void;
 }
 
 /** Relative from this file (`packages/core/src/`) up to the binding dir. */
