@@ -1399,16 +1399,17 @@ export function useWheelScroll(viewRef: RefObject<Node | null>): void {
  *   extending the selection rect ({@link dragSelection});
  * - any `up_*` release copies the selected text to the clipboard and ends
  *   the session ({@link copySelection} before {@link endSelection} —
- *   copy-on-release: the overlay is clear-on-release, so the text must be
- *   read while the gesture is still active; with no active session the copy
- *   is an empty write, a harmless no-op).
+ *   copy-on-release). The overlay is persistent after release: the
+ *   highlight survives until `escape` ({@link selectionKey}), a bare press
+ *   outside it (click-elsewhere), or a new selection replaces it; with no
+ *   active session the copy is an empty write, a harmless no-op.
  *
  * The native overlay paints at the next `render()`, so every applied step
  * re-renders the scene (a `down_left` that starts a session, a `drag_left`
  * that extends it, an `up_*` that ends it); non-mouse events fall through
  * untouched. The subscription is torn down when the component unmounts.
  * Hosts that want a copy *key* can route the core {@link selectionKey}
- * (ctrl+shift+c) through `useInput`.
+ * (ctrl+shift+c / escape) through `useInput`.
  */
 export function useSelection(): void {
   const { renderer } = useApp();
@@ -1420,8 +1421,9 @@ export function useSelection(): void {
       } else if (event.kind === "drag_left") {
         if (dragSelection(renderer, event) !== null) renderer.render();
       } else if (event.kind.startsWith("up_")) {
-        // Copy-on-release before the clear: `endSelection` clears the
-        // overlay, so the text must be read while the gesture is active.
+        // Copy-on-release, then end the session: `endSelection` leaves the
+        // overlay up (persistent selection), so the text can also be copied
+        // later — the release copy is just the conventional timing.
         copySelection(renderer);
         if (endSelection(renderer, event) !== null) renderer.render();
       }
