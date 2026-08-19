@@ -267,15 +267,21 @@ impl Backend {
         disable_event_listening_to(&mut out)
     }
 
-    /// Enable the kitty keyboard protocol (progressive enhancement,
-    /// DISAMBIGUATE_ESCAPE_CODES) so modifier combinations like Shift-Enter
+    /// Enable the kitty keyboard protocol (progressive enhancement):
+    /// DISAMBIGUATE_ESCAPE_CODES so modifier combinations like Shift-Enter
     /// are reported distinctly instead of collapsing into the unmodified
-    /// key. Terminals that do not support the protocol ignore the sequence.
-    /// Pair with [`exit_keyboard_enhancement`](Backend::exit_keyboard_enhancement).
+    /// key, REPORT_EVENT_TYPES so key auto-repeats and releases surface as
+    /// distinct `KeyEventKind`s, and REPORT_ALL_KEYS_AS_ESCAPE_CODES so
+    /// plain-text keys (not just named keys) report repeat/release — without
+    /// it, a held `q` would emit no repeat/release events at all. Terminals
+    /// that do not support the protocol ignore the sequences. Pair with
+    /// [`exit_keyboard_enhancement`](Backend::exit_keyboard_enhancement).
     pub fn enter_keyboard_enhancement(&self) -> io::Result<()> {
         let mut out = io::stdout();
         out.execute(PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
         ))?;
         out.flush()
     }

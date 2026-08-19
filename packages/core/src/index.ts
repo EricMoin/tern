@@ -142,6 +142,28 @@ declare module "@tern-tui/node" {
   }
 }
 
+declare module "@tern-tui/node" {
+  /**
+   * The kitty keyboard protocol surface on {@link KeyEvent}, declared here
+   * alongside the binding's generated fields (the same augmentation seam as
+   * `StyleRunJs.hyperlink`). `kind` is `"press"` (the default — the only
+   * kind a terminal without the kitty protocol reports), `"repeat"`, or
+   * `"release"`; the precise modifiers are present only when held.
+   */
+  interface KeyEvent {
+    /** The key event kind: `"press"` (default), `"repeat"`, or `"release"`.
+     * On non-kitty terminals every key arrives as a press, so
+     * kind-unaware handlers keep working unchanged. */
+    kind?: string;
+    /** Whether Super (the Windows / Command key) was held. */
+    super?: boolean;
+    /** Whether Meta was held. */
+    meta?: boolean;
+    /** Whether Hyper was held. */
+    hyper?: boolean;
+  }
+}
+
 export const name = "@tern-tui/core";
 export const version = "0.2.0";
 

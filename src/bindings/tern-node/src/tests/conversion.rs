@@ -38,6 +38,52 @@ fn key_event_carries_char_and_modifiers() {
 }
 
 #[test]
+fn key_event_carries_kind_and_precise_modifiers() {
+    // A press (the default from TernKey::new): kind "press", precise
+    // modifiers absent unless held.
+    let press = KeyEvent::from_tern(TernKey::new(KeyName::Char, Some('q'), false, false, false));
+    assert_eq!(press.kind.as_deref(), Some("press"));
+    assert_eq!(press.super_, None);
+    assert_eq!(press.meta, None);
+    assert_eq!(press.hyper, None);
+
+    // A release with Super held: kind "release" and super surfaced; the
+    // unheld precise modifiers stay absent.
+    let release = TernKey {
+        name: KeyName::Char,
+        char: Some('x'),
+        ctrl: false,
+        alt: false,
+        shift: false,
+        super_: true,
+        meta: false,
+        hyper: false,
+        kind: KeyKind::Release,
+    };
+    let ev = KeyEvent::from_tern(release);
+    assert_eq!(ev.kind.as_deref(), Some("release"));
+    assert_eq!(ev.super_, Some(true));
+    assert_eq!(ev.meta, None);
+    assert_eq!(ev.hyper, None);
+
+    let repeat = TernKey {
+        name: KeyName::Char,
+        char: Some('x'),
+        ctrl: false,
+        alt: false,
+        shift: false,
+        super_: false,
+        meta: true,
+        hyper: true,
+        kind: KeyKind::Repeat,
+    };
+    let ev = KeyEvent::from_tern(repeat);
+    assert_eq!(ev.kind.as_deref(), Some("repeat"));
+    assert_eq!(ev.meta, Some(true));
+    assert_eq!(ev.hyper, Some(true));
+}
+
+#[test]
 fn tern_event_js_resize_maps() {
     let ev = TernEventJs::from_tern(TernEvent::Resize { w: 120, h: 40 });
     assert_eq!(ev.r#type, "resize");
@@ -156,6 +202,8 @@ fn tern_event_js_key_maps() {
     assert_eq!(js.char.as_deref(), Some("q"));
     assert!(js.ctrl);
     assert!(js.shift);
+    // The press kind rides through the tagged union.
+    assert_eq!(js.kind.as_deref(), Some("press"));
     assert!(ev.width.is_none());
     assert!(ev.height.is_none());
     assert!(ev.focus_gained.is_none());
