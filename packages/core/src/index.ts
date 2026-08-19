@@ -113,20 +113,32 @@ export type {
 } from "@tern-tui/node";
 
 /**
- * The `hyperlink` style surface on {@link StyleRunJs}: a run whose cells
- * carry a hyperlink reports the link target as `hyperlink` (the value the
- * engine threads from the `href` style key into `Style::hyperlink`, and the
- * field name the styled snapshot surfaces it under). Declared here — on the
- * JS surface — alongside the binding's generated fields, mirroring how the
- * `hyperlink` NodeProps alias maps to the native `href` style key: the prop
- * is camelCase, the scene key is snake_case `href`, and the painted run
- * carries the value as `hyperlink`.
+ * The `hyperlink` / `underlineStyle` / `underlineColor` style surface on
+ * {@link StyleRunJs}: a run whose cells carry a hyperlink reports the link
+ * target as `hyperlink` (the value the engine threads from the `href` style
+ * key into `Style::hyperlink`); a run whose cells carry an extended underline
+ * reports `underlineStyle` (the kitty `\x1b[4:Nm` variant keyword) and
+ * `underlineColor` — the values the engine threads from the
+ * `underline_style` / `underline_color` style keys into
+ * `Style::underline_style` / `Style::underline_color`. All three are
+ * declared here — on the JS surface — alongside the binding's generated
+ * fields, mirroring how the camelCase `NodeProps` aliases map to the native
+ * snake_case style keys: the props are camelCase, the scene keys are
+ * snake_case (`href`, `underline_style`, `underline_color`), and the painted
+ * run carries the values under the camelCase names.
  */
 declare module "@tern-tui/node" {
   interface StyleRunJs {
     /** The hyperlink target (a URL) the run's cells paint as an OSC 8
      * hyperlink, present only when the cells carry one. */
     hyperlink?: string;
+    /** The underline style variant the run's cells paint (`"single"`,
+     * `"double"`, `"curly"`, `"dotted"`, or `"dashed"`), present only when
+     * the cells carry one. */
+    underlineStyle?: string;
+    /** The color the run's underline is painted with, present only when the
+     * cells carry one. */
+    underlineColor?: string;
   }
 }
 
@@ -265,6 +277,26 @@ export interface NodeProps {
    * plain run (no OSC 8 sequences).
    */
   hyperlink?: string;
+  /**
+   * The underline style for the node's text: `"single"`, `"double"`,
+   * `"curly"`, `"dotted"`, or `"dashed"` (kitty extended SGR `\x1b[4:Nm`).
+   * CamelCase alias for the binding's `underline_style` style key: it is
+   * translated to `underline_style` before the props reach the native layer,
+   * so `node.props` reports the snake_case key. Unset, the text underlines
+   * (when `underline` is set) with the plain legacy underline; terminals
+   * without extended underline support degrade every variant to the plain
+   * underline.
+   */
+  underlineStyle?: "single" | "double" | "curly" | "dotted" | "dashed";
+  /**
+   * The color the node's text underline is painted with, as a color string
+   * (`#rrggbb`, `indexed:N`, or `default`). CamelCase alias for the binding's
+   * `underline_color` style key: it is translated to `underline_color`
+   * before the props reach the native layer, so `node.props` reports the
+   * snake_case key. Unset, the underline paints in the terminal's default
+   * color.
+   */
+  underlineColor?: string;
   border_style?: "none" | "plain" | "rounded" | "double" | "thick";
   bold?: boolean;
   dim?: boolean;
@@ -378,15 +410,24 @@ export interface CreateRendererOptions {
 
 /**
  * Translate the camelCase aliases (`borderColor` → `border_color`,
- * `hyperlink` → `href`) to the binding's snake_case style keys before props
- * reach the native layer. Each alias is consumed (stripped), so the node's
- * prop mirror holds the scene-facing key exactly like every other style key
- * (`border_style`, `flex_direction`, ...). An `undefined` alias value is
- * dropped (it has no scene representation, mirroring `setProps`' undefined
- * stripping). The snake_case keys themselves flow through untouched.
+ * `hyperlink` → `href`, `underlineStyle` → `underline_style`,
+ * `underlineColor` → `underline_color`) to the binding's snake_case style
+ * keys before props reach the native layer. Each alias is consumed
+ * (stripped), so the node's prop mirror holds the scene-facing key exactly
+ * like every other style key (`border_style`, `flex_direction`, ...). An
+ * `undefined` alias value is dropped (it has no scene representation,
+ * mirroring `setProps`' undefined stripping). The snake_case keys themselves
+ * flow through untouched.
  */
 function toNativeProps(props: NodeProps): NodeProps {
-  if (!("borderColor" in props) && !("hyperlink" in props)) return props;
+  if (
+    !("borderColor" in props) &&
+    !("hyperlink" in props) &&
+    !("underlineStyle" in props) &&
+    !("underlineColor" in props)
+  ) {
+    return props;
+  }
   const out = { ...props };
   const borderValue = out.borderColor;
   delete out.borderColor;
@@ -394,6 +435,12 @@ function toNativeProps(props: NodeProps): NodeProps {
   const hrefValue = out.hyperlink;
   delete out.hyperlink;
   if (hrefValue !== undefined) out.href = hrefValue;
+  const underlineStyleValue = out.underlineStyle;
+  delete out.underlineStyle;
+  if (underlineStyleValue !== undefined) out.underline_style = underlineStyleValue;
+  const underlineColorValue = out.underlineColor;
+  delete out.underlineColor;
+  if (underlineColorValue !== undefined) out.underline_color = underlineColorValue;
   return out;
 }
 
@@ -572,10 +619,13 @@ export class Node {
    */
   setProp(key: string, value: unknown): void {
     // The camelCase aliases (`borderColor` → `border_color`, `hyperlink` →
-    // `href`) route to the snake_case style keys (the scene-facing spellings),
-    // exactly like the whole-map path.
+    // `href`, `underlineStyle` → `underline_style`, `underlineColor` →
+    // `underline_color`) route to the snake_case style keys (the
+    // scene-facing spellings), exactly like the whole-map path.
     if (key === "borderColor") key = "border_color";
     if (key === "hyperlink") key = "href";
+    if (key === "underlineStyle") key = "underline_style";
+    if (key === "underlineColor") key = "underline_color";
     if (value === undefined) {
       if (this.#handle !== null && key in this.#props) {
         const next = { ...this.#props };
@@ -6759,7 +6809,9 @@ export function styledFramesEqual(a: StyleRunJs[][], b: StyleRunJs[][]): boolean
  * field. Field-wise strict comparison (`undefined` vs a set modifier or
  * color differs), so a styled run is never equal to a plain one. `hyperlink`
  * participates like the other style fields — mirroring the engine's style
- * equality, where a hyperlink change splits runs at the link boundary. */
+ * equality, where a hyperlink change splits runs at the link boundary — and
+ * so do `underlineStyle` / `underlineColor`: a variant or colored-underline
+ * change splits runs at the underline boundary. */
 function styledRunsEqual(a: StyleRunJs, b: StyleRunJs): boolean {
   if (a.text !== b.text) return false;
   if (a.fg !== b.fg) return false;
@@ -6771,5 +6823,7 @@ function styledRunsEqual(a: StyleRunJs, b: StyleRunJs): boolean {
   if (a.reversed !== b.reversed) return false;
   if (a.strikethrough !== b.strikethrough) return false;
   if (a.hyperlink !== b.hyperlink) return false;
+  if (a.underlineStyle !== b.underlineStyle) return false;
+  if (a.underlineColor !== b.underlineColor) return false;
   return true;
 }

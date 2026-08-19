@@ -470,6 +470,16 @@ interface FakeCellStyle {
    * the fake's mirror of the engine threading `href` into the style's
    * hyperlink and the styled snapshot surfacing it as `hyperlink`. */
   hyperlink?: string;
+  /** The underline style variant keyword, when the leaf's props carry an
+   * `underline_style` style key — the fake's mirror of the engine threading
+   * `underline_style` into the style's variant and the styled snapshot
+   * surfacing it as `underlineStyle`. */
+  underlineStyle?: string;
+  /** The underline color, when the leaf's props carry an `underline_color`
+   * style key — the fake's mirror of the engine threading `underline_color`
+   * into the style's underline color and the styled snapshot surfacing it as
+   * `underlineColor`. */
+  underlineColor?: string;
 }
 
 /** The style lifted from a fake text leaf's props, or `null` for an
@@ -491,6 +501,11 @@ function leafStyle(leaf: FakeNodeHandle | undefined): FakeCellStyle | null {
   // The fake node's props carry the scene-facing `href` key (the JS layer
   // translates the camelCase `hyperlink` alias, exactly like `border_color`).
   if (typeof p.href === "string") style.hyperlink = p.href;
+  // Same for the underline aliases: the JS layer translates camelCase
+  // `underlineStyle` / `underlineColor` to the scene-facing
+  // `underline_style` / `underline_color` keys, which the fake lifts.
+  if (typeof p.underline_style === "string") style.underlineStyle = p.underline_style;
+  if (typeof p.underline_color === "string") style.underlineColor = p.underline_color;
   return Object.keys(style).length === 0 ? null : style;
 }
 
@@ -499,7 +514,9 @@ function leafStyle(leaf: FakeNodeHandle | undefined): FakeCellStyle | null {
  * into one run"), so `text` is excluded: the running run's text extends
  * instead of opening a new run. `hyperlink` participates like the other
  * fields — mirroring the engine's style equality, where a hyperlink change
- * splits runs at the link boundary. */
+ * splits runs at the link boundary — and so do `underlineStyle` /
+ * `underlineColor`: a variant or colored-underline change splits runs at
+ * the underline boundary. */
 function fakeRunStyleEqual(a: StyleRunJs, b: StyleRunJs): boolean {
   return (
     a.fg === b.fg &&
@@ -510,7 +527,9 @@ function fakeRunStyleEqual(a: StyleRunJs, b: StyleRunJs): boolean {
     a.underline === b.underline &&
     a.reversed === b.reversed &&
     a.strikethrough === b.strikethrough &&
-    a.hyperlink === b.hyperlink
+    a.hyperlink === b.hyperlink &&
+    a.underlineStyle === b.underlineStyle &&
+    a.underlineColor === b.underlineColor
   );
 }
 
@@ -2094,6 +2113,98 @@ Deno.test("Text hyperlink paints the link target onto the styled run", () => {
   });
 });
 
+Deno.test("Text underline style and color paint onto the styled run", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    // A text with an underline style variant and an underline color: the
+    // inner "Hi" run carries `underlineStyle: "curly"` and
+    // `underlineColor: "#ff0000"` — the fake's mirror of the engine
+    // threading the `underline_style` / `underline_color` style keys into
+    // the style's variant/color and the styled snapshot surfacing them
+    // (like the real surface, the keys are present only when set, so the
+    // border/padding cells stay unstyled and the run splits from them).
+    renderer.root.addChild(
+      Box(
+        { border_style: "rounded", padding: 1 },
+        Text({ text: "Hi", underlineStyle: "curly", underlineColor: "#ff0000" }),
+      ),
+    );
+    const frame = renderer.snapshotStyled(6, 3);
+    const expected: StyleRunJs[][] = [
+      [{ text: "┌──┐  " }],
+      [
+        { text: "│" },
+        { text: "Hi", underlineStyle: "curly", underlineColor: "#ff0000" },
+        { text: "│  " },
+      ],
+      [{ text: "└──┘  " }],
+    ];
+    if (!styledFramesEqual(frame, expected)) {
+      throw new Error(`unexpected styled runs: ${JSON.stringify(frame)}`);
+    }
+    // The camelCase aliases reach the native layer as the snake_case style
+    // keys (the keys convert.rs recognizes): the fake node mirror carries
+    // `underline_style` / `underline_color`, and the aliases are consumed —
+    // exactly like `href`.
+    const boxNode = renderer.root.children[0];
+    if (boxNode === undefined) throw new Error("the box child must be materialized");
+    const textNode = boxNode.children[0];
+    if (textNode === undefined) throw new Error("the text leaf must be materialized");
+    if (textNode.props.underline_style !== "curly") {
+      throw new Error(`underline_style = ${JSON.stringify(textNode.props.underline_style)}`);
+    }
+    if (textNode.props.underline_color !== "#ff0000") {
+      throw new Error(`underline_color = ${JSON.stringify(textNode.props.underline_color)}`);
+    }
+    if ("underlineStyle" in textNode.props) {
+      throw new Error(`the camelCase alias must be consumed, got ${JSON.stringify(textNode.props)}`);
+    }
+    if ("underlineColor" in textNode.props) {
+      throw new Error(`the camelCase alias must be consumed, got ${JSON.stringify(textNode.props)}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("Text underline variants distinguish styled runs (double / curly / dotted)", () => {
+  withFakeAddon(() => {
+    // Each variant paints its own run carrying the variant keyword: a double
+    // run never equals a curly one, and neither merges with the plain border
+    // — the fake's mirror of the engine splitting runs on underline-style
+    // equality.
+    const variants = ["double", "curly", "dotted"] as const;
+    for (const variant of variants) {
+      const renderer = createRenderer();
+      renderer.root.addChild(
+        Box(
+          { border_style: "rounded", padding: 1 },
+          Text({ text: "Hi", underlineStyle: variant }),
+        ),
+      );
+      const frame = renderer.snapshotStyled(6, 3);
+      const expected: StyleRunJs[][] = [
+        [{ text: "┌──┐  " }],
+        [{ text: "│" }, { text: "Hi", underlineStyle: variant }, { text: "│  " }],
+        [{ text: "└──┘  " }],
+      ];
+      if (!styledFramesEqual(frame, expected)) {
+        throw new Error(`variant ${variant} unexpected styled runs: ${JSON.stringify(frame)}`);
+      }
+      renderer.destroy();
+    }
+    // Cross-variant: a double run differs from a curly run — the equality
+    // contract splits runs at the underline boundary.
+    if (
+      styledFramesEqual(
+        [[{ text: "Hi", underlineStyle: "double" }]],
+        [[{ text: "Hi", underlineStyle: "curly" }]],
+      )
+    ) {
+      throw new Error("differing underline variants must be unequal");
+    }
+  });
+});
+
 Deno.test("appendSpan hyperlink translates the camelCase alias to the href style key", () => {
   // The span-style path goes through the same `props_to_style_map` as node
   // props (the binding recognizes `href`, not `hyperlink`), so the alias is
@@ -2110,6 +2221,30 @@ Deno.test("appendSpan hyperlink translates the camelCase alias to the href style
     throw new Error(`the camelCase alias must be consumed, got ${JSON.stringify(first.style)}`);
   }
   if (first.style?.bold !== true) throw new Error("other style keys pass through untouched");
+});
+
+Deno.test("appendSpan underline aliases translate to the snake_case style keys", () => {
+  // The span-style path goes through the same `props_to_style_map` as node
+  // props (the binding recognizes `underline_style` / `underline_color`,
+  // not the camelCase spellings), so the aliases are translated at
+  // ingestion: the recorded span carries the scene-facing keys.
+  const node = StreamingText();
+  node.appendSpan("tern", { underlineStyle: "curly", underlineColor: "#00ff00" });
+  const first = node.spans[0];
+  if (first === undefined) throw new Error("the recorded span is missing");
+  if (first.text !== "tern") throw new Error(`text = ${JSON.stringify(first.text)}`);
+  if (first.style?.underline_style !== "curly") {
+    throw new Error(`underline_style = ${JSON.stringify(first.style?.underline_style)}`);
+  }
+  if (first.style?.underline_color !== "#00ff00") {
+    throw new Error(`underline_color = ${JSON.stringify(first.style?.underline_color)}`);
+  }
+  if ("underlineStyle" in (first.style ?? {})) {
+    throw new Error(`the camelCase alias must be consumed, got ${JSON.stringify(first.style)}`);
+  }
+  if ("underlineColor" in (first.style ?? {})) {
+    throw new Error(`the camelCase alias must be consumed, got ${JSON.stringify(first.style)}`);
+  }
 });
 
 Deno.test("Renderer.snapshotStyled defaults the viewport to the native shared size", () => {
@@ -2184,6 +2319,32 @@ Deno.test("styledFramesEqual compares row counts, run counts, run text and style
     )
   ) {
     throw new Error("differing hyperlink targets must be unequal");
+  }
+  // Differing underline style / color fields — a variant or colored-underline
+  // run differs from a plain one (the engine's style equality participates
+  // in both fields, so runs split at underline boundaries), and the values
+  // themselves are compared.
+  if (styledFramesEqual([[{ text: "Hi" }]], [[{ text: "Hi", underlineStyle: "curly" }]])) {
+    throw new Error("differing underline style must be unequal");
+  }
+  if (
+    styledFramesEqual(
+      [[{ text: "Hi", underlineStyle: "double" }]],
+      [[{ text: "Hi", underlineStyle: "curly" }]],
+    )
+  ) {
+    throw new Error("differing underline variants must be unequal");
+  }
+  if (styledFramesEqual([[{ text: "Hi" }]], [[{ text: "Hi", underlineColor: "#ff0000" }]])) {
+    throw new Error("differing underline color must be unequal");
+  }
+  if (
+    styledFramesEqual(
+      [[{ text: "Hi", underlineColor: "#ff0000" }]],
+      [[{ text: "Hi", underlineColor: "#00ff00" }]],
+    )
+  ) {
+    throw new Error("differing underline colors must be unequal");
   }
   // Differing run count within a row.
   if (styledFramesEqual([[{ text: "Hi" }]], [[{ text: "H" }, { text: "i" }]])) {

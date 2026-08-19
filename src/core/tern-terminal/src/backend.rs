@@ -55,7 +55,7 @@ use crossterm::{ExecutableCommand, QueueableCommand};
 use tern_core::cell::CellUpdate;
 use tern_core::color::Color as TernColor;
 use tern_core::cursor::{Cursor, CursorShape};
-use tern_core::style::{Modifiers, Style};
+use tern_core::style::{Modifiers, Style, UnderlineStyle};
 
 /// The terminal backend.
 ///
@@ -82,6 +82,11 @@ pub struct BackendCapabilities {
     /// is supported, 256 for a 256-color palette, 16 for basic ANSI, 0 when
     /// no color support was detected.
     pub colors: u32,
+    /// Whether kitty's extended underline styles are supported (`\x1b[4:Nm`
+    /// style variants and `\x1b[58;...m` colored underlines). Detected once
+    /// from the environment (see [`detect_underline_styles`]); unknown
+    /// terminals default to `false` and take the plain `\x1b[4m` fallback.
+    pub underline_styles: bool,
 }
 
 /// The detected capabilities, cached after the first probe.
@@ -101,26 +106,54 @@ pub fn capabilities() -> BackendCapabilities {
 
 /// Probe the terminal via `supports-color` and map the report to
 /// [`BackendCapabilities`]. Never reports "no color support": any
-/// inconclusive result defaults to truecolor (see [`capabilities`]).
+/// inconclusive result defaults to truecolor (see [`capabilities`]). The
+/// extended-underline flag is probed separately from the environment (see
+/// [`detect_underline_styles`]) — the `supports-color` crate has no opinion
+/// on kitty SGR extensions.
 fn detect_capabilities() -> BackendCapabilities {
-    match supports_color::on(supports_color::Stream::Stdout) {
+    let mut caps = match supports_color::on(supports_color::Stream::Stdout) {
         Some(level) if level.has_16m => BackendCapabilities {
             truecolor: true,
             colors: 16_777_216,
+            underline_styles: false,
         },
         Some(level) if level.has_256 => BackendCapabilities {
             truecolor: false,
             colors: 256,
+            underline_styles: false,
         },
         Some(level) if level.has_basic => BackendCapabilities {
             truecolor: false,
             colors: 16,
+            underline_styles: false,
         },
         _ => BackendCapabilities {
             truecolor: true,
             colors: 16_777_216,
+            underline_styles: false,
         },
+    };
+    caps.underline_styles = detect_underline_styles();
+    caps
+}
+
+/// Whether the terminal supports kitty's extended underline styles
+/// (`\x1b[4:Nm` style variants and colored underlines `\x1b[58;...m`),
+/// probed from the environment: `TERM_PROGRAM` naming a known-supporting
+/// terminal (kitty, WezTerm, iTerm.app, ghostty) or a `TERM` containing
+/// "kitty" (kitty sets `TERM=xterm-kitty`). Unknown terminals default to
+/// `false` so they take the plain-underline fallback — every terminal
+/// underlines, only the styling degrades.
+fn detect_underline_styles() -> bool {
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    if matches!(
+        term_program.as_str(),
+        "kitty" | "WezTerm" | "iTerm.app" | "ghostty"
+    ) {
+        return true;
     }
+    let term = std::env::var("TERM").unwrap_or_default();
+    term.contains("kitty")
 }
 
 /// A `Write` wrapper that counts the bytes written through it, so the
@@ -683,7 +716,19 @@ impl Run {
             w.queue(SetAttribute(Attribute::Reset))?;
             queue_color(w, self.style.fg, true)?;
             queue_color(w, self.style.bg, false)?;
-            queue_modifiers(w, self.style.modifiers)?;
+            queue_underline(w, &self.style)?;
+            // The extended underline path ([`queue_underline_with`]) owns the
+            // underline whenever a style variant or color is set: drop the
+            // legacy bit here so the modifier pass cannot clobber the
+            // extended sequence (`\x1b[4:Nm` / `\x1b[58;...m`) with a plain
+            // `\x1b[4m`. A style carrying only the legacy bit keeps it — the
+            // modifier pass emits `Attribute::Underlined` exactly as before.
+            let modifiers = if extended_underline(&self.style) {
+                self.style.modifiers.remove(Modifiers::UNDERLINE)
+            } else {
+                self.style.modifiers
+            };
+            queue_modifiers(w, modifiers)?;
             *last_style = Some(self.style.clone());
         }
         if let Some(url) = &self.style.hyperlink {
@@ -779,6 +824,88 @@ fn queue_color_with<W: Write>(
             Ok(())
         }
     }
+}
+
+/// Queue the underline commands for a tern-core style's extended underline
+/// fields (the `underline_style` variant and the `underline_color`),
+/// consulting the detected terminal capabilities.
+///
+/// A style carrying only the legacy `Modifiers::UNDERLINE` bit (no variant,
+/// no color) queues nothing here — [`queue_modifiers`] emits
+/// `Attribute::Underlined` for it exactly as before, so untouched styles stay
+/// byte-identical. A style with a variant or a color takes the extended path:
+/// kitty's `\x1b[4:Nm` (1 single, 2 double, 3 curly, 4 dotted, 5 dashed) plus
+/// the colored underline `\x1b[58;...m` when the terminal reports extended
+/// underline support, and the plain `\x1b[4m` underline otherwise — the text
+/// stays underlined, only the styling degrades.
+fn queue_underline<W: Write>(w: &mut W, style: &Style) -> io::Result<()> {
+    queue_underline_with(w, style, capabilities())
+}
+
+/// The [`queue_underline`] core: like it, but with explicit capabilities, so
+/// the extended-SGR and fallback paths are unit-testable without touching
+/// the global probe.
+fn queue_underline_with<W: Write>(
+    w: &mut W,
+    style: &Style,
+    caps: BackendCapabilities,
+) -> io::Result<()> {
+    if !extended_underline(style) {
+        return Ok(());
+    }
+    if caps.underline_styles {
+        // Kitty extended underline style: ESC [ 4 : N m. crossterm has no
+        // command for it, so the sequence goes through the `Write` directly
+        // (the same seam as the OSC 8 hyperlink open/close).
+        let n = match style.underline_style {
+            UnderlineStyle::None => None, // color-only underline
+            UnderlineStyle::Single => Some(1),
+            UnderlineStyle::Double => Some(2),
+            UnderlineStyle::Curly => Some(3),
+            UnderlineStyle::Dotted => Some(4),
+            UnderlineStyle::Dashed => Some(5),
+        };
+        if let Some(n) = n {
+            w.write_all(b"\x1b[4:")?;
+            w.write_all(&[b'0' + n])?;
+            w.write_all(b"m")?;
+        }
+        // Kitty colored underline: ESC [ 58 ; 2 ; r ; g ; b m (truecolor) or
+        // ESC [ 58 ; 5 ; n m (palette). A default color needs no command —
+        // the per-run SGR reset already restored the terminal default.
+        match style.underline_color {
+            Some(TernColor::Rgb(r, g, b)) => {
+                w.write_all(b"\x1b[58;2;")?;
+                w.write_all(format!("{r};{g};{b}").as_bytes())?;
+                w.write_all(b"m")?;
+            }
+            Some(TernColor::Indexed(n)) => {
+                w.write_all(b"\x1b[58;5;")?;
+                w.write_all(format!("{n}").as_bytes())?;
+                w.write_all(b"m")?;
+            }
+            Some(TernColor::Default) | None => {}
+        }
+    } else {
+        // No extended underline support: degrade to the plain underline so
+        // the text is still underlined.
+        w.queue(SetAttribute(Attribute::Underlined))?;
+    }
+    Ok(())
+}
+
+/// Whether `style` requests an extended underline: a variant other than
+/// [`UnderlineStyle::None`], or a non-default underline color. This is the
+/// condition that routes the run's underline through
+/// [`queue_underline_with`]'s extended/fallback path instead of the legacy
+/// `Modifiers::UNDERLINE` bit (which [`queue_modifiers`] emits as plain
+/// `\x1b[4m`).
+fn extended_underline(style: &Style) -> bool {
+    style.underline_style != UnderlineStyle::None
+        || matches!(
+            style.underline_color,
+            Some(TernColor::Rgb(..)) | Some(TernColor::Indexed(_))
+        )
 }
 
 /// Queue the crossterm attribute commands for a tern-core modifier set.
@@ -1395,6 +1522,7 @@ mod tests {
         let caps = BackendCapabilities {
             truecolor: true,
             colors: 16_777_216,
+            underline_styles: false,
         };
         queue_color_with(&mut out, TernColor::Rgb(1, 2, 3), true, caps)
             .expect("queue should succeed");
@@ -1410,6 +1538,7 @@ mod tests {
         let caps = BackendCapabilities {
             truecolor: false,
             colors: 256,
+            underline_styles: false,
         };
         queue_color_with(&mut out, TernColor::Rgb(255, 0, 0), true, caps)
             .expect("queue should succeed");
@@ -1429,10 +1558,157 @@ mod tests {
         let caps = BackendCapabilities {
             truecolor: false,
             colors: 16,
+            underline_styles: false,
         };
         queue_color_with(&mut out, TernColor::Rgb(255, 0, 0), true, caps)
             .expect("queue should succeed");
         assert!(out.is_empty(), "got: {:?}", out);
+    }
+
+    #[test]
+    fn queue_underline_emits_extended_sgr_when_supported() {
+        // A terminal reporting extended underline support gets the kitty
+        // sequences: `\x1b[4:Nm` for the style variant (3 = curly) and
+        // `\x1b[58;2;r;g;bm` for the colored underline, style first.
+        let caps = BackendCapabilities {
+            truecolor: true,
+            colors: 16_777_216,
+            underline_styles: true,
+        };
+        let mut out = Vec::new();
+        queue_underline_with(
+            &mut out,
+            &Style::new().underline_style(UnderlineStyle::Curly),
+            caps,
+        )
+        .expect("queue should succeed");
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[4:3m", "curly");
+
+        let mut out = Vec::new();
+        queue_underline_with(
+            &mut out,
+            &Style::new().underline_color(Some(TernColor::Rgb(255, 0, 0))),
+            caps,
+        )
+        .expect("queue should succeed");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[58;2;255;0;0m",
+            "color-only underline"
+        );
+
+        let mut out = Vec::new();
+        queue_underline_with(
+            &mut out,
+            &Style::new()
+                .underline_style(UnderlineStyle::Double)
+                .underline_color(Some(TernColor::Rgb(1, 2, 3))),
+            caps,
+        )
+        .expect("queue should succeed");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[4:2m\x1b[58;2;1;2;3m",
+            "variant then color"
+        );
+
+        // A palette underline color uses the 58;5 form.
+        let mut out = Vec::new();
+        queue_underline_with(
+            &mut out,
+            &Style::new()
+                .underline_style(UnderlineStyle::Dotted)
+                .underline_color(Some(TernColor::Indexed(9))),
+            caps,
+        )
+        .expect("queue should succeed");
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[4:4m\x1b[58;5;9m");
+    }
+
+    #[test]
+    fn queue_underline_falls_back_to_plain_when_unsupported() {
+        // A terminal without extended underline support degrades the
+        // variant/color to the plain `\x1b[4m` underline — the text is
+        // still underlined, only the styling is lost.
+        let caps = BackendCapabilities {
+            truecolor: true,
+            colors: 16_777_216,
+            underline_styles: false,
+        };
+        let mut out = Vec::new();
+        queue_underline_with(
+            &mut out,
+            &Style::new().underline_style(UnderlineStyle::Curly),
+            caps,
+        )
+        .expect("queue should succeed");
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[4m", "plain fallback");
+
+        let mut out = Vec::new();
+        queue_underline_with(
+            &mut out,
+            &Style::new().underline_color(Some(TernColor::Rgb(255, 0, 0))),
+            caps,
+        )
+        .expect("queue should succeed");
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[4m", "color fallback");
+    }
+
+    #[test]
+    fn queue_underline_leaves_legacy_bit_to_the_modifier_pass() {
+        // A style carrying only the legacy `Modifiers::UNDERLINE` bit (no
+        // variant, no color) queues nothing here — `queue_modifiers` emits
+        // `Attribute::Underlined` for it, so untouched styles stay
+        // byte-identical. A style with neither the bit nor the extended
+        // fields queues nothing either.
+        let caps = BackendCapabilities {
+            truecolor: true,
+            colors: 16_777_216,
+            underline_styles: true,
+        };
+        let mut out = Vec::new();
+        queue_underline_with(
+            &mut out,
+            &Style::new().add_modifier(Modifiers::UNDERLINE),
+            caps,
+        )
+        .expect("queue should succeed");
+        assert!(out.is_empty(), "got: {:?}", out);
+
+        let mut out = Vec::new();
+        queue_underline_with(&mut out, &Style::new(), caps).expect("queue should succeed");
+        assert!(out.is_empty(), "got: {:?}", out);
+    }
+
+    #[test]
+    fn flush_diff_extended_underline_run_emits_one_underline_command() {
+        // End-to-end through the run queue (whose capabilities come from the
+        // global probe, not the injectable seam): a curly-underline cell is
+        // its own run whose SGR block carries exactly ONE underline command —
+        // the kitty `\x1b[4:3m` when the terminal reports extended support,
+        // the plain `\x1b[4m` fallback otherwise — and never both, because
+        // the extended path strips the legacy bit from the modifier pass.
+        let curly = Style::new().underline_style(UnderlineStyle::Curly);
+        let out = flush(&[update(0, 0, 'u', curly, 1, false)], (0, 0));
+        let s = String::from_utf8(out).unwrap();
+        let extended = s.matches("\x1b[4:3m").count();
+        let plain = s.matches("\x1b[4m").count();
+        assert_eq!(extended + plain, 1, "got: {s:?}");
+        assert!(s.contains("\x1b[1;1H\x1b[0m\x1b[4"), "got: {s:?}");
+    }
+
+    #[test]
+    fn flush_diff_legacy_underline_run_keeps_attribute_underlined() {
+        // The legacy path is untouched: a style with only the UNDERLINE bit
+        // emits `Attribute::Underlined` (`\x1b[4m`) through the modifier
+        // pass, byte-identical to before the extended fields existed.
+        let legacy = Style::new().add_modifier(Modifiers::UNDERLINE);
+        let out = flush(&[update(0, 0, 'u', legacy, 1, false)], (0, 0));
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("\x1b[1;1H\x1b[0m\x1b[4mu"), "got: {s:?}");
+        // Exactly one plain underline sequence (the run's own; the trailing
+        // park resets with SGR 0, not another underline).
+        assert_eq!(s.matches("\x1b[4m").count(), 1, "got: {s:?}");
     }
 
     #[test]

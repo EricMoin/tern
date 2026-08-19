@@ -126,6 +126,16 @@ pub(crate) fn apply_style_key(mut style: Style, key: &str, value: &serde_json::V
                 style = style.hyperlink(Some(s.as_str().into()));
             }
         }
+        "underline_style" => {
+            if let serde_json::Value::String(s) = value {
+                style = style.underline_style(parse_underline_style(s));
+            }
+        }
+        "underline_color" => {
+            if let serde_json::Value::String(s) = value {
+                style = style.underline_color(Some(parse_color(s)));
+            }
+        }
         "bold" => style = apply_modifier(style, value, Modifiers::BOLD),
         "dim" => style = apply_modifier(style, value, Modifiers::DIM),
         "italic" => style = apply_modifier(style, value, Modifiers::ITALIC),
@@ -205,6 +215,19 @@ pub(crate) fn parse_border_style(s: &str) -> BorderStyle {
     }
 }
 
+/// Parse an underline style keyword; anything unrecognized → no variant
+/// (the legacy `underline` modifier bit keeps painting a plain underline).
+pub(crate) fn parse_underline_style(s: &str) -> UnderlineStyle {
+    match s {
+        "single" => UnderlineStyle::Single,
+        "double" => UnderlineStyle::Double,
+        "curly" => UnderlineStyle::Curly,
+        "dotted" => UnderlineStyle::Dotted,
+        "dashed" => UnderlineStyle::Dashed,
+        _ => UnderlineStyle::None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +263,94 @@ mod tests {
         merged = apply_style_key(merged, "href", &serde_json::json!("https://example.com")).unwrap();
         assert_eq!(merged, full);
         assert_eq!(merged.hyperlink.as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn underline_style_lifts_into_style_variant() {
+        let (style, _) = props_to_style_map(HashMap::from([
+            ("underline_style".to_string(), serde_json::json!("curly")),
+            ("fg".to_string(), serde_json::json!("#ff0000")),
+        ]));
+        assert_eq!(style.underline_style, UnderlineStyle::Curly);
+        assert_eq!(style.fg, Color::Rgb(255, 0, 0), "other keys still lift");
+
+        // Every variant keyword maps; an unknown keyword (or a non-string
+        // value) leaves the variant at the default `None`.
+        for (key, expected) in [
+            ("single", UnderlineStyle::Single),
+            ("double", UnderlineStyle::Double),
+            ("curly", UnderlineStyle::Curly),
+            ("dotted", UnderlineStyle::Dotted),
+            ("dashed", UnderlineStyle::Dashed),
+        ] {
+            let (style, _) = props_to_style_map(HashMap::from([(
+                "underline_style".to_string(),
+                serde_json::json!(key),
+            )]));
+            assert_eq!(style.underline_style, expected, "keyword {key}");
+        }
+        let (unknown, _) = props_to_style_map(HashMap::from([(
+            "underline_style".to_string(),
+            serde_json::json!("wiggly"),
+        )]));
+        assert_eq!(unknown.underline_style, UnderlineStyle::None);
+        let (non_string, _) = props_to_style_map(HashMap::from([(
+            "underline_style".to_string(),
+            serde_json::json!(42),
+        )]));
+        assert_eq!(non_string.underline_style, UnderlineStyle::None);
+    }
+
+    #[test]
+    fn underline_color_lifts_into_style_color() {
+        let (style, _) = props_to_style_map(HashMap::from([(
+            "underline_color".to_string(),
+            serde_json::json!("#ff0000"),
+        )]));
+        assert_eq!(style.underline_color, Some(Color::Rgb(255, 0, 0)));
+        let (style, _) = props_to_style_map(HashMap::from([(
+            "underline_color".to_string(),
+            serde_json::json!("indexed:9"),
+        )]));
+        assert_eq!(style.underline_color, Some(Color::Indexed(9)));
+        // Absent or non-string values leave the color unset.
+        let (plain, _) = props_to_style_map(HashMap::new());
+        assert!(plain.underline_color.is_none());
+        let (non_string, _) = props_to_style_map(HashMap::from([(
+            "underline_color".to_string(),
+            serde_json::json!(true),
+        )]));
+        assert!(non_string.underline_color.is_none());
+    }
+
+    #[test]
+    fn single_key_underline_merge_matches_full_map() {
+        let (full, _) = props_to_style_map(HashMap::from([
+            (
+                "underline_style".to_string(),
+                serde_json::json!("double"),
+            ),
+            (
+                "underline_color".to_string(),
+                serde_json::json!("#00ff00"),
+            ),
+        ]));
+        let mut merged = Style::new();
+        merged = apply_style_key(merged, "underline_style", &serde_json::json!("double")).unwrap();
+        merged = apply_style_key(merged, "underline_color", &serde_json::json!("#00ff00")).unwrap();
+        assert_eq!(merged, full);
+        assert_eq!(merged.underline_style, UnderlineStyle::Double);
+        assert_eq!(merged.underline_color, Some(Color::Rgb(0, 255, 0)));
+    }
+
+    #[test]
+    fn parse_underline_style_keywords() {
+        assert_eq!(parse_underline_style("single"), UnderlineStyle::Single);
+        assert_eq!(parse_underline_style("double"), UnderlineStyle::Double);
+        assert_eq!(parse_underline_style("curly"), UnderlineStyle::Curly);
+        assert_eq!(parse_underline_style("dotted"), UnderlineStyle::Dotted);
+        assert_eq!(parse_underline_style("dashed"), UnderlineStyle::Dashed);
+        assert_eq!(parse_underline_style("nope"), UnderlineStyle::None);
     }
 }
 
