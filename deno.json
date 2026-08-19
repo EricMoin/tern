@@ -8,6 +8,9 @@
   "imports": {
     "@tern-tui/core": "./packages/core/src/index.ts"
   },
+  "tasks": {
+    "docs:api": "deno doc --html --name=tern --output=docs/api packages/core/src/index.ts packages/react/src/index.ts packages/solid/src/index.ts"
+  },
   "lint": {
     "exclude": ["src/bindings/tern-node/index.js", "src/bindings/tern-node/index.d.ts"]
   }
