@@ -1,11 +1,14 @@
 //! Event normalization: crossterm input events → tern's [`TernEvent`] enum.
 //!
-//! Only [`KeyEventKind::Press`] key events are surfaced; repeat and release
-//! key events are dropped. Resize, focus gained/lost, and mouse events
-//! (press, release, drag, move, wheel) are all surfaced with their modifier
-//! state; paste events are surfaced as [`TernEvent::Paste`]. [`poll_events`]
-//! waits up to a caller-supplied timeout for the first event, then drains
-//! everything currently buffered into a batch.
+//! Every key event is surfaced with its [`KeyKind`] (Press / Repeat /
+//! Release) tagged on the [`TernKey`]; on terminals without the kitty
+//! keyboard protocol's `REPORT_EVENT_TYPES` enhancement crossterm only ever
+//! reports presses, so `kind` is always `Press` there. Resize, focus
+//! gained/lost, and mouse events (press, release, drag, move, wheel) are all
+//! surfaced with their modifier state; paste events are surfaced as
+//! [`TernEvent::Paste`]. [`poll_events`] waits up to a caller-supplied
+//! timeout for the first event, then drains everything currently buffered
+//! into a batch.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,12 +68,31 @@ pub enum KeyName {
     Unknown,
 }
 
+/// Whether a key event is a press, an auto-repeat, or a release.
+///
+/// Only terminals with the kitty keyboard protocol's `REPORT_EVENT_TYPES`
+/// enhancement report Repeat/Release; everywhere else crossterm synthesizes
+/// [`Press`](KeyKind::Press) for every received key, so the kind defaults to
+/// Press on non-kitty terminals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeyKind {
+    /// The key was pressed — the only kind reported without the kitty
+    /// keyboard protocol's `REPORT_EVENT_TYPES` enhancement.
+    Press,
+    /// The key auto-repeated while held.
+    Repeat,
+    /// The key was released.
+    Release,
+}
+
 /// A normalized key event.
 ///
 /// `char` is the printable character for [`Char`](KeyName::Char) keys (and
-/// `None` for named keys). `ctrl` / `alt` / `shift` mirror the crossterm
-/// modifier state; other modifiers (super, meta, hyper) are dropped in the
-/// MVP.
+/// `None` for named keys). `ctrl` / `alt` / `shift` / `super_` / `meta` /
+/// `hyper` mirror the crossterm modifier state (all additive, default
+/// false); `kind` carries whether the event is a press, repeat, or release
+/// (default [`Press`](KeyKind::Press), so a key built directly — or read
+/// from a terminal without the kitty protocol — is always a press).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TernKey {
     /// The key's name.
@@ -83,10 +105,18 @@ pub struct TernKey {
     pub alt: bool,
     /// Whether Shift was held.
     pub shift: bool,
+    /// Whether Super (the Windows / Command key) was held.
+    pub super_: bool,
+    /// Whether Meta was held.
+    pub meta: bool,
+    /// Whether Hyper was held.
+    pub hyper: bool,
+    /// Whether the event is a press, an auto-repeat, or a release.
+    pub kind: KeyKind,
 }
 
 impl TernKey {
-    /// A key with explicit fields.
+    /// A press-kind key with explicit fields.
     pub const fn new(
         name: KeyName,
         char: Option<char>,
@@ -100,6 +130,10 @@ impl TernKey {
             ctrl,
             alt,
             shift,
+            super_: false,
+            meta: false,
+            hyper: false,
+            kind: KeyKind::Press,
         }
     }
 }
@@ -190,6 +224,10 @@ impl From<CrosstermMouseEvent> for TernMouse {
 }
 
 /// Normalize a crossterm key event into a tern key.
+///
+/// The crossterm [`KeyEventKind`] maps 1:1 onto [`KeyKind`]; the precise
+/// modifiers (`SUPER` / `META` / `HYPER`) are surfaced additively alongside
+/// `ctrl` / `alt` / `shift`.
 impl From<KeyEvent> for TernKey {
     fn from(event: KeyEvent) -> Self {
         let name = match event.code {
@@ -223,6 +261,14 @@ impl From<KeyEvent> for TernKey {
             ctrl: event.modifiers.contains(KeyModifiers::CONTROL),
             alt: event.modifiers.contains(KeyModifiers::ALT),
             shift: event.modifiers.contains(KeyModifiers::SHIFT),
+            super_: event.modifiers.contains(KeyModifiers::SUPER),
+            meta: event.modifiers.contains(KeyModifiers::META),
+            hyper: event.modifiers.contains(KeyModifiers::HYPER),
+            kind: match event.kind {
+                KeyEventKind::Press => KeyKind::Press,
+                KeyEventKind::Repeat => KeyKind::Repeat,
+                KeyEventKind::Release => KeyKind::Release,
+            },
         }
     }
 }
@@ -246,14 +292,13 @@ pub enum TernEvent {
 
 /// Normalize a single crossterm event into a tern event.
 ///
-/// Returns `None` for events tern does not surface: key events that are not
-/// presses (repeat / release).
+/// Every key event is surfaced, tagged with its [`KeyKind`] — on terminals
+/// without the kitty protocol's `REPORT_EVENT_TYPES` enhancement every key
+/// arrives as a [`Press`](KeyKind::Press), so existing press-only behavior
+/// is unchanged there. No crossterm event is dropped.
 pub fn normalize(event: CrosstermEvent) -> Option<TernEvent> {
     match event {
-        CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-            Some(TernEvent::Key(TernKey::from(key)))
-        }
-        CrosstermEvent::Key(_) => None,
+        CrosstermEvent::Key(key) => Some(TernEvent::Key(TernKey::from(key))),
         CrosstermEvent::Resize(w, h) => Some(TernEvent::Resize { w, h }),
         CrosstermEvent::FocusGained => Some(TernEvent::FocusGained),
         CrosstermEvent::FocusLost => Some(TernEvent::FocusLost),
@@ -610,23 +655,86 @@ mod tests {
     }
 
     #[test]
-    fn release_kind_is_filtered() {
+    fn release_kind_surfaces_with_kind_release() {
+        // A release event is surfaced, tagged with kind Release (the kitty
+        // keyboard protocol's REPORT_EVENT_TYPES contract) — not dropped.
         let release = CrosstermEvent::Key(KeyEvent::new_with_kind(
             KeyCode::Char('x'),
             KeyModifiers::NONE,
             KeyEventKind::Release,
         ));
-        assert_eq!(normalize(release), None);
+        match normalize(release) {
+            Some(TernEvent::Key(key)) => {
+                assert_eq!(key.name, KeyName::Char);
+                assert_eq!(key.char, Some('x'));
+                assert_eq!(key.kind, KeyKind::Release);
+            }
+            other => panic!("expected a release key event, got {other:?}"),
+        }
     }
 
     #[test]
-    fn repeat_kind_is_filtered() {
+    fn repeat_kind_surfaces_with_kind_repeat() {
+        // An auto-repeat event is surfaced, tagged with kind Repeat.
         let repeat = CrosstermEvent::Key(KeyEvent::new_with_kind(
             KeyCode::Char('x'),
             KeyModifiers::NONE,
             KeyEventKind::Repeat,
         ));
-        assert_eq!(normalize(repeat), None);
+        match normalize(repeat) {
+            Some(TernEvent::Key(key)) => {
+                assert_eq!(key.name, KeyName::Char);
+                assert_eq!(key.char, Some('x'));
+                assert_eq!(key.kind, KeyKind::Repeat);
+            }
+            other => panic!("expected a repeat key event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn press_kind_defaults_to_press() {
+        // A plain press event (the only kind a non-kitty terminal reports):
+        // kind Press, exactly the pre-enhancement behavior.
+        let k = key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(k.kind, KeyKind::Press);
+    }
+
+    #[test]
+    fn escape_and_ctrl_open_bracket_are_distinct_under_disambiguate() {
+        // DISAMBIGUATE_ESCAPE_CODES: Esc reports as KeyCode::Esc (name
+        // Escape, no char), while Ctrl+[ reports as a char key '[' with ctrl
+        // set — the two are distinct events instead of both collapsing into
+        // one escape sequence.
+        let esc = key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(esc.name, KeyName::Escape);
+        assert_eq!(esc.char, None);
+        assert!(!esc.ctrl);
+
+        let ctrl_bracket = key(KeyCode::Char('['), KeyModifiers::CONTROL);
+        assert_eq!(ctrl_bracket.name, KeyName::Char);
+        assert_eq!(ctrl_bracket.char, Some('['));
+        assert!(ctrl_bracket.ctrl);
+        assert_ne!(esc, ctrl_bracket, "Esc and Ctrl+[ must not collapse");
+    }
+
+    #[test]
+    fn precise_modifiers_super_meta_hyper_are_flagged() {
+        // SUPER / META / HYPER surface additively alongside ctrl/alt/shift;
+        // a plain key carries none of them.
+        let combo = key(
+            KeyCode::Char('x'),
+            KeyModifiers::SUPER | KeyModifiers::META | KeyModifiers::HYPER,
+        );
+        assert!(combo.super_);
+        assert!(combo.meta);
+        assert!(combo.hyper);
+
+        let plain = key(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(!plain.super_ && !plain.meta && !plain.hyper);
+        // Back-compat: the classic modifiers still map independently.
+        let shift_super = key(KeyCode::Up, KeyModifiers::SHIFT | KeyModifiers::SUPER);
+        assert!(shift_super.shift);
+        assert!(shift_super.super_);
     }
 
     #[test]

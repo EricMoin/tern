@@ -337,8 +337,12 @@ export interface HighlightSpanJs {
 
 /**
  * A key event surfaced to JS as a plain object: `{ name, char, ctrl, alt,
- * shift }`. `char` is the printable character for `"char"`-named keys
- * (single-character string), `undefined` for named keys.
+ * shift, kind, super, meta, hyper }`. `char` is the printable character for
+ * `"char"`-named keys (single-character string), `undefined` for named
+ * keys. `kind` is `"press"` (the default — the only kind a terminal without
+ * the kitty keyboard protocol reports), `"repeat"`, or `"release"`; the
+ * precise modifier keys (`super`, `meta`, `hyper`) are present only when
+ * held. `name`/`char`/`ctrl`/`alt`/`shift` are unchanged for back-compat.
  */
 export interface KeyEvent {
   /**
@@ -355,6 +359,17 @@ export interface KeyEvent {
   alt: boolean
   /** Whether Shift was held. */
   shift: boolean
+  /**
+   * The key event kind: `"press"` (default), `"repeat"`, or `"release"`.
+   * Filled by [`KeyEvent::from_tern`] from the tern [`KeyKind`].
+   */
+  kind?: string
+  /** Whether Super (the Windows / Command key) was held. */
+  super?: boolean
+  /** Whether Meta was held. */
+  meta?: boolean
+  /** Whether Hyper was held. */
+  hyper?: boolean
 }
 
 /**

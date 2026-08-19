@@ -74,7 +74,7 @@ use tern_terminal::event::KeyName;
 #[cfg(feature = "push-events")]
 use tern_terminal::event::{spawn_event_loop, EventLoopHandle};
 #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
-use tern_terminal::event::{MouseButton, MouseEventKind, TernEvent, TernKey, TernMouse};
+use tern_terminal::event::{KeyKind, MouseButton, MouseEventKind, TernEvent, TernKey, TernMouse};
 
 /// The one module-global scene tree. Both node construction and rendering
 /// operate on it (see module docs for the ownership rationale).

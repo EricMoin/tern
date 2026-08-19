@@ -1659,6 +1659,48 @@ Deno.test("push events dispatch key events to onKey with the KeyEvent payload", 
   });
 });
 
+Deno.test("push events deliver a release-kind key event to onKey unchanged", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.startEventStream();
+    const keys: KeyEvent[] = [];
+    renderer.onKey((event) => keys.push(event));
+    // A synthetic kitty-protocol release event: kind rides through onKey
+    // untouched, and the precise modifiers arrive when held.
+    const release: KeyEvent = {
+      name: "char",
+      char: "x",
+      ctrl: false,
+      alt: false,
+      shift: false,
+      kind: "release",
+      super: true,
+      meta: false,
+      hyper: false,
+    };
+    pushEvent({ type: "key", key: release });
+    if (keys.length !== 1 || keys[0] !== release) {
+      throw new Error("onKey must receive the release-kind KeyEvent payload unchanged");
+    }
+    if (keys[0]!.kind !== "release") {
+      throw new Error(`kind = ${keys[0]!.kind}, expected "release"`);
+    }
+    if (keys[0]!.super !== true || keys[0]!.meta !== false) {
+      throw new Error(`precise modifiers lost: ${JSON.stringify(keys[0])}`);
+    }
+    // A press event without an explicit kind still flows (kind defaults to
+    // press; kind-unaware handlers keep working).
+    const press: KeyEvent = { name: "char", char: "y", ctrl: false, alt: false, shift: false };
+    pushEvent({ type: "key", key: press });
+    if (keys[0] !== release || keys[1] !== press) {
+      throw new Error("press and release must both arrive, unchanged, in order");
+    }
+    if (keys[1]!.kind !== undefined) {
+      throw new Error(`press without kind must arrive unchanged, got ${JSON.stringify(keys[1])}`);
+    }
+  });
+});
+
 Deno.test("push events dispatch focus events to onFocus", () => {
   withFakeAddon(() => {
     const renderer = createRenderer();

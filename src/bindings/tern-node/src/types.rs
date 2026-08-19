@@ -112,8 +112,12 @@ pub struct StyleRunJs {
 }
 
 /// A key event surfaced to JS as a plain object: `{ name, char, ctrl, alt,
-/// shift }`. `char` is the printable character for `"char"`-named keys
-/// (single-character string), `undefined` for named keys.
+/// shift, kind, super, meta, hyper }`. `char` is the printable character for
+/// `"char"`-named keys (single-character string), `undefined` for named
+/// keys. `kind` is `"press"` (the default — the only kind a terminal without
+/// the kitty keyboard protocol reports), `"repeat"`, or `"release"`; the
+/// precise modifier keys (`super`, `meta`, `hyper`) are present only when
+/// held. `name`/`char`/`ctrl`/`alt`/`shift` are unchanged for back-compat.
 #[napi(object)]
 pub struct KeyEvent {
     /// The key's name: `char`, `enter`, `escape`, `backspace`, `tab`,
@@ -128,6 +132,15 @@ pub struct KeyEvent {
     pub alt: bool,
     /// Whether Shift was held.
     pub shift: bool,
+    /// The key event kind: `"press"` (default), `"repeat"`, or `"release"`.
+    /// Filled by [`KeyEvent::from_tern`] from the tern [`KeyKind`].
+    pub kind: Option<String>,
+    /// Whether Super (the Windows / Command key) was held.
+    pub super_: Option<bool>,
+    /// Whether Meta was held.
+    pub meta: Option<bool>,
+    /// Whether Hyper was held.
+    pub hyper: Option<bool>,
 }
 
 #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
@@ -139,6 +152,14 @@ impl KeyEvent {
             ctrl: key.ctrl,
             alt: key.alt,
             shift: key.shift,
+            kind: Some(match key.kind {
+                KeyKind::Press => "press".to_string(),
+                KeyKind::Repeat => "repeat".to_string(),
+                KeyKind::Release => "release".to_string(),
+            }),
+            super_: key.super_.then_some(true),
+            meta: key.meta.then_some(true),
+            hyper: key.hyper.then_some(true),
         }
     }
 }

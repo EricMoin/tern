@@ -813,8 +813,14 @@ impl TuiRenderer {
 
 #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
 /// Whether a key event is a Ctrl+C press (the `exit_on_ctrl_c` trigger).
+/// Gated on [`KeyKind::Press`]: on a kitty-enabled terminal a held Ctrl+C
+/// reports release/repeat events too, and only the press must tear the
+/// renderer down.
 pub(crate) fn is_ctrl_c(event: &TernEvent) -> bool {
-    matches!(event, TernEvent::Key(key) if key.ctrl && key.char == Some('c'))
+    matches!(
+        event,
+        TernEvent::Key(key) if key.kind == KeyKind::Press && key.ctrl && key.char == Some('c')
+    )
 }
 
 /// Invalidate the cached terminal size when a resize event arrives: the next
