@@ -20,7 +20,7 @@
  *   detaches, and `followTail` re-attaches.
  * - `Input` / `Spinner` / `StatusBar` / `Panels` / `DiffView` / `Select` /
  *   `ScrollView` / `Table` / `Tabs` / `Progress` / `Modal` / `MarkdownView`
- *   are roadmap
+ *   / `Canvas` / `BarChart` / `Chart` / `Sparkline` are roadmap
  *   element factories that compose the primitive kinds into richer widgets
  *   (all editing/caret/selection/scroll/tab math stays in the element, the
  *   Rust compositor paints it), and a
@@ -185,9 +185,10 @@ import type { NativeIncrementalHighlighter, TernAddon } from "./addon.ts";
 /**
  * The scene node kinds. `box`/`text`/`streaming_text` are materialized by the
  * binding; `input`/`textarea`/`spinner`/`status_bar`/`panels`/`diff`/`select`/
- * `scroll_view`/`table`/`tree`/`tabs`/`progress`/`modal`/`markdown` are JS-only
- * element kinds that materialize as compositions over the primitive kinds
- * (their root primitive is fixed by {@link NATIVE_KIND}).
+ * `scroll_view`/`table`/`tree`/`tabs`/`progress`/`modal`/`markdown`/`canvas`/
+ * `bar_chart`/`chart`/`sparkline` are JS-only element kinds that materialize
+ * as compositions over the primitive kinds (their root primitive is fixed by
+ * {@link NATIVE_KIND}).
  */
 export type NodeType =
   | "box"
@@ -206,7 +207,11 @@ export type NodeType =
   | "tabs"
   | "progress"
   | "modal"
-  | "markdown";
+  | "markdown"
+  | "canvas"
+  | "bar_chart"
+  | "chart"
+  | "sparkline";
 
 /**
  * The native scene node kind each JS element kind materializes as. The
@@ -215,7 +220,7 @@ export type NodeType =
  * engine kinds in the binding), so each maps to the root primitive of its
  * composition: an `input` is a framed box, a `spinner` is a text leaf, a
  * `status_bar` / `panels` / `diff` / `select` / `table` / `tree` / `tabs` /
- * `progress` / `modal` / `markdown` is a flex box.
+ * `progress` / `modal` / `markdown` / `canvas` is a flex box.
  */
 const NATIVE_KIND: Record<NodeType, NodeType> = {
   box: "box",
@@ -235,6 +240,10 @@ const NATIVE_KIND: Record<NodeType, NodeType> = {
   progress: "box",
   modal: "box",
   markdown: "box",
+  canvas: "box",
+  bar_chart: "box",
+  chart: "box",
+  sparkline: "box",
 };
 
 /**
@@ -281,6 +290,35 @@ export interface NodeProps {
    * size (passed through as a string prop to the layout engine). */
   max_height?: number | `${number}%`;
   flex_direction?: "row" | "column";
+  /** The display layout mode: `"flex"` (default), `"grid"`, or `"none"`.
+   * `"none"` hides the node and its whole subtree from layout and paint
+   * (the engine skips the subtree entirely). Passed through as a string
+   * prop to the layout engine. */
+  display?: "flex" | "grid" | "none";
+  /** The grid container's column track list, as a space-separated string
+   * (`"1fr 2fr"`, `"10px 1fr auto"`, `"50% 1fr"`): `fr` tracks share the
+   * free space, px / bare numbers are fixed cells, percents are of the
+   * container's inner size, `auto` sizes to content; unparseable tokens
+   * are skipped. String-form because the binding drops array values.
+   * Passed through as a string prop to the layout engine. */
+  grid_template_columns?: string;
+  /** The grid container's row track list — the row-axis counterpart of
+   * `grid_template_columns` (same tokens and string form). Passed through
+   * as a string prop to the layout engine. */
+  grid_template_rows?: string;
+  /** How the auto-placement algorithm packs overflowing grid items:
+   * `"row"` (default), `"column"`, `"row-dense"`, or `"column-dense"`.
+   * Passed through as a string prop to the layout engine. */
+  grid_auto_flow?: "row" | "column" | "row-dense" | "column-dense";
+  /** A grid item's row placement: an integer line index (`2`, `-1` —
+   * positive counts from the start, negative from the end) or a `"span N"`
+   * track span. Sets the start line; the end stays auto (a one-track
+   * span). Passed through as a scalar prop to the layout engine. */
+  grid_row?: number | `span ${number}`;
+  /** A grid item's column placement: an integer line index or a `"span N"`
+   * track span. Sets the start line; the end stays auto (a one-track
+   * span). Passed through as a scalar prop to the layout engine. */
+  grid_column?: number | `span ${number}`;
   // Style keys.
   fg?: string;
   bg?: string;
@@ -4618,6 +4656,541 @@ export function setProgress(node: Node, value: number, max?: number): void {
 }
 
 // ---------------------------------------------------------------------------
+// Canvas / braille
+//
+// A `canvas` element is a sub-cell dot drawing surface rendered as Unicode
+// braille (U+2800): a grid of braille cells, each holding a 2-column × 4-row
+// sub-grid of dots. The JS-side rasterizer mirrors the Rust canvas
+// renderable's dot→bit map exactly (`DOT_BITS`,
+// src/core/tern-components/src/canvas.rs) so both sides paint identical
+// glyphs: the left sub-column holds dots 1–4 (bits 0x01..0x08, top to
+// bottom), the right holds dots 5–8 (bits 0x10..0x80). The factory composes
+// the rasterized rows as a flex column `box` with one `Text` leaf per braille
+// row — the same frame + row-leaf materialization the Rust renderable
+// produces — so the real compositor lays out and paints the drawing like any
+// text. No new napi node kind: the `canvas` element materializes as a `box`
+// (constitution).
+// ---------------------------------------------------------------------------
+
+/**
+ * A canvas's sub-cell dot matrix: one string per sub-cell row (4 sub-rows per
+ * braille cell), each string one character per sub-cell column (2 sub-columns
+ * per braille cell). `"1"` paints the dot at that sub-cell; any other
+ * character — or a missing column on a short row — leaves it off (mirrors the
+ * Rust `Canvas::set`, whose out-of-bounds dots are ignored). The canvas's
+ * braille size derives from the matrix: `ceil(cols / 2)` cells wide by
+ * `ceil(rows / 4)` cells tall.
+ */
+export type CanvasDots = string[];
+
+/**
+ * Props for the `Canvas` element. `dots` is consumed by the factory — the
+ * sub-cell matrix is JS bookkeeping that never reaches the scene props
+ * (mirroring `Tree`'s `nodes` / `Panels`' `panels`): only the rasterized
+ * braille text reaches the scene. Remaining props style the root box; the
+ * canvas's `fg`/`bg` also paint the braille leaves (mirroring the Rust
+ * renderable's row style).
+ */
+export interface CanvasProps extends NodeProps {
+  /** The sub-cell dot matrix, one row string per sub-cell row (`"1"` paints
+   * the dot, any other character leaves it off). */
+  dots: CanvasDots;
+}
+
+/** The bit of the sub-cell (`subCol`, `subRow`) inside its braille cell —
+ * the exact mirror of the Rust canvas's `DOT_BITS[subRow][subCol]`: the left
+ * sub-column (0) holds dots 1–4 (bits 0–3, 0x01..0x08) and the right
+ * sub-column (1) holds dots 5–8 (bits 4–7, 0x10..0x80), top to bottom. */
+function brailleDotBit(subCol: number, subRow: number): number {
+  return subCol * 4 + subRow;
+}
+
+/**
+ * Rasterize one braille cell of a canvas into its braille codepoint.
+ * `col`/`row` select the braille cell: sub-columns `2*col` and `2*col + 1`,
+ * sub-rows `4*row .. 4*row + 3`. The dot→bit map is the Rust renderable's
+ * (`DOT_BITS`, src/core/tern-components/src/canvas.rs) — sub-cell (0, r) is
+ * dot r+1 (0x01..0x08), sub-cell (1, r) is dot r+5 (0x10..0x80) — so the JS
+ * composition and the native renderable rasterize identical glyphs: the
+ * codepoint is `0x2800 | bits`, the U+2800 braille block. A sub-cell outside
+ * the matrix (a partial edge) reads as off.
+ */
+export function brailleCell(dots: CanvasDots, col: number, row: number): string {
+  const x0 = col * 2;
+  const y0 = row * 4;
+  let bits = 0;
+  for (let dy = 0; dy < 4; dy++) {
+    for (let dx = 0; dx < 2; dx++) {
+      if (dots[y0 + dy]?.[x0 + dx] === "1") {
+        bits |= 1 << brailleDotBit(dx, dy);
+      }
+    }
+  }
+  return String.fromCodePoint(0x2800 + bits);
+}
+
+/**
+ * Rasterize a canvas's sub-cell dot matrix into its braille rows: one string
+ * of braille codepoints per 4 sub-rows, each `ceil(cols / 2)` codepoints wide
+ * — the JS mirror of the Rust `Canvas::rows`. A partial last column or row
+ * rasterizes its missing sub-cells as off.
+ */
+export function brailleRows(dots: CanvasDots): string[] {
+  const cols = dots.reduce((max, row) => Math.max(max, row.length), 0);
+  const width = Math.ceil(cols / 2);
+  const height = Math.ceil(dots.length / 4);
+  const rows: string[] = [];
+  for (let row = 0; row < height; row++) {
+    let text = "";
+    for (let col = 0; col < width; col++) text += brailleCell(dots, col, row);
+    rows.push(text);
+  }
+  return rows;
+}
+
+/**
+ * Create a `canvas` element: a sub-cell dot drawing surface rendered as
+ * Unicode braille. The `dots` matrix (sub-cell rows of `"1"`/`"0"`) is
+ * rasterized JS-side into braille codepoints and composed as a flex column
+ * `box` with one `Text` leaf per braille row — the same materialization the
+ * Rust canvas renderable produces (src/core/tern-components/src/canvas.rs).
+ * The canvas's `fg`/`bg` also paint the braille leaves (mirroring the
+ * renderable's row style). No new napi node kind: the `canvas` element
+ * materializes as a `box` (constitution).
+ */
+export function Canvas(props: CanvasProps): Node {
+  const rootProps: NodeProps = {
+    ...props,
+    flex_direction: "column",
+  };
+  const plain = rootProps as Record<string, unknown>;
+  delete plain.dots;
+  const canvas = Node.create("canvas", rootProps, []);
+  for (const row of brailleRows(props.dots)) {
+    const leaf: NodeProps = { text: row };
+    if (props.fg !== undefined) leaf.fg = props.fg;
+    if (props.bg !== undefined) leaf.bg = props.bg;
+    canvas.addChild(Text(leaf));
+  }
+  return canvas;
+}
+
+// ---------------------------------------------------------------------------
+// Data viz: BarChart / Chart / Sparkline
+//
+// The data-viz element kinds render number series as terminal glyphs:
+//
+// - `bar_chart` — one column per value, painted bottom-up with the
+//   eighth-block glyphs ▁▂▃▄▅▆▇█ (U+2581..U+2588, 8 sub-heights per cell) for
+//   sub-cell bar heights, or whole-cell `█` columns in `full_block` mode.
+//   Every bar shares the same baseline (the x-axis), and an optional `─`
+//   axis row spans the chart's fixed `width` beneath the bars.
+// - `chart` — a polyline through the data points, rasterized onto the
+//   canvas sub-cell dot matrix and rendered as Unicode braille via the
+//   canvas rasterizer (`brailleRows`, subtask 2 — the exact mirror of the
+//   Rust canvas renderable). The line spans the fixed `width` × `height`
+//   plot area; an optional `─` axis row spans the fixed width beneath it.
+// - `sparkline` — one glyph per value at the series' own scale: eighth-block
+//   glyphs by default, or braille via the canvas rasterizer with
+//   `use_braille`. The glyphs are anchored to the bottom baseline and the
+//   series is shown at a fixed `width` (the last `width` points).
+//
+// All three compose over `box` + `text` only — the data series is JS
+// bookkeeping consumed by the factory (mirroring `Canvas`' `dots` /
+// `Tree`' `nodes`), and the value scale maps into the box/text leaves. No
+// new napi node kind: each element materializes as a `box` (constitution).
+// ---------------------------------------------------------------------------
+
+/** The eighth-block bar glyphs (U+2581..U+2588): index `i` paints `i + 1`
+ * eighths of the cell, from the bottom `▁` (1/8) to the full `█` (8/8). */
+const CHART_BLOCK_GLYPHS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+/** The axis glyph: a horizontal line spanning the chart's fixed width. */
+const CHART_AXIS_CHAR = "─";
+
+/** The leaf props of a chart row: the row's own keys plus the chart's
+ * `fg`/`bg`, so the glyphs paint in the element's colors (mirroring `Canvas`,
+ * whose `fg`/`bg` paint the braille leaves). */
+function chartLeafProps(props: NodeProps, leaf: NodeProps): NodeProps {
+  const out = { ...leaf };
+  if (props.fg !== undefined) out.fg = props.fg;
+  if (props.bg !== undefined) out.bg = props.bg;
+  return out;
+}
+
+/** Clamp a normalized value into [0, 1]. A non-finite value (NaN from a
+ * non-numeric data point) clamps to the bottom of the plot — never a
+ * `"undefined"` glyph. */
+function chartClamp(value: number): number {
+  if (!(value >= 0)) return 0;
+  return value > 1 ? 1 : value;
+}
+
+/**
+ * The value scale for a data series: the `min`/`max` props when given,
+ * otherwise the per-chart defaults. A degenerate scale (empty data, or a
+ * flat series where `max` would equal `min`) spans 1, so normalization never
+ * divides by zero and every value maps to the bottom of the plot.
+ */
+function chartScale(
+  data: number[],
+  min: number | undefined,
+  max: number | undefined,
+  minDefault: number,
+): { min: number; max: number } {
+  let lo = min ?? minDefault;
+  let hi = max;
+  if (hi === undefined) {
+    hi = data.length > 0 ? Math.max(...data) : lo;
+    if (!Number.isFinite(hi)) hi = lo;
+  }
+  if (!(hi > lo)) hi = lo + 1;
+  return { min: lo, max: hi };
+}
+
+/**
+ * Plot a straight line between two sub-cell coordinates onto a dot matrix
+ * (Bresenham's integer line algorithm — the same raster the canvas element
+ * uses, so a line chart paints through the braille rasterizer). Both
+ * endpoints are plotted; sub-cells outside the matrix are ignored.
+ */
+function plotLine(dots: string[], x0: number, y0: number, x1: number, y1: number): void {
+  const width = dots[0]?.length ?? 0;
+  const height = dots.length;
+  const dx = Math.abs(x1 - x0);
+  const dy = -Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1;
+  const sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  let x = x0;
+  let y = y0;
+  for (;;) {
+    if (x >= 0 && y >= 0 && x < width && y < height) {
+      dots[y] = dots[y]!.slice(0, x) + "1" + dots[y]!.slice(x + 1);
+    }
+    if (x === x1 && y === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) {
+      err += dy;
+      x += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      y += sy;
+    }
+  }
+}
+
+/** The sub-cell dot matrix of a `brailleRows`-rasterizable canvas: `subRows`
+ * sub-rows (4 per braille row), each `subCols` sub-columns (2 per braille
+ * cell) wide, every sub-cell off. */
+function dotMatrix(subCols: number, subRows: number): string[] {
+  return Array.from({ length: subRows }, () => "0".repeat(subCols));
+}
+
+/**
+ * Props for the `BarChart` element. The series and the value scale are
+ * consumed by the factory — they never reach the scene props (mirroring
+ * `Canvas`' `dots`): only the bar row `Text` leaves (and the optional axis
+ * leaf) reach the scene, and `width` stamps the root box's fixed width.
+ */
+export interface BarChartProps extends NodeProps {
+  /** The bar values, one per bar, in display order (left to right). */
+  data: number[];
+  /** The chart's fixed width in cells (default: the natural bars width —
+   * `data.length * bar_width + (data.length - 1) * gap`). Bars draw
+   * left-aligned within it; the optional axis row spans it exactly. */
+  width?: number;
+  /** The chart height in cells (default 5). Each value scales into
+   * `height` cells of eighth-block sub-heights (`8 * height` eighths per
+   * bar), or `height` whole cells in `full_block` mode. */
+  height?: number;
+  /** The value scale minimum (default 0 — the baseline). */
+  min?: number;
+  /** The value scale maximum (default `max(data)`). */
+  max?: number;
+  /** Cells per bar column (default 1). A wider bar repeats its glyph
+   * `bar_width` times on every row. */
+  bar_width?: number;
+  /** Cells between adjacent bars (default 1). */
+  gap?: number;
+  /** Compose a `─` baseline axis row beneath the bars, spanning the fixed
+   * width (default `false`). */
+  show_axis?: boolean;
+  /** Use whole-cell `█` columns instead of the eighth-block sub-cell
+   * glyphs (default `false`). */
+  full_block?: boolean;
+}
+
+/**
+ * The per-bar sub-heights of a bar chart, in display order: each value
+ * normalized onto the scale and quantized into `8 * height` eighths
+ * (`full_block`: `height` whole cells) — the atom the row glyphs read.
+ */
+function barChartSubHeights(props: BarChartProps, scale: { min: number; max: number }): number[] {
+  const height = typeof props.height === "number" ? Math.max(1, Math.round(props.height)) : 5;
+  const fullBlock = props.full_block === true;
+  return (props.data ?? []).map((value) => {
+    const norm = chartClamp((value - scale.min) / (scale.max - scale.min));
+    return fullBlock ? Math.round(norm * height) : Math.round(norm * 8 * height);
+  });
+}
+
+/**
+ * Create a `bar_chart` element: one column per value, painted bottom-up with
+ * the eighth-block glyphs (▁▂▃▄▅▆▇█ — 8 sub-heights per cell) for sub-cell
+ * bar heights, or whole-cell `█` columns with `full_block`. Every bar shares
+ * the same baseline, and an optional `─` axis row (when `show_axis`) spans
+ * the chart's fixed `width` beneath the bars. The series is composed as a
+ * flex column `box` with one `Text` leaf per chart row (top to bottom) plus
+ * the optional axis leaf — the same row-leaf materialization as `Canvas`.
+ * No new napi node kind: the `bar_chart` element materializes as a `box`
+ * (constitution).
+ */
+export function BarChart(props: BarChartProps): Node {
+  const data = props.data ?? [];
+  const height = typeof props.height === "number" ? Math.max(1, Math.round(props.height)) : 5;
+  const barWidth = typeof props.bar_width === "number" ? Math.max(1, Math.round(props.bar_width)) : 1;
+  const gap = typeof props.gap === "number" ? Math.max(0, Math.round(props.gap)) : 1;
+  const showAxis = props.show_axis === true;
+  const scale = chartScale(data, props.min, props.max, 0);
+  const barsWidth = data.length === 0 ? 0 : data.length * barWidth + (data.length - 1) * gap;
+  const width = typeof props.width === "number"
+    ? Math.max(1, Math.round(props.width))
+    : Math.max(1, barsWidth);
+  const subHeights = barChartSubHeights(props, scale);
+  const fullBlock = props.full_block === true;
+
+  // One Text leaf per chart row, top (row `height - 1`) to bottom (row 0):
+  // a bar's glyph on row `r` is a full `█` when the bar reaches the row's
+  // top, the partial eighth-block glyph when it reaches partway up the row,
+  // or a space above the bar's top — so all bars share the bottom baseline.
+  const leaves: Node[] = [];
+  for (let row = height - 1; row >= 0; row--) {
+    let text = "";
+    for (let i = 0; i < data.length; i++) {
+      if (i > 0) text += " ".repeat(gap);
+      const sub = subHeights[i]!;
+      let glyph: string;
+      if (fullBlock) {
+        glyph = row < sub ? "█" : " ";
+      } else if (sub >= 8 * (row + 1)) {
+        glyph = "█";
+      } else if (sub > 8 * row) {
+        glyph = CHART_BLOCK_GLYPHS[sub - 8 * row - 1]!;
+      } else {
+        glyph = " ";
+      }
+      text += glyph.repeat(barWidth);
+    }
+    leaves.push(Text(chartLeafProps(props, { text })));
+  }
+  if (showAxis) leaves.push(Text(chartLeafProps(props, { text: CHART_AXIS_CHAR.repeat(width) })));
+
+  const rootProps: NodeProps = {
+    ...props,
+    flex_direction: "column",
+    width,
+  };
+  const plain = rootProps as Record<string, unknown>;
+  delete plain.data;
+  delete plain.height;
+  delete plain.min;
+  delete plain.max;
+  delete plain.bar_width;
+  delete plain.gap;
+  delete plain.show_axis;
+  delete plain.full_block;
+  return Node.create("bar_chart", rootProps, leaves);
+}
+
+/**
+ * Props for the `Chart` element (a line chart). The series and the value
+ * scale are consumed by the factory — they never reach the scene props:
+ * only the braille row `Text` leaves (and the optional axis leaf) reach the
+ * scene, and `width` stamps the root box's fixed width.
+ */
+export interface ChartProps extends NodeProps {
+  /** The data points, in x order; the polyline through them is drawn. */
+  data: number[];
+  /** The chart's fixed width in cells (default
+   * `max(2, ceil(data.length / 2))` — the minimum that gives every point
+   * its own braille sub-column). */
+  width?: number;
+  /** The chart height in cells (default 5) — the braille rasterizer's
+   * resolution is 4 sub-rows per cell. */
+  height?: number;
+  /** The value scale minimum (default `min(data)`). */
+  min?: number;
+  /** The value scale maximum (default `max(data)`). */
+  max?: number;
+  /** Compose a `─` baseline axis row beneath the plot, spanning the fixed
+   * width (default `false`). */
+  show_axis?: boolean;
+}
+
+/**
+ * Create a `chart` element: a polyline through the data points, rasterized
+ * onto the canvas sub-cell dot matrix (the x-axis maps the point indices
+ * across the full sub-cell width, the y-axis maps the value scale onto the
+ * full sub-cell height) and rendered as Unicode braille via the canvas
+ * rasterizer (`brailleRows` — the exact mirror of the Rust canvas
+ * renderable). Consecutive points are connected with Bresenham lines. The
+ * plot is composed as a flex column `box` with one `Text` leaf per braille
+ * row plus the optional `─` axis leaf (when `show_axis`) spanning the fixed
+ * `width`. No new napi node kind: the `chart` element materializes as a
+ * `box` (constitution).
+ */
+export function Chart(props: ChartProps): Node {
+  const data = props.data ?? [];
+  const height = typeof props.height === "number" ? Math.max(1, Math.round(props.height)) : 5;
+  const width = typeof props.width === "number"
+    ? Math.max(1, Math.round(props.width))
+    : Math.max(2, Math.ceil(data.length / 2));
+  const subCols = 2 * width;
+  const subRows = 4 * height;
+  const scale = chartScale(
+    data,
+    props.min,
+    props.max,
+    data.length > 0 ? Math.min(...data) : 0,
+  );
+
+  const dots = dotMatrix(subCols, subRows);
+  if (data.length >= 2) {
+    for (let i = 0; i < data.length - 1; i++) {
+      const x0 = Math.round((i * (subCols - 1)) / (data.length - 1));
+      const x1 = Math.round(((i + 1) * (subCols - 1)) / (data.length - 1));
+      const y0 = subRows - 1 - Math.round(chartClamp((data[i]! - scale.min) / (scale.max - scale.min)) * (subRows - 1));
+      const y1 = subRows - 1 - Math.round(chartClamp((data[i + 1]! - scale.min) / (scale.max - scale.min)) * (subRows - 1));
+      plotLine(dots, x0, y0, x1, y1);
+    }
+  } else if (data.length === 1) {
+    const y = subRows - 1 - Math.round(chartClamp((data[0]! - scale.min) / (scale.max - scale.min)) * (subRows - 1));
+    plotLine(dots, 0, y, 0, y);
+  }
+
+  const leaves = brailleRows(dots).map((row) => Text(chartLeafProps(props, { text: row })));
+  if (props.show_axis === true) {
+    leaves.push(Text(chartLeafProps(props, { text: CHART_AXIS_CHAR.repeat(width) })));
+  }
+
+  const rootProps: NodeProps = {
+    ...props,
+    flex_direction: "column",
+    width,
+  };
+  const plain = rootProps as Record<string, unknown>;
+  delete plain.data;
+  delete plain.height;
+  delete plain.min;
+  delete plain.max;
+  delete plain.show_axis;
+  return Node.create("chart", rootProps, leaves);
+}
+
+/**
+ * Props for the `Sparkline` element. The series and the value scale are
+ * consumed by the factory — they never reach the scene props: only the
+ * glyph row `Text` leaves reach the scene, and `width` stamps the root
+ * box's fixed width.
+ */
+export interface SparklineProps extends NodeProps {
+  /** The data points, in x order; the last `width` points are shown. */
+  data: number[];
+  /** The sparkline's fixed width in cells (default `data.length` — the
+   * full series; a longer series shows its last `width` points, a shorter
+   * one is padded at the right). */
+  width?: number;
+  /** The sparkline height in cells (default 1). */
+  height?: number;
+  /** The value scale minimum (default `min(data)`). */
+  min?: number;
+  /** The value scale maximum (default `max(data)`). */
+  max?: number;
+  /** Rasterize the sparkline as Unicode braille via the canvas rasterizer
+   * (default `false` — eighth-block glyphs). */
+  use_braille?: boolean;
+}
+
+/**
+ * Create a `sparkline` element: one glyph per value at the series' own
+ * scale, anchored to the bottom baseline and shown at a fixed `width` (the
+ * last `width` points; a shorter series pads at the right). Two glyph
+ * families:
+ *
+ * - Eighth-block glyphs (the default): each point is an eighth-block
+ *   glyph (▁..█) quantized onto `8 * height` sub-heights, stacked over
+ *   `height` rows — the smallest value paints ▁ (never an empty hole).
+ * - Braille (`use_braille`): each point is a dot in its own sub-column
+ *   (two per braille cell) of the canvas sub-cell matrix, rasterized via
+ *   `brailleRows` — the exact mirror of the Rust canvas renderable.
+ *
+ * Either way the element composes as a flex column `box` with one `Text`
+ * leaf per row (Canvas-style). No new napi node kind: the `sparkline`
+ * element materializes as a `box` (constitution).
+ */
+export function Sparkline(props: SparklineProps): Node {
+  const data = props.data ?? [];
+  const height = typeof props.height === "number" ? Math.max(1, Math.round(props.height)) : 1;
+  const width = typeof props.width === "number"
+    ? Math.max(1, Math.round(props.width))
+    : data.length;
+  const scale = chartScale(
+    data,
+    props.min,
+    props.max,
+    data.length > 0 ? Math.min(...data) : 0,
+  );
+  const window = data.slice(Math.max(0, data.length - width));
+
+  let leaves: Node[];
+  if (props.use_braille === true) {
+    // One dot per point in its own sub-column (2 per braille cell), placed
+    // from the bottom sub-row — the braille baseline.
+    const dots = dotMatrix(2 * width, 4 * height);
+    window.forEach((value, i) => {
+      const norm = chartClamp((value - scale.min) / (scale.max - scale.min));
+      const y = 4 * height - 1 - Math.round(norm * (4 * height - 1));
+      plotLine(dots, i, y, i, y);
+    });
+    leaves = brailleRows(dots).map((row) => Text(chartLeafProps(props, { text: row })));
+  } else {
+    // Eighth-block glyphs: each point quantized onto `8 * height`
+    // sub-heights, clamped to at least 1 eighth so no point paints an
+    // empty hole. One Text leaf per row, top to bottom.
+    const subHeights = window.map((value) => {
+      const norm = chartClamp((value - scale.min) / (scale.max - scale.min));
+      return Math.min(8 * height, Math.max(1, Math.round(norm * 8 * height)));
+    });
+    leaves = [];
+    for (let row = height - 1; row >= 0; row--) {
+      let text = "";
+      for (const sub of subHeights) {
+        if (sub >= 8 * (row + 1)) text += "█";
+        else if (sub > 8 * row) text += CHART_BLOCK_GLYPHS[sub - 8 * row - 1]!;
+        else text += " ";
+      }
+      text += " ".repeat(Math.max(0, width - window.length));
+      leaves.push(Text(chartLeafProps(props, { text })));
+    }
+  }
+
+  const rootProps: NodeProps = {
+    ...props,
+    flex_direction: "column",
+    width,
+  };
+  const plain = rootProps as Record<string, unknown>;
+  delete plain.data;
+  delete plain.height;
+  delete plain.min;
+  delete plain.max;
+  delete plain.use_braille;
+  return Node.create("sparkline", rootProps, leaves);
+}
+
+// ---------------------------------------------------------------------------
 // Modal
 //
 // A `modal` element is a full-bleed overlay: an absolutely positioned root
@@ -5704,6 +6277,125 @@ export function resolveTheme(theme: Theme, props: ThemeResolvableProps): NodePro
 }
 
 // ---------------------------------------------------------------------------
+// Global keymap (shortcuts ahead of focus routing)
+// ---------------------------------------------------------------------------
+
+/**
+ * A key combination registered with a {@link Keymap}: a key name plus the
+ * modifier flags that must be held. `name` is the event's key name (`enter`,
+ * `escape`, `backspace`, `tab`, `up`, `f1`, ...) or, for a printable key,
+ * the character itself — `"k"` matches a `"char"` event whose `char` is
+ * `"k"`. Matching is exact: a modifier omitted from the combo must be
+ * released (`{ name: "k", ctrl: true }` fires on `ctrl+k` only, never on
+ * plain `k` or `ctrl+shift+k`).
+ */
+export interface KeyCombo {
+  /** The key name (`enter`, `escape`, `backspace`, `tab`, `up`, `f1`, ...),
+   * or the character of a printable key (`"k"` matches a `"char"` event). */
+  name: string;
+  /** Whether Control must be held (default `false`). */
+  ctrl?: boolean;
+  /** Whether Alt must be held (default `false`). */
+  alt?: boolean;
+  /** Whether Shift must be held (default `false`). */
+  shift?: boolean;
+  /** Whether Meta must be held (default `false`). */
+  meta?: boolean;
+  /** Whether Super (the Windows / Command key) must be held (default
+   * `false`). */
+  super?: boolean;
+}
+
+/** A normalized signature for a combo: the name plus each modifier's required
+ * state (omitted modifiers default to released), so re-registering an
+ * equivalent combo replaces the earlier entry. */
+function comboSignature(combo: KeyCombo): string {
+  return [
+    combo.name,
+    combo.ctrl ?? false,
+    combo.alt ?? false,
+    combo.shift ?? false,
+    combo.meta ?? false,
+    combo.super ?? false,
+  ].join("\u0000");
+}
+
+/** Whether `event` matches `combo` exactly: the key name (or, for a `"char"`
+ * event, the character) plus every modifier flag, with omitted combo
+ * modifiers treated as released. */
+function comboMatches(combo: KeyCombo, event: KeyEvent): boolean {
+  const nameMatches =
+    event.name === combo.name || (event.name === "char" && event.char === combo.name);
+  if (!nameMatches) return false;
+  return (
+    event.ctrl === (combo.ctrl ?? false) &&
+    event.alt === (combo.alt ?? false) &&
+    event.shift === (combo.shift ?? false) &&
+    (event.super ?? false) === (combo.super ?? false) &&
+    (event.meta ?? false) === (combo.meta ?? false)
+  );
+}
+
+/**
+ * A registry of global key combinations (shortcuts) dispatched ahead of
+ * {@link FocusManager} focus routing. Register a combo with
+ * {@link Keymap.register}; every key event routed through
+ * {@link FocusManager.routeKey} is matched against the registry first — a
+ * registered combo fires regardless of focus (or an explicitly routed node)
+ * and consumes the event, while an unclaimed key falls through to the focused
+ * element's handler, and beyond it to the tree-level handler.
+ *
+ * The module-level {@link keymap} is the default instance consulted by every
+ * {@link FocusManager}, so the react `useInput` / solid `subscribeInput`
+ * wrappers (which route keys through the manager) inherit global shortcuts
+ * with no per-tree wiring.
+ */
+export class Keymap {
+  #entries = new Map<string, { combo: KeyCombo; handler: KeyHandler }>();
+
+  /**
+   * Register `handler` for `combo`. Registering the same combo again replaces
+   * the earlier handler. Returns an unsubscribe function that removes the
+   * registration.
+   */
+  register(combo: KeyCombo, handler: KeyHandler): () => void {
+    const signature = comboSignature(combo);
+    this.#entries.set(signature, { combo, handler });
+    return () => {
+      const entry = this.#entries.get(signature);
+      // Only remove when the current handler is still the one this call
+      // registered — an older unsubscribe must not clobber a replacement.
+      if (entry !== undefined && entry.handler === handler) {
+        this.#entries.delete(signature);
+      }
+    };
+  }
+
+  /**
+   * Match `event` against the registered combos: when one matches, run its
+   * handler and return `true` (the event is claimed). Returns `false` when no
+   * combo matches, so the caller lets the event fall through. Matching is
+   * exact, so at most one combo can match a given event; the first match in
+   * registration order wins.
+   */
+  dispatch(event: KeyEvent): boolean {
+    for (const { combo, handler } of this.#entries.values()) {
+      if (comboMatches(combo, event)) {
+        handler(event);
+        return true;
+      }
+    }
+    return false;
+  }
+}
+
+/** The default global keymap shared by all {@link FocusManager} instances:
+ * {@link FocusManager.routeKey} consults it ahead of focus routing. A combo
+ * registered here fires regardless of focus and is never delivered to the
+ * focused element's handler or the tree-level handler. */
+export const keymap: Keymap = new Keymap();
+
+// ---------------------------------------------------------------------------
 // Focus manager
 // ---------------------------------------------------------------------------
 
@@ -5871,11 +6563,18 @@ export class FocusManager {
   }
 
   /**
-   * Dispatch a key event to a registered element's handler. When `node` is
-   * given and registered, it wins; otherwise the active focus handles the
-   * event. Returns `false` (and dispatches nothing) when neither applies.
+   * Dispatch a key event to a registered element's handler. The global
+   * {@link keymap} is consulted first: a registered combo fires (regardless
+   * of focus or an explicit `node`) and consumes the event. Otherwise, when
+   * `node` is given and registered, it wins; otherwise the active focus
+   * handles the event. Returns `false` (and dispatches nothing) when neither
+   * the keymap nor a focusable claims the event.
    */
   routeKey(event: KeyEvent, node?: Node): boolean {
+    // Global shortcuts dispatch ahead of focus routing: a registered combo
+    // fires regardless of focus and swallows the event; an unclaimed key
+    // falls through to the focused element's handler.
+    if (keymap.dispatch(event)) return true;
     let entry: Focusable | undefined;
     if (node !== undefined) {
       entry = [...this.#entries.values()].find((e) => e.node === node);
