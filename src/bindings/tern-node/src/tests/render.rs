@@ -112,6 +112,45 @@ fn render_to_buffer_styled_border_color_paints_border_runs_in_color() {
 }
 
 #[test]
+fn render_to_buffer_styled_surfaces_hyperlink_on_linked_run() {
+    // A run whose cells carry a hyperlink reports the link target as
+    // `hyperlink` — the value the engine threads from the `href` style key
+    // into `Style::hyperlink`. The golden scene with the inner text styled
+    // `.hyperlink(Some("https://example.com"))` surfaces the link on the
+    // "Hi" run while every other key stays absent; because the hyperlink
+    // participates in style equality, the linked run splits from the
+    // default-styled border and trailing blanks exactly like a colored or
+    // bold run does.
+    let mut scene = Scene::new();
+    let root = scene.root_id();
+    let box_id = scene
+        .add_child(
+            root,
+            NodeKind::Box,
+            Style::new().border_style(BorderStyle::Rounded),
+        )
+        .expect("add box");
+    scene.set_prop(box_id, "padding", PropValue::Int(1));
+    scene
+        .add_text(
+            box_id,
+            "Hi",
+            Style::new().hyperlink(Some("https://example.com".into())),
+        )
+        .expect("add linked text");
+
+    let runs = paint_scene_runs_with_selection(&scene, Size::new(6, 3), None);
+    assert_eq!(
+        runs,
+        vec![
+            vec![plain_run("┌──┐  ")],
+            vec![plain_run("│"), linked_run("Hi"), plain_run("│  ")],
+            vec![plain_run("└──┘  ")],
+        ]
+    );
+}
+
+#[test]
 fn render_to_buffer_styled_text_reconstructs_plain_rows() {
     // The styled snapshot must never change the painted text:
     // concatenating each row's run texts reproduces the

@@ -76,7 +76,7 @@ pub(crate) fn props_to_style_map(props: HashMap<String, serde_json::Value>) -> (
     let mut style = Style::new();
     let mut map = PropMap::new();
     for (key, value) in props {
-        match apply_style_key(style, &key, &value) {
+        match apply_style_key(style.clone(), &key, &value) {
             Some(updated) => style = updated,
             None => {
                 let Some(pv) = json_to_prop_value(value) else {
@@ -121,6 +121,11 @@ pub(crate) fn apply_style_key(mut style: Style, key: &str, value: &serde_json::V
                 style = style.bg(parse_color(s));
             }
         }
+        "href" => {
+            if let serde_json::Value::String(s) = value {
+                style = style.hyperlink(Some(s.as_str().into()));
+            }
+        }
         "bold" => style = apply_modifier(style, value, Modifiers::BOLD),
         "dim" => style = apply_modifier(style, value, Modifiers::DIM),
         "italic" => style = apply_modifier(style, value, Modifiers::ITALIC),
@@ -142,7 +147,8 @@ pub(crate) fn apply_modifier(style: Style, value: &serde_json::Value, modifier: 
     if value.as_bool() == Some(true) {
         style.add_modifier(modifier)
     } else {
-        style.modifier(style.modifiers.remove(modifier))
+        let removed = style.modifiers.remove(modifier);
+        style.modifier(removed)
     }
 }
 
@@ -196,6 +202,44 @@ pub(crate) fn parse_border_style(s: &str) -> BorderStyle {
         "double" => BorderStyle::Double,
         "thick" => BorderStyle::Thick,
         _ => BorderStyle::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn href_lifts_into_style_hyperlink() {
+        let (style, _) = props_to_style_map(HashMap::from([
+            ("href".to_string(), serde_json::json!("https://example.com")),
+            ("fg".to_string(), serde_json::json!("#ff0000")),
+        ]));
+        assert_eq!(style.hyperlink.as_deref(), Some("https://example.com"));
+        assert_eq!(style.fg, Color::Rgb(255, 0, 0), "other keys still lift");
+        assert!(!style.hyperlink.as_deref().is_none());
+    }
+
+    #[test]
+    fn href_absent_or_non_string_leaves_hyperlink_none() {
+        // No href key: the style carries no hyperlink.
+        let (plain, _) = props_to_style_map(HashMap::from([("fg".to_string(), serde_json::json!("#ff0000"))]));
+        assert!(plain.hyperlink.is_none());
+
+        // A non-string href value is dropped, exactly like other style keys.
+        let (non_string, _) = props_to_style_map(HashMap::from([("href".to_string(), serde_json::json!(42))]));
+        assert!(non_string.hyperlink.is_none());
+    }
+
+    #[test]
+    fn single_key_href_merge_matches_full_map() {
+        let (full, _) = props_to_style_map(HashMap::from([
+            ("href".to_string(), serde_json::json!("https://example.com")),
+        ]));
+        let mut merged = Style::new();
+        merged = apply_style_key(merged, "href", &serde_json::json!("https://example.com")).unwrap();
+        assert_eq!(merged, full);
+        assert_eq!(merged.hyperlink.as_deref(), Some("https://example.com"));
     }
 }
 

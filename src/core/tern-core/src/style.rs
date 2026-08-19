@@ -80,7 +80,7 @@ pub enum BorderStyle {
 }
 
 /// The visual style of a cell or a scene node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct Style {
     /// Foreground color.
     pub fg: Color,
@@ -95,6 +95,11 @@ pub struct Style {
     /// `fg` — the pre-existing behavior — so a style without a border color
     /// paints byte-identically to before the field existed.
     pub border_color: Color,
+    /// The hyperlink target (a URL) threaded through from a Text/span `href`
+    /// to the cells painted with this style. `None` — the default — paints
+    /// plain text. The field participates in style equality, so a hyperlink
+    /// change splits terminal runs at the link boundary.
+    pub hyperlink: Option<Box<str>>,
 }
 
 impl Style {
@@ -106,6 +111,7 @@ impl Style {
             modifiers: Modifiers::EMPTY,
             border_style: BorderStyle::None,
             border_color: Color::Default,
+            hyperlink: None,
         }
     }
 
@@ -145,6 +151,16 @@ impl Style {
         self.border_color = border_color;
         self
     }
+
+    /// Builder: set the hyperlink target. `None` (the default) clears it,
+    /// painting plain text.
+    ///
+    /// Not `const` like the other builders: assigning over the previous
+    /// `Option<Box<str>>` drops the old allocation, which is not const-legal.
+    pub fn hyperlink(mut self, hyperlink: Option<Box<str>>) -> Self {
+        self.hyperlink = hyperlink;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -178,6 +194,7 @@ mod tests {
         assert_eq!(s.bg, Color::Default);
         assert_eq!(s.border_style, BorderStyle::None);
         assert_eq!(s.border_color, Color::Default); // unset by default
+        assert!(s.hyperlink.is_none()); // unset by default
         assert!(s.modifiers.is_empty());
 
         let s2 = Style::new()
@@ -193,5 +210,34 @@ mod tests {
         assert_eq!(s2.border_color, Color::Rgb(9, 8, 7));
         assert_eq!(Color::Rgb(1, 2, 3).rgb(), Some((1, 2, 3)));
         assert_eq!(Color::Default.rgb(), None);
+    }
+
+    #[test]
+    fn hyperlink_round_trip() {
+        let s = Style::new().hyperlink(Some("https://example.com".into()));
+        assert_eq!(s.hyperlink.as_deref(), Some("https://example.com"));
+        // Field readback equals a literal-constructed style.
+        let literal = Style {
+            hyperlink: Some("https://example.com".into()),
+            ..Style::new()
+        };
+        assert_eq!(s, literal);
+        // Clone preserves the hyperlink.
+        let cloned = s.clone();
+        assert_eq!(cloned.hyperlink.as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn hyperlink_participates_in_equality() {
+        let a = Style::new().hyperlink(Some("a".into()));
+        let b = Style::new().hyperlink(Some("b".into()));
+        assert_ne!(a, b, "different hyperlinks differ");
+
+        let linked = Style::new().hyperlink(Some("https://example.com".into()));
+        let plain = Style::new();
+        assert_ne!(linked, plain, "hyperlink vs none differ");
+
+        let same_a = Style::new().hyperlink(Some("a".into()));
+        assert_eq!(a, same_a, "equal hyperlinks are equal");
     }
 }

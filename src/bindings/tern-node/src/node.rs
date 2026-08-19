@@ -62,7 +62,7 @@ impl NodeHandle {
         }
         let mut scene = parent_scene.lock().expect("scene poisoned");
         let id = scene
-            .add_child(parent_id, child_inner.kind, child_inner.style)
+            .add_child(parent_id, child_inner.kind, child_inner.style.clone())
             .ok_or_else(|| Error::from_reason("parent node not found in scene"))?;
         scene.set_props(id, child_inner.props.clone());
         drop(scene);
@@ -102,7 +102,7 @@ impl NodeHandle {
             }
             (
                 child_inner.kind,
-                child_inner.style,
+                child_inner.style.clone(),
                 child_inner.props.clone(),
             )
         };
@@ -169,7 +169,7 @@ impl NodeHandle {
     pub fn set_props(&self, props: HashMap<String, serde_json::Value>) -> Result<()> {
         let (style, map) = props_to_style_map(props);
         let mut inner = self.inner.lock().expect("node inner poisoned");
-        inner.style = style;
+        inner.style = style.clone();
         inner.props = map.clone();
         if let Some(id) = inner.id {
             let mut scene = inner.scene.lock().expect("scene poisoned");
@@ -196,7 +196,7 @@ impl NodeHandle {
         let Some(id) = inner.id else {
             // Detached template: record the single-key change for
             // materialization (`add_child` snapshots `kind`/`style`/`props`).
-            if let Some(style) = apply_style_key(inner.style, &key, &value) {
+            if let Some(style) = apply_style_key(inner.style.clone(), &key, &value) {
                 inner.style = style;
             } else if let Some(pv) = json_to_prop_value(value) {
                 inner.props.insert(key, pv);
@@ -207,9 +207,9 @@ impl NodeHandle {
         // borrowed while the handle's own fields are mutated.
         let scene_arc = inner.scene.clone();
         let mut scene = scene_arc.lock().expect("scene poisoned");
-        if let Some(style) = apply_style_key(inner.style, &key, &value) {
+        if let Some(style) = apply_style_key(inner.style.clone(), &key, &value) {
             if style != inner.style {
-                inner.style = style;
+                inner.style = style.clone();
                 scene.set_style(id, style);
             }
             return Ok(());

@@ -376,7 +376,7 @@ impl Compositor {
                     scene.update(
                         scene_root,
                         Some(NodeKind::Box),
-                        Some(frame.style),
+                        Some(frame.style.clone()),
                         Some(frame.to_props())
                     ),
                     "scene root always exists"

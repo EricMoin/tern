@@ -56,14 +56,14 @@ impl Renderable {
     pub(crate) fn materialize(&self, scene: &mut Scene, parent: NodeId) -> NodeId {
         match self {
             Renderable::Text(t) => scene
-                .add_text(parent, &t.content, t.style)
+                .add_text(parent, &t.content, t.style.clone())
                 .expect("text node materialized under an existing parent"),
             other => {
                 let frame = other
                     .root_box()
                     .expect("container renderables carry a root frame");
                 let id = scene
-                    .add_child(parent, NodeKind::Box, frame.style)
+                    .add_child(parent, NodeKind::Box, frame.style.clone())
                     .expect("container node materialized under an existing parent");
                 for (key, value) in frame.to_props() {
                     scene.set_prop(id, &key, value);

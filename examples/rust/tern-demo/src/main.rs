@@ -75,7 +75,7 @@ fn run(backend: &Backend) -> io::Result<()> {
         caret.y = caret.y.min(h.saturating_sub(1));
         let mut buffer = compositor.paint(build_scene(), Size::new(w, h));
         // Paint the styled block caret into the frame so the diff carries it.
-        buffer.render_caret(caret);
+        buffer.render_caret(caret.clone());
         // Diff against the previous frame. On the first frame — or after a
         // resize, when the screen was cleared — diff against a blank buffer
         // so every painted cell is emitted.
@@ -84,7 +84,7 @@ fn run(backend: &Backend) -> io::Result<()> {
             _ => buffer.diff_from(&Buffer::new(w, h)),
         };
         // Flush the frame, then park and show/hide the terminal caret.
-        backend.flush_diff_with_cursor(&updates, caret)?;
+        backend.flush_diff_with_cursor(&updates, caret.clone())?;
         previous = Some(buffer);
         full_redraw = false;
 
@@ -102,16 +102,24 @@ fn run(backend: &Backend) -> io::Result<()> {
                 TernEvent::Key(key) if key.char == Some('s') => caret = caret.show(),
                 // Arrow keys move the caret, clamped to the buffer.
                 TernEvent::Key(key) if key.name == KeyName::Up => {
-                    caret = caret.at(caret.x, caret.y.saturating_sub(1));
+                    let x = caret.x;
+                    let y = caret.y.saturating_sub(1);
+                    caret = caret.at(x, y);
                 }
                 TernEvent::Key(key) if key.name == KeyName::Down => {
-                    caret = caret.at(caret.x, caret.y.saturating_add(1).min(h.saturating_sub(1)));
+                    let x = caret.x;
+                    let y = caret.y.saturating_add(1).min(h.saturating_sub(1));
+                    caret = caret.at(x, y);
                 }
                 TernEvent::Key(key) if key.name == KeyName::Left => {
-                    caret = caret.at(caret.x.saturating_sub(1), caret.y);
+                    let x = caret.x.saturating_sub(1);
+                    let y = caret.y;
+                    caret = caret.at(x, y);
                 }
                 TernEvent::Key(key) if key.name == KeyName::Right => {
-                    caret = caret.at(caret.x.saturating_add(1).min(w.saturating_sub(1)), caret.y);
+                    let x = caret.x.saturating_add(1).min(w.saturating_sub(1));
+                    let y = caret.y;
+                    caret = caret.at(x, y);
                 }
                 // A resize clears the stale frame and repaints fully.
                 TernEvent::Resize { .. } => {

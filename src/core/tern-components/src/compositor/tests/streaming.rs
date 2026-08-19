@@ -49,14 +49,14 @@ fn golden_streaming_text_spans_styles_in_12x3() {
         s,
         Span {
             text: "abc".to_string(),
-            style: red,
+            style: red.clone(),
         }
     ));
     assert!(scene.append_span(
         s,
         Span {
             text: "def".to_string(),
-            style: bold,
+            style: bold.clone(),
         }
     ));
 
@@ -69,10 +69,10 @@ fn golden_streaming_text_spans_styles_in_12x3() {
     //   (blank row)
     let mut expected = Buffer::new(12, 3);
     for (x, ch) in "abc".chars().enumerate() {
-        expected.set_char(x as u16, 0, ch, red);
+        expected.set_char(x as u16, 0, ch, red.clone());
     }
     for (x, ch) in "def".chars().enumerate() {
-        expected.set_char(x as u16 + 3, 0, ch, bold);
+        expected.set_char(x as u16 + 3, 0, ch, bold.clone());
     }
 
     assert_eq!(buffer, expected);

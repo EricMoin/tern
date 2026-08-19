@@ -198,7 +198,7 @@ impl Panels {
 
     /// The container frame as a bare box (style + layout props, no children).
     pub(crate) fn frame(&self) -> Box {
-        let mut b = Box::new(self.style, vec![]).gap(self.gap);
+        let mut b = Box::new(self.style.clone(), vec![]).gap(self.gap);
         match self.direction.as_deref() {
             Some("row") => b = b.row(),
             _ => b = b.column(),
@@ -211,7 +211,7 @@ impl Panels {
         let (expanded_glyph, collapsed_glyph) = self.toggle_glyphs;
         for panel in &self.panels {
             let id = scene
-                .add_child(parent, NodeKind::Box, panel.body_style)
+                .add_child(parent, NodeKind::Box, panel.body_style.clone())
                 .expect("panel box under container");
             // A panel stacks its header above its body: the default flex
             // direction is row, which would sit them side by side.
@@ -220,7 +220,7 @@ impl Panels {
                 .add_text(
                     id,
                     &panel.header_text(expanded_glyph, collapsed_glyph),
-                    panel.header_style,
+                    panel.header_style.clone(),
                 )
                 .expect("panel header under panel");
             if !panel.collapsed {

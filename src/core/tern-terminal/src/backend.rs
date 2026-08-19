@@ -16,7 +16,13 @@
 //! run to the next, and a run is closed by any style change or column gap.
 //! Within one flush, a run whose style equals the previously queued run's
 //! skips the redundant SGR reset/re-apply — the terminal's style state is
-//! already that style — and emits only its `MoveTo` and `Print`.
+//! already that style — and emits only its `MoveTo` and `Print`. A run whose
+//! style carries a hyperlink wraps its `Print` in OSC 8 sequences — the open
+//! (`\x1b]8;;<url>\x1b\\`) written raw before the characters and the close
+//! (`\x1b]8;;\x1b\\`) raw after them — via the same seam as the OSC 52
+//! clipboard write ([`set_clipboard_to`]); crossterm has no hyperlink
+//! command. The close follows every linked run, so a later unlinked run can
+//! never inherit the link.
 //!
 //! An empty diff short-circuits the flush: when a frame paints nothing and
 //! the caret would be parked where the previous flush left it, nothing is
@@ -561,7 +567,8 @@ fn queue_cells<W: Write>(w: &mut W, updates: &[CellUpdate]) -> io::Result<()> {
 /// breaks, or when its last member's printed text advances the cursor by
 /// other than one column (a 2-column cluster lead or a combining mark) — so a
 /// later member can never land on the wrong column. A masked NUL continuation
-/// cell joins its run as a space.
+/// cell joins its run as a space. A run whose style carries a hyperlink wraps
+/// its text in OSC 8 open/close sequences (see [`Run::queue`]).
 struct Run {
     /// Column of the run's first member (the [`MoveTo`] target).
     x: u16,
@@ -584,7 +591,7 @@ impl Run {
         Run {
             x: update.x,
             y: update.y,
-            style: update.style,
+            style: update.style.clone(),
             last_x: update.x,
             last_advance: cell_advance(update),
             text: cell_text(update),
@@ -618,18 +625,38 @@ impl Run {
     /// so the run's characters are queued directly. Otherwise (including the
     /// first run of a flush) the full reset + style block is queued and
     /// `last_style` is updated.
+    ///
+    /// A run whose style carries a hyperlink wraps its `Print` in OSC 8
+    /// sequences: the open (`\x1b]8;;<url>\x1b\\`) is written raw before the
+    /// characters and the close (`\x1b]8;;\x1b\\`) raw after them. crossterm
+    /// has no hyperlink command, so the escapes go through the `Write`
+    /// directly (the same seam as [`set_clipboard_to`]); they never touch
+    /// the run's text, so they cannot split runs or leak into `cell_text`.
+    /// Because the close follows every linked run, a later unlinked run —
+    /// whose style necessarily differs, since the hyperlink participates in
+    /// [`Style`] equality — can never inherit the link.
     fn queue<W: Write>(&self, w: &mut W, last_style: &mut Option<Style>) -> io::Result<()> {
         w.queue(MoveTo(self.x, self.y))?;
-        if *last_style != Some(self.style) {
+        if last_style.as_ref() != Some(&self.style) {
             // SGR 0 resets colors and attributes; then the run's exact style
             // is applied once, so nothing leaks between runs.
             w.queue(SetAttribute(Attribute::Reset))?;
             queue_color(w, self.style.fg, true)?;
             queue_color(w, self.style.bg, false)?;
             queue_modifiers(w, self.style.modifiers)?;
-            *last_style = Some(self.style);
+            *last_style = Some(self.style.clone());
+        }
+        if let Some(url) = &self.style.hyperlink {
+            // OSC 8 hyperlink open: ESC ] 8 ; ; <url> ST.
+            w.write_all(b"\x1b]8;;")?;
+            w.write_all(url.as_bytes())?;
+            w.write_all(b"\x1b\\")?;
         }
         w.queue(Print(self.text.as_str()))?;
+        if self.style.hyperlink.is_some() {
+            // OSC 8 hyperlink close (empty parameters): ESC ] 8 ; ; ST.
+            w.write_all(b"\x1b]8;;\x1b\\")?;
+        }
         Ok(())
     }
 }
@@ -893,8 +920,8 @@ mod tests {
         let style = Style::new();
         let out = flush(
             &[
-                cluster_update(0, 0, '👨', "👨‍👩‍👧‍👦", style, 2), // cluster lead
-                update(1, 0, '\0', style, 0, true),             // its mask
+                cluster_update(0, 0, '👨', "👨‍👩‍👧‍👦", style.clone(), 2), // cluster lead
+                update(1, 0, '\0', style.clone(), 0, true),               // its mask
                 update(2, 0, 'x', style, 1, false),
             ],
             (0, 0),
@@ -918,7 +945,7 @@ mod tests {
         let style = Style::new();
         let out = flush(
             &[
-                cluster_update(0, 0, 'e', "e\u{301}", style, 1), // combining seq
+                cluster_update(0, 0, 'e', "e\u{301}", style.clone(), 1), // combining seq
                 update(1, 0, 'a', style, 1, false),
             ],
             (0, 0),
@@ -994,7 +1021,7 @@ mod tests {
         let fg1 = Style::new().fg(TernColor::Indexed(1));
         let out = flush(
             &[
-                update(0, 0, 'a', fg1, 1, false),
+                update(0, 0, 'a', fg1.clone(), 1, false),
                 update(2, 0, 'b', fg1, 1, false),
             ],
             (0, 0),
@@ -1022,7 +1049,7 @@ mod tests {
         let fg2 = Style::new().fg(TernColor::Indexed(2));
         let out = flush(
             &[
-                update(0, 0, 'a', fg1, 1, false),
+                update(0, 0, 'a', fg1.clone(), 1, false),
                 update(2, 0, 'b', fg2, 1, false),
                 update(4, 0, 'c', fg1, 1, false),
             ],
@@ -1039,6 +1066,44 @@ mod tests {
             s,
             "\x1b[1;1H\x1b[0m\x1b[38;5;1ma\x1b[1;3H\x1b[0m\x1b[38;5;2mb\x1b[1;5H\x1b[0m\x1b[38;5;1mc\x1b[1;1H\x1b[0m\x1b[0m",
             "got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn flush_diff_wraps_linked_run_in_osc8_hyperlink() {
+        // A cell styled with a hyperlink is its own run whose Print is
+        // wrapped: the OSC 8 open (ESC ] 8 ; ; <url> ST) precedes the
+        // character and the close (ESC ] 8 ; ; ST) follows it — the raw
+        // escapes land between the run's SGR reset and the cursor park, via
+        // the same seam as the OSC 52 clipboard write.
+        let linked = Style::new().hyperlink(Some("https://example.com".into()));
+        let out = flush(&[update(0, 0, 'l', linked, 1, false)], (0, 0));
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[1;1H\x1b[0m\x1b]8;;https://example.com\x1b\\l\x1b]8;;\x1b\\\x1b[1;1H\x1b[0m\x1b[0m",
+            "the linked text must be wrapped in OSC 8 open/close"
+        );
+    }
+
+    #[test]
+    fn flush_diff_unlinked_run_emits_no_osc8() {
+        // A linked cell followed by an unlinked adjacent cell: the styles
+        // differ (the hyperlink participates in style equality), so each is
+        // its own run. The linked run wraps its 'l' in OSC 8 and closes
+        // before the next run starts; the unlinked run prints with no OSC 8
+        // sequence at all — the link cannot leak onto it.
+        let linked = Style::new().hyperlink(Some("https://example.com".into()));
+        let out = flush(
+            &[
+                update(0, 0, 'l', linked, 1, false),
+                update(1, 0, 'p', Style::new(), 1, false),
+            ],
+            (0, 0),
+        );
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[1;1H\x1b[0m\x1b]8;;https://example.com\x1b\\l\x1b]8;;\x1b\\\x1b[1;2H\x1b[0mp\x1b[1;1H\x1b[0m\x1b[0m",
+            "only the linked run wraps in OSC 8"
         );
     }
 

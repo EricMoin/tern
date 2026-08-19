@@ -456,6 +456,10 @@ interface FakeCellStyle {
   underline?: boolean;
   reversed?: boolean;
   strikethrough?: boolean;
+  /** The hyperlink target, when the leaf's props carry an `href` style key —
+   * the fake's mirror of the engine threading `href` into the style's
+   * hyperlink and the styled snapshot surfacing it as `hyperlink`. */
+  hyperlink?: string;
 }
 
 /** The style lifted from a fake text leaf's props, or `null` for an
@@ -474,13 +478,18 @@ function leafStyle(leaf: FakeNodeHandle | undefined): FakeCellStyle | null {
   if (p.underline === true) style.underline = true;
   if (p.reversed === true) style.reversed = true;
   if (p.strikethrough === true) style.strikethrough = true;
+  // The fake node's props carry the scene-facing `href` key (the JS layer
+  // translates the camelCase `hyperlink` alias, exactly like `border_color`).
+  if (typeof p.href === "string") style.hyperlink = p.href;
   return Object.keys(style).length === 0 ? null : style;
 }
 
 /** Whether two styled runs carry the same style — the merge rule behind
  * `render_to_buffer_styled` ("adjacent cells with identical style merge
  * into one run"), so `text` is excluded: the running run's text extends
- * instead of opening a new run. */
+ * instead of opening a new run. `hyperlink` participates like the other
+ * fields — mirroring the engine's style equality, where a hyperlink change
+ * splits runs at the link boundary. */
 function fakeRunStyleEqual(a: StyleRunJs, b: StyleRunJs): boolean {
   return (
     a.fg === b.fg &&
@@ -490,7 +499,8 @@ function fakeRunStyleEqual(a: StyleRunJs, b: StyleRunJs): boolean {
     a.italic === b.italic &&
     a.underline === b.underline &&
     a.reversed === b.reversed &&
-    a.strikethrough === b.strikethrough
+    a.strikethrough === b.strikethrough &&
+    a.hyperlink === b.hyperlink
   );
 }
 
@@ -1982,6 +1992,65 @@ Deno.test("Box borderColor paints the border cells' fg in snapshotStyled runs", 
   });
 });
 
+Deno.test("Text hyperlink paints the link target onto the styled run", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    // The canonical golden scene with a `hyperlink` on the inner text: the
+    // inner "Hi" run now carries `hyperlink: "https://example.com"` — the
+    // fake's mirror of the engine threading the `href` style key into the
+    // style's hyperlink and the styled snapshot surfacing it as `hyperlink`
+    // (like the real surface, the key is present only when set, so the
+    // border/padding cells stay unstyled and the run splits from them).
+    renderer.root.addChild(
+      Box(
+        { border_style: "rounded", padding: 1 },
+        Text({ text: "Hi", hyperlink: "https://example.com" }),
+      ),
+    );
+    const frame = renderer.snapshotStyled(6, 3);
+    const expected: StyleRunJs[][] = [
+      [{ text: "┌──┐  " }],
+      [{ text: "│" }, { text: "Hi", hyperlink: "https://example.com" }, { text: "│  " }],
+      [{ text: "└──┘  " }],
+    ];
+    if (!styledFramesEqual(frame, expected)) {
+      throw new Error(`unexpected styled runs: ${JSON.stringify(frame)}`);
+    }
+    // The camelCase alias reaches the native layer as the `href` style key
+    // (the key convert.rs recognizes): the fake node mirror carries `href`,
+    // and the alias is consumed — exactly like `border_color`.
+    const boxNode = renderer.root.children[0];
+    if (boxNode === undefined) throw new Error("the box child must be materialized");
+    const textNode = boxNode.children[0];
+    if (textNode === undefined) throw new Error("the text leaf must be materialized");
+    if (textNode.props.href !== "https://example.com") {
+      throw new Error(`href = ${JSON.stringify(textNode.props.href)}`);
+    }
+    if ("hyperlink" in textNode.props) {
+      throw new Error(`the camelCase alias must be consumed, got ${JSON.stringify(textNode.props)}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("appendSpan hyperlink translates the camelCase alias to the href style key", () => {
+  // The span-style path goes through the same `props_to_style_map` as node
+  // props (the binding recognizes `href`, not `hyperlink`), so the alias is
+  // translated at ingestion: the recorded span carries the scene-facing key.
+  const node = StreamingText();
+  node.appendSpan("tern", { hyperlink: "https://example.com", bold: true });
+  const first = node.spans[0];
+  if (first === undefined) throw new Error("the recorded span is missing");
+  if (first.text !== "tern") throw new Error(`text = ${JSON.stringify(first.text)}`);
+  if (first.style?.href !== "https://example.com") {
+    throw new Error(`href = ${JSON.stringify(first.style?.href)}`);
+  }
+  if ("hyperlink" in (first.style ?? {})) {
+    throw new Error(`the camelCase alias must be consumed, got ${JSON.stringify(first.style)}`);
+  }
+  if (first.style?.bold !== true) throw new Error("other style keys pass through untouched");
+});
+
 Deno.test("Renderer.snapshotStyled defaults the viewport to the native shared size", () => {
   withFakeAddon(() => {
     const renderer = createRenderer();
@@ -2040,6 +2109,20 @@ Deno.test("styledFramesEqual compares row counts, run counts, run text and style
   // one that omits it (the binding only sets modifiers when applied).
   if (styledFramesEqual([[{ text: "Hi", fg: "#ff0000" }]], [[{ text: "Hi", fg: "#ff0000", bold: true }]])) {
     throw new Error("differing bold must be unequal");
+  }
+  // Differing hyperlink field — a linked run differs from a plain one (the
+  // engine's style equality participates in the hyperlink, so runs split at
+  // link boundaries), and the target itself is compared.
+  if (styledFramesEqual([[{ text: "Hi" }]], [[{ text: "Hi", hyperlink: "https://example.com" }]])) {
+    throw new Error("differing hyperlink must be unequal");
+  }
+  if (
+    styledFramesEqual(
+      [[{ text: "Hi", hyperlink: "https://a.example" }]],
+      [[{ text: "Hi", hyperlink: "https://b.example" }]],
+    )
+  ) {
+    throw new Error("differing hyperlink targets must be unequal");
   }
   // Differing run count within a row.
   if (styledFramesEqual([[{ text: "Hi" }]], [[{ text: "H" }, { text: "i" }]])) {
