@@ -63,7 +63,7 @@ tern ships as four npm packages:
 
 | Package | What it is |
 |---------|------------|
-| `tern-node` | The native addon (Rust core, napi binding). Main package plus 5 per-platform sub-packages via `optionalDependencies`. |
+| `tern-node` | The native addon (Rust core, napi binding). Main package plus 11 per-platform sub-packages via `optionalDependencies`. |
 | `@tern-tui/core` | TypeScript bindings over the addon: renderer, scene nodes, element factories, focus, theme, frame snapshots. Depends on `tern-node`. |
 | `@tern-tui/react` | react-reconciler custom renderer — host components, hooks, `ThemeProvider`. Peers: `react` `^19.2.0`, `react-reconciler` `^0.33.0`. |
 | `@tern-tui/solid` | SolidJS universal custom renderer — element factories, subscriptions, `setTheme`. Depends on `solid-js`. |
@@ -198,22 +198,32 @@ renderer.destroy();
 
 ### Supported platforms
 
-The native addon follows the napi-rs distribution model: the `tern-node`
-root package declares per-platform packages in `optionalDependencies`, and
-the generated loader picks the one matching the running system. The release
-matrix builds these five targets:
+The native addon follows the napi-rs distribution model: the `@tern-tui/node`
+root package (binary name `tern-node`) declares per-platform packages in
+`optionalDependencies`, and the generated loader picks the one matching the
+running system. The release matrix builds eleven targets:
 
-| Platform | Rust target triple | npm package |
-|----------|--------------------|-------------|
-| Linux x64 (glibc) | `x86_64-unknown-linux-gnu` | `tern-node-linux-x64-gnu` |
-| Linux arm64 (glibc) | `aarch64-unknown-linux-gnu` | `tern-node-linux-arm64-gnu` |
-| macOS x64 (Intel) | `x86_64-apple-darwin` | `tern-node-darwin-x64` |
-| macOS arm64 (Apple Silicon) | `aarch64-apple-darwin` | `tern-node-darwin-arm64` |
-| Windows x64 (MSVC) | `x86_64-pc-windows-msvc` | `tern-node-win32-x64-msvc` |
+| Platform | Rust target triple | npm package | CI verification |
+|----------|--------------------|-------------|-----------------|
+| Linux x64 (glibc) | `x86_64-unknown-linux-gnu` | `@tern-tui/node-linux-x64-gnu` | native load-check |
+| Linux arm64 (glibc) | `aarch64-unknown-linux-gnu` | `@tern-tui/node-linux-arm64-gnu` | build-only |
+| Linux x64 (musl) | `x86_64-unknown-linux-musl` | `@tern-tui/node-linux-x64-musl` | build-only |
+| Linux arm64 (musl) | `aarch64-unknown-linux-musl` | `@tern-tui/node-linux-arm64-musl` | build-only |
+| FreeBSD x64 | `x86_64-unknown-freebsd` | `@tern-tui/node-freebsd-x64` | build-only |
+| Linux riscv64 (glibc) | `riscv64gc-unknown-linux-gnu` | `@tern-tui/node-linux-riscv64-gnu` | build-only |
+| Android arm64 | `aarch64-linux-android` | `@tern-tui/node-android-arm64` | build-only |
+| macOS x64 (Intel) | `x86_64-apple-darwin` | `@tern-tui/node-darwin-x64` | build-only |
+| macOS arm64 (Apple Silicon) | `aarch64-apple-darwin` | `@tern-tui/node-darwin-arm64` | native load-check |
+| Windows x64 (MSVC) | `x86_64-pc-windows-msvc` | `@tern-tui/node-win32-x64-msvc` | native load-check |
+| Windows arm64 (MSVC) | `aarch64-pc-windows-msvc` | `@tern-tui/node-win32-arm64-msvc` | build-only |
 
-When the platform package is missing, the loader falls back to a locally
-built `tern-node.<platform>-<arch>.node`. Systems outside the matrix (musl
-Linux, Windows arm64, ...) are not covered — build the addon locally.
+A native load-check runs only on rows where the runner arch matches the target
+(linux-gnu x64, darwin arm64, win32-x64 msvc); every other row is build-only —
+the binary is cross-compiled and uploaded, but not loaded in CI. When the
+platform package is missing, the loader falls back to a locally built
+`tern-node.<platform>-<arch>.node`. On a build-only row, verify the binding on
+a matching runtime (e.g. a `node:alpine` container for musl, the
+`windows-11-arm` hosted runner for Windows arm64, on-device for Android).
 
 ### Troubleshooting
 
@@ -361,15 +371,17 @@ Publishing is fully automated — nothing is published on ordinary pushes or
 by hand. Pushing a `v*` tag (e.g. `v0.1.0`) — or running
 `.github/workflows/release.yml` manually — triggers the release:
 
-1. **Build** — the napi-rs matrix compiles the `tern-node` addon for all
-   five targets in `napi.targets` (natively on each host runner, or via
-   `napi-cross` for Linux arm64), load-checks the native rows, and uploads
-   each binary as a workflow artifact.
+1. **Build** — the napi-rs matrix compiles the `tern-node` addon for every
+   target in `napi.targets` (natively where the runner arch matches, or
+   cross-compiled: apt cross gcc for Linux arm64, zig for musl and FreeBSD,
+   the NDK for Android, MSVC cross-linking for Windows arm64), load-checks
+   the rows whose runner arch matches the target, and uploads each binary as
+   a workflow artifact.
 2. **Release** — collects the binaries into the per-platform packages
-   (`napi create-npm-dirs` + `napi artifacts`), publishes `tern-node` (its
-   `prepublishOnly` publishes the `tern-node-<platform>` packages first),
-   then builds and publishes `@tern-tui/core` → `@tern-tui/react` → `@tern-tui/solid`
-   in dependency order.
+   (`napi create-npm-dirs` + `napi artifacts`), publishes `@tern-tui/node`
+   (its `prepublishOnly` publishes the `@tern-tui/node-<platform>` packages
+   first), then builds and publishes `@tern-tui/core` → `@tern-tui/react` →
+   `@tern-tui/solid` in dependency order.
 
 The workflow requires the `NPM_TOKEN` secret — an npm automation token with
 publish rights on the `@tern-tui/*` and `tern-node*` names — and declares
