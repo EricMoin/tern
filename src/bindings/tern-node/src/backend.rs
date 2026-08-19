@@ -14,6 +14,16 @@ pub(crate) trait RenderBackend: Send + Sync {
     /// the number of bytes queued to the terminal (the frame's ANSI
     /// escape-sequence stream; 0 for a fully suppressed frame).
     fn flush_diff(&mut self, updates: &[CellUpdate], cursor_pos: (u16, u16)) -> io::Result<usize>;
+    /// Flush a diff of cell updates to the terminal and position the caret
+    /// at the [`Cursor`]'s (`x`, `y`): apply its shape / blinking
+    /// `SetCursorStyle` (nothing for the default steady block) and show or
+    /// hide it per its visibility. Returns the number of bytes queued, like
+    /// [`flush_diff`](RenderBackend::flush_diff).
+    fn flush_diff_with_cursor(
+        &mut self,
+        updates: &[CellUpdate],
+        cursor: Cursor,
+    ) -> io::Result<usize>;
     /// Set the terminal window title (OSC 0).
     fn set_title(&self, title: &str) -> io::Result<()>;
     /// Copy `text` to the system clipboard (OSC 52).
@@ -35,6 +45,14 @@ impl RenderBackend for Backend {
 
     fn flush_diff(&mut self, updates: &[CellUpdate], cursor_pos: (u16, u16)) -> io::Result<usize> {
         Backend::flush_diff(self, updates, cursor_pos)
+    }
+
+    fn flush_diff_with_cursor(
+        &mut self,
+        updates: &[CellUpdate],
+        cursor: Cursor,
+    ) -> io::Result<usize> {
+        Backend::flush_diff_with_cursor(self, updates, cursor)
     }
 
     fn set_title(&self, title: &str) -> io::Result<()> {
@@ -91,6 +109,16 @@ impl RenderBackend for HeadlessBackend {
         &mut self,
         _updates: &[CellUpdate],
         _cursor_pos: (u16, u16),
+    ) -> io::Result<usize> {
+        // Headless frames are never flushed to a terminal; report 0 bytes so
+        // `last_flush_bytes` stays honest about the absent I/O.
+        Ok(0)
+    }
+
+    fn flush_diff_with_cursor(
+        &mut self,
+        _updates: &[CellUpdate],
+        _cursor: Cursor,
     ) -> io::Result<usize> {
         // Headless frames are never flushed to a terminal; report 0 bytes so
         // `last_flush_bytes` stays honest about the absent I/O.

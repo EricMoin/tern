@@ -4,7 +4,8 @@
 //! tern-components:
 //!
 //! * [`Cell`] / [`Style`] / [`Color`] — the terminal cell model
-//! * [`Cursor`] — the frame's text cursor: position, visibility, render style
+//! * [`Cursor`] / [`CursorShape`] — the frame's text cursor: position,
+//!   visibility, shape (block / bar / underline), blinking, render style
 //! * [`Buffer`] + [`diff`] — the compositor's 2D cell grid and the
 //!   multi-width-aware minimal diff between two buffers
 //! * [`Region`] — a bounded drawing region (clip rect + scroll offset) for
@@ -32,7 +33,7 @@ pub mod style;
 pub use buffer::{diff, Buffer, Region};
 pub use cell::{char_width, cluster_width, clusters, strip_escapes, Cell, CellUpdate, Cluster};
 pub use color::Color;
-pub use cursor::Cursor;
+pub use cursor::{Cursor, CursorShape};
 pub use layout::LayoutEngine;
 pub use rect::{Rect, Size};
 pub use scene::{NodeId, NodeKind, PropMap, PropValue, Scene, SceneNode, Span};

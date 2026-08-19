@@ -324,6 +324,16 @@ class FakeTuiRenderer {
   clear_selection(): void {
     this.selection = null;
   }
+  /** The renderer's caret override: `{ x, y, shape, visible, blink }` in
+   * native terms, or `null` when no cursor is set (the legacy position-only
+   * flush). Mirrors the real per-renderer cursor state. */
+  cursor: { x: number; y: number; shape: string; visible: boolean; blink: boolean } | null = null;
+  set_cursor(x: number, y: number, shape: string, visible: boolean, blink: boolean): void {
+    this.cursor = { x, y, shape, visible, blink };
+  }
+  clear_cursor(): void {
+    this.cursor = null;
+  }
   /** The text of the current selection, extracted from the last painted
    * rows: row-major, each display column contributing its cell text (a
    * wide glyph's continuation column is already a space in the fake's
@@ -1458,6 +1468,57 @@ Deno.test("renderer setSelection and clearSelection route to the native addon", 
     renderer.clearSelection();
     if (native.selection !== null) {
       throw new Error("clearSelection must clear the native selection");
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("renderer setCursor and clearCursor route to the native addon", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const native = lastFakeRenderer;
+    if (native === null) throw new Error("fake renderer not constructed");
+    renderer.setCursor({ x: 3, y: 2, shape: "bar", visible: true, blink: true });
+    if (native.cursor === null) throw new Error("cursor not set on native");
+    if (
+      native.cursor.x !== 3 || native.cursor.y !== 2 ||
+      native.cursor.shape !== "bar" ||
+      native.cursor.visible !== true ||
+      native.cursor.blink !== true
+    ) {
+      throw new Error(`native cursor = ${JSON.stringify(native.cursor)}`);
+    }
+    renderer.clearCursor();
+    if (native.cursor !== null) {
+      throw new Error("clearCursor must clear the native cursor");
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("renderer setCursor forwards every shape and visibility", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const native = lastFakeRenderer;
+    if (native === null) throw new Error("fake renderer not constructed");
+    renderer.setCursor({ x: 0, y: 0, shape: "underline", visible: false, blink: false });
+    if (native.cursor === null) throw new Error("cursor not set on native");
+    if (
+      native.cursor.shape !== "underline" || native.cursor.visible !== false ||
+      native.cursor.blink !== false
+    ) {
+      throw new Error(`native cursor = ${JSON.stringify(native.cursor)}`);
+    }
+    renderer.setCursor({ x: 7, y: 1, shape: "block", visible: true, blink: false });
+    const cursor = native.cursor;
+    if (cursor === null) throw new Error("cursor not set on native");
+    // Widen through locals so later comparisons are not affected by the
+    // narrowing from the earlier `underline` / `false` checks.
+    const shape: string = cursor.shape;
+    const visible: boolean = cursor.visible;
+    const blink: boolean = cursor.blink;
+    if (shape !== "block" || visible !== true || blink !== false) {
+      throw new Error(`native cursor = ${JSON.stringify(cursor)}`);
     }
     renderer.destroy();
   });

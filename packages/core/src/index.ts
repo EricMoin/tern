@@ -6366,6 +6366,38 @@ export class Renderer {
   }
 
   /**
+   * Set the renderer's caret override: position (`x`, `y`), shape
+   * (`"block"` / `"bar"` / `"underline"`), visibility, and blinking, all in
+   * viewport cells / DECSCUSR terms. The next `render()` (which the cursor
+   * edit forces) flushes through the cursor-aware path: the frame diff,
+   * then `MoveTo` + `SetCursorStyle` (emitted only for a non-default
+   * caret — a steady block is the terminal's default, so a `"block"` /
+   * non-blinking cursor adds nothing to the flush) + `Show`/`Hide`, so the
+   * hardware caret tracks the model. Throws on a destroyed renderer or an
+   * unrecognized shape.
+   */
+  setCursor(options: {
+    x: number;
+    y: number;
+    shape: "block" | "bar" | "underline";
+    visible: boolean;
+    blink: boolean;
+  }): void {
+    this.#native.set_cursor(options.x, options.y, options.shape, options.visible, options.blink);
+  }
+
+  /**
+   * Clear the renderer's caret override: the next `render()` (which the
+   * cursor edit forces) falls back to the legacy position-only flush — the
+   * frame diff with the caret parked at the top-left, no shape, blinking,
+   * or visibility control — byte-identical to a renderer that never called
+   * {@link setCursor}. Throws on a destroyed renderer.
+   */
+  clearCursor(): void {
+    this.#native.clear_cursor();
+  }
+
+  /**
    * The text of the renderer's current selection, extracted from the last
    * painted frame (the frame the most recent `render()` produced):
    * row-major and cluster/mask-aware — a multi-char cluster (ZWJ emoji,

@@ -162,18 +162,35 @@ fn headless_renderer() -> TuiRenderer {
 struct CountingBackend {
     size_calls: Arc<AtomicUsize>,
     flush_calls: Arc<AtomicUsize>,
+    cursor_flush_calls: Arc<AtomicUsize>,
     clipboard: Arc<Mutex<Option<String>>>,
+    /// The [`Cursor`] most recently passed to `flush_diff_with_cursor` (the
+    /// cursor-aware flush), or `None` before one. Lets tests assert that
+    /// `set_cursor` routes the render through the cursor-aware flush with the
+    /// right cursor.
+    flushed_cursor: Arc<Mutex<Option<Cursor>>>,
 }
 
 impl CountingBackend {
     /// Total terminal operations so far (size probes + flushes).
     fn ops(&self) -> usize {
-        self.size_calls.load(Ordering::Relaxed) + self.flush_calls.load(Ordering::Relaxed)
+        self.size_calls.load(Ordering::Relaxed)
+            + self.flush_calls.load(Ordering::Relaxed)
+            + self.cursor_flush_calls.load(Ordering::Relaxed)
     }
 
     /// The text most recently passed to `set_clipboard`, or `None`.
     fn clipboard(&self) -> Option<String> {
         self.clipboard.lock().expect("clipboard poisoned").clone()
+    }
+
+    /// The [`Cursor`] most recently passed to `flush_diff_with_cursor`, or
+    /// `None` before one.
+    fn flushed_cursor(&self) -> Option<Cursor> {
+        self.flushed_cursor
+            .lock()
+            .expect("flushed cursor poisoned")
+            .clone()
     }
 }
 
@@ -192,6 +209,16 @@ impl RenderBackend for CountingBackend {
         // Report a nominal byte count per flushed cell so the renderer's
         // `last_flush_bytes` counter is exercised; the tests only assert
         // on the call counters, never on this value.
+        Ok(updates.len())
+    }
+
+    fn flush_diff_with_cursor(
+        &mut self,
+        updates: &[CellUpdate],
+        cursor: Cursor,
+    ) -> io::Result<usize> {
+        self.cursor_flush_calls.fetch_add(1, Ordering::Relaxed);
+        *self.flushed_cursor.lock().expect("flushed cursor poisoned") = Some(cursor);
         Ok(updates.len())
     }
 
@@ -248,6 +275,8 @@ fn renderer_with_scene(backend: CountingBackend, scene: Arc<Mutex<Scene>>) -> Tu
         last_painted_viewport: NO_VIEWPORT,
         selection: None,
         last_painted_selection: None,
+        cursor: None,
+        last_painted_cursor: None,
         cached_size: None,
         last_flush_bytes: 0,
         #[cfg(any(feature = "push-events", feature = "poll-fallback"))]

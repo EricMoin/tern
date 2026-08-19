@@ -29,13 +29,16 @@
 //! queued or flushed; when only the park position moved, just the `MoveTo`
 //! is emitted (see [`flush_diff_to`]). The caret-aware frame flush carries
 //! the caret: [`flush_diff_with_cursor_to`] moves the terminal cursor to the
-//! frame's [`Cursor`] position and shows or hides it per its visibility, so
-//! the hardware caret tracks the model.
+//! frame's [`Cursor`] position, applies its shape / blinking via
+//! `SetCursorStyle` (emitted only for a non-default caret — a steady block
+//! is the terminal default, so it adds nothing to existing flushes), and
+//! shows or hides it per its visibility, so the hardware caret tracks the
+//! model.
 
 use std::io::{self, Write};
 use std::sync::OnceLock;
 
-use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::cursor::{Hide, MoveTo, SetCursorStyle, Show};
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
@@ -51,7 +54,7 @@ use crossterm::terminal::{
 use crossterm::{ExecutableCommand, QueueableCommand};
 use tern_core::cell::CellUpdate;
 use tern_core::color::Color as TernColor;
-use tern_core::cursor::Cursor;
+use tern_core::cursor::{Cursor, CursorShape};
 use tern_core::style::{Modifiers, Style};
 
 /// The terminal backend.
@@ -299,13 +302,20 @@ impl Backend {
     }
 
     /// Flush a diff of [`CellUpdate`]s to stdout, then position the terminal
-    /// caret at the cursor's (`x`, `y`) and show or hide it per
-    /// [`Cursor::visible`].
+    /// caret at the cursor's (`x`, `y`), apply its shape / blinking
+    /// `SetCursorStyle` (nothing for the default steady block), and show or
+    /// hide it per [`Cursor::visible`]. Returns the number of bytes queued to
+    /// the terminal, like [`flush_diff`](Backend::flush_diff).
     ///
     /// See [`flush_diff_with_cursor_to`] for the queueing semantics.
-    pub fn flush_diff_with_cursor(&self, updates: &[CellUpdate], cursor: Cursor) -> io::Result<()> {
-        let mut out = io::stdout();
-        flush_diff_with_cursor_to(&mut out, updates, cursor)
+    pub fn flush_diff_with_cursor(
+        &self,
+        updates: &[CellUpdate],
+        cursor: Cursor,
+    ) -> io::Result<usize> {
+        let mut out = CountingWriter::new(io::stdout());
+        flush_diff_with_cursor_to(&mut out, updates, cursor)?;
+        Ok(out.bytes)
     }
 
     /// Position the terminal caret at the cursor's (`x`, `y`) and show or
@@ -484,12 +494,14 @@ pub fn flush_diff_to<W: Write>(
 }
 
 /// Flush a diff of [`CellUpdate`]s to any `Write` target, then position the
-/// terminal caret at the cursor's (`x`, `y`) and show or hide it per
-/// [`Cursor::visible`], leaving the terminal's style state reset.
+/// terminal caret at the cursor's (`x`, `y`), apply its shape / blinking
+/// `SetCursorStyle` (nothing for the default steady block), and show or hide
+/// it per [`Cursor::visible`], leaving the terminal's style state reset.
 ///
 /// The cell queueing matches [`flush_diff_to`] (run-batched); the trailing
 /// caret control replaces the unconditional park: [`MoveTo`] to the cursor
-/// position, then [`Show`] or [`Hide`] per visibility.
+/// position, the conditional `SetCursorStyle`, then [`Show`] or [`Hide`] per
+/// visibility.
 pub fn flush_diff_with_cursor_to<W: Write>(
     w: &mut W,
     updates: &[CellUpdate],
@@ -501,17 +513,45 @@ pub fn flush_diff_with_cursor_to<W: Write>(
 }
 
 /// Position the terminal caret at the cursor's (`x`, `y`) on any `Write`
-/// target, showing or hiding it per [`Cursor::visible`], and leave the
-/// terminal's style state reset.
+/// target, applying its shape / blinking `SetCursorStyle` (nothing for the
+/// default steady block), showing or hiding it per [`Cursor::visible`], and
+/// leave the terminal's style state reset.
 pub fn flush_cursor_to<W: Write>(w: &mut W, cursor: Cursor) -> io::Result<()> {
     queue_cursor(w, cursor)?;
     w.flush()
 }
 
-/// Queue the caret state: move to the cursor's position, then show or hide it
-/// per visibility, then reset the terminal's style state.
+/// The DECSCUSR style (the crossterm `SetCursorStyle` variant) for a
+/// (shape, blinking) pair: each shape has a blinking and a steady code
+/// (`\x1b[1 q` .. `\x1b[6 q`). The caller decides whether to emit it at all —
+/// a steady block is the terminal's default, so it is never queued.
+fn cursor_style(shape: CursorShape, blinking: bool) -> SetCursorStyle {
+    match (shape, blinking) {
+        (CursorShape::Block, true) => SetCursorStyle::BlinkingBlock,
+        (CursorShape::Block, false) => SetCursorStyle::SteadyBlock,
+        (CursorShape::Bar, true) => SetCursorStyle::BlinkingBar,
+        (CursorShape::Bar, false) => SetCursorStyle::SteadyBar,
+        (CursorShape::Underline, true) => SetCursorStyle::BlinkingUnderScore,
+        (CursorShape::Underline, false) => SetCursorStyle::SteadyUnderScore,
+    }
+}
+
+/// Queue the caret state: move to the cursor's position, conditionally apply
+/// the DECSCUSR shape / blinking style, show or hide it per visibility, then
+/// reset the terminal's style state.
+///
+/// The `SetCursorStyle` sequence (`\x1b[<n> q`) is emitted only when the
+/// cursor differs from the terminal's default caret — a steady block — i.e.
+/// when the shape is not a block or the blink flag is set. A steady-block
+/// cursor emits nothing, so every flush that never requested a shape or blink
+/// stays byte-identical to before the style existed. The style lands between
+/// the [`MoveTo`] and the [`Show`] / [`Hide`], matching the crossterm
+/// command ordering for caret control.
 fn queue_cursor<W: Write>(w: &mut W, cursor: Cursor) -> io::Result<()> {
     w.queue(MoveTo(cursor.x, cursor.y))?;
+    if cursor.shape != CursorShape::Block || cursor.blinking {
+        w.queue(cursor_style(cursor.shape, cursor.blinking))?;
+    }
     if cursor.visible {
         w.queue(Show)?;
     } else {
@@ -1257,6 +1297,81 @@ mod tests {
         assert_eq!(
             s, "\x1b[1;2H\x1b[0my\x1b[3;3H\x1b[?25l\x1b[0m\x1b[0m",
             "got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn flush_caret_emits_no_style_for_the_default_cursor() {
+        // The default caret — block shape, no blink — IS the terminal's own
+        // default, so no DECSCUSR sequence is queued: the byte stream is
+        // exactly what the pre-cursor-style backend produced (MoveTo, then
+        // Show/Hide, then the trailing resets). This is the byte-identical
+        // guarantee every existing flush relies on.
+        let shown = flush_caret(Cursor::new(0, 0).show());
+        assert_eq!(
+            String::from_utf8(shown.clone()).unwrap(),
+            "\x1b[1;1H\x1b[?25h\x1b[0m\x1b[0m",
+            "got: {shown:?}"
+        );
+        // The `block()` builder spells the same state explicitly and must
+        // also emit nothing.
+        let blocked = flush_caret(Cursor::new(0, 0).block());
+        assert_eq!(blocked, shown, "got: {blocked:?}");
+        // No `\x1b[<n> q` sequence may appear for the default caret.
+        assert!(!String::from_utf8(shown.clone()).unwrap().contains(" q"), "got: {shown:?}");
+    }
+
+    #[test]
+    fn flush_caret_emits_decsusr_style_per_shape_and_blink() {
+        // Each non-default (shape, blinking) pair maps to its DECSCUSR code,
+        // queued between the MoveTo and the Show: block+blink -> `\x1b[1 q`,
+        // underline steady -> `\x1b[4 q`, underline blink -> `\x1b[3 q`,
+        // bar blink -> `\x1b[5 q`, bar steady -> `\x1b[6 q`. A steady block
+        // (the terminal default) is covered by
+        // [`flush_caret_emits_no_style_for_the_default_cursor`].
+        let cases: &[(Cursor, &str)] = &[
+            (Cursor::new(0, 0).show().blink(), "\x1b[1 q"),
+            (Cursor::new(0, 0).show().bar(), "\x1b[6 q"),
+            (Cursor::new(0, 0).show().bar().blink(), "\x1b[5 q"),
+            (Cursor::new(0, 0).show().underline(), "\x1b[4 q"),
+            (Cursor::new(0, 0).show().underline().blink(), "\x1b[3 q"),
+        ];
+        for (caret, style) in cases {
+            let s = String::from_utf8(flush_caret(caret.clone())).unwrap();
+            // The style lands after the MoveTo and before the Show.
+            assert_eq!(
+                s, format!("\x1b[1;1H{style}\x1b[?25h\x1b[0m\x1b[0m"),
+                "cursor {caret:?} must emit {style:?}, got: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn flush_caret_emits_style_for_a_hidden_non_default_caret() {
+        // The shape / blinking style is emitted regardless of visibility: a
+        // hidden bar cursor still queues its `\x1b[6 q` between the MoveTo
+        // and the Hide, so a later Show (in a later frame) keeps the shape.
+        let out = flush_caret(Cursor::hidden().at(1, 1).bar());
+        assert_eq!(
+            String::from_utf8(out.clone()).unwrap(),
+            "\x1b[2;2H\x1b[6 q\x1b[?25l\x1b[0m\x1b[0m",
+            "got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn flush_diff_with_caret_emits_style_between_cells_and_visibility() {
+        // The full frame: the cell run, then MoveTo, the DECSCUSR style, the
+        // Show, and the trailing resets — the style never interleaves with
+        // the cell output.
+        let mut out = Vec::new();
+        let updates = [update(0, 0, 'x', Style::new(), 1, false)];
+        let caret = Cursor::new(5, 4).underline().blink();
+        flush_diff_with_cursor_to(&mut out, &updates, caret).expect("flush should succeed");
+        assert_eq!(
+            String::from_utf8(out.clone()).unwrap(),
+            "\x1b[1;1H\x1b[0mx\x1b[5;6H\x1b[3 q\x1b[?25h\x1b[0m\x1b[0m",
+            "got: {out:?}"
         );
     }
 

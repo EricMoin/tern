@@ -48,6 +48,18 @@ pub(crate) struct RendererInner {
     /// selection now invalidates the render fast path: the next render must
     /// repaint so the overlay reaches the terminal.
     pub(crate) last_painted_selection: Option<(u16, u16, u16, u16)>,
+    /// The renderer's caret override: position, shape, blinking, and
+    /// visibility to apply to the terminal when the frame flushes, or `None`
+    /// when the legacy position-only flush ([`RenderBackend::flush_diff`]
+    /// parking the caret at the top-left) is used. Per-renderer state like
+    /// `selection`; `set_cursor` / `clear_cursor` own it.
+    pub(crate) cursor: Option<Cursor>,
+    /// The cursor the last successful render flushed with. A different cursor
+    /// now invalidates the render fast path — exactly like `selection` vs
+    /// `last_painted_selection` — so a `set_cursor` / `clear_cursor` between
+    /// renders always reaches the terminal, even when the scene is
+    /// unchanged.
+    pub(crate) last_painted_cursor: Option<Cursor>,
     /// The terminal size as last probed, cached so the hot render path skips
     /// the per-frame `backend.size()` ioctl. `None` before the first probe or
     /// after a resize event invalidated it; [`TuiRenderer::render`] and
@@ -145,6 +157,8 @@ impl TuiRenderer {
                 last_painted_viewport: NO_VIEWPORT,
                 selection: None,
                 last_painted_selection: None,
+                cursor: None,
+                last_painted_cursor: None,
                 cached_size: None,
                 last_flush_bytes: 0,
                 #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
@@ -226,12 +240,15 @@ impl TuiRenderer {
         // through and repaints at the re-queried terminal size instead of
         // skipping a frame whose viewport changed. A selection edit also
         // falls through: the terminal shows the previous frame's overlay, so
-        // the new selection must be painted.
+        // the new selection must be painted. A cursor edit (`set_cursor` /
+        // `clear_cursor`) falls through for the same reason: the terminal
+        // shows the previous frame's caret, so the new cursor must flush.
         if inner.last_viewport != NO_VIEWPORT
             && inner.cached_size.is_some()
             && inner.last_painted_epoch == scene_epoch
             && inner.last_viewport == (cached_w as u16, cached_h as u16)
             && inner.last_painted_selection == inner.selection
+            && inner.last_painted_cursor == inner.cursor
         {
             return Ok(());
         }
@@ -271,16 +288,31 @@ impl TuiRenderer {
             Some(prev) => buffer.diff_from(prev),
             None => diff(&Buffer::new(w, h), &buffer),
         };
-        let flushed = inner
-            .backend
-            .flush_diff(&updates, (0, 0))
-            .map_err(|e| Error::from_reason(format!("flush: {e}")))?;
+        // A set cursor flushes through the cursor-aware path — the frame's
+        // diff, then MoveTo + SetCursorStyle + Show/Hide for the caret — so
+        // the hardware caret tracks the model. With no cursor set, the legacy
+        // position-only flush (parking at the top-left, no visibility or
+        // shape control) is used, byte-identical to before the feature.
+        let flushed = {
+            let cursor = inner.cursor.clone();
+            match cursor {
+                Some(cursor) => inner
+                    .backend
+                    .flush_diff_with_cursor(&updates, cursor)
+                    .map_err(|e| Error::from_reason(format!("flush: {e}")))?,
+                None => inner
+                    .backend
+                    .flush_diff(&updates, (0, 0))
+                    .map_err(|e| Error::from_reason(format!("flush: {e}")))?,
+            }
+        };
         inner.last_flush_bytes = flushed as u64;
         inner.last = Some(buffer);
         inner.last_painted_epoch = painted_epoch;
         inner.last_viewport = (w, h);
         inner.last_painted_viewport = (w, h);
         inner.last_painted_selection = inner.selection;
+        inner.last_painted_cursor = inner.cursor.clone();
         Ok(())
     }
 
@@ -530,6 +562,48 @@ impl TuiRenderer {
             return Err(Error::from_reason("renderer is destroyed"));
         }
         inner.selection = None;
+        Ok(())
+    }
+
+    /// Set the renderer's caret override: position (`x`, `y`), shape
+    /// (`"block"` / `"bar"` / `"underline"`), visibility, and blinking, all
+    /// in viewport cells / DECSCUSR terms. The next [`render`](Self::render)
+    /// (which the cursor edit forces) flushes through the cursor-aware path:
+    /// the frame diff, then `MoveTo` + `SetCursorStyle` (nothing for the
+    /// default steady block) + `Show`/`Hide` for the caret, so the hardware
+    /// caret tracks the model. Errors on a destroyed renderer or an
+    /// unrecognized shape string.
+    #[napi(js_name = "set_cursor")]
+    pub fn set_cursor(&self, x: u32, y: u32, shape: String, visible: bool, blink: bool) -> Result<()> {
+        let mut inner = self.inner.lock().expect("renderer inner poisoned");
+        if inner.destroyed {
+            return Err(Error::from_reason("renderer is destroyed"));
+        }
+        let cursor = match shape.as_str() {
+            "block" => Cursor::new(x as u16, y as u16).block(),
+            "bar" => Cursor::new(x as u16, y as u16).bar(),
+            "underline" => Cursor::new(x as u16, y as u16).underline(),
+            other => return Err(Error::from_reason(format!("invalid cursor shape: {other}"))),
+        };
+        let cursor = if visible { cursor.show() } else { cursor.hide() };
+        let cursor = if blink { cursor.blink() } else { cursor };
+        inner.cursor = Some(cursor);
+        Ok(())
+    }
+
+    /// Clear the renderer's caret override: the next [`render`](Self::render)
+    /// (which the cursor edit forces) falls back to the legacy position-only
+    /// flush — the frame diff with the caret parked at the top-left, no
+    /// shape, blinking, or visibility control — byte-identical to a renderer
+    /// that never called [`set_cursor`](Self::set_cursor). Errors on a
+    /// destroyed renderer.
+    #[napi(js_name = "clear_cursor")]
+    pub fn clear_cursor(&self) -> Result<()> {
+        let mut inner = self.inner.lock().expect("renderer inner poisoned");
+        if inner.destroyed {
+            return Err(Error::from_reason("renderer is destroyed"));
+        }
+        inner.cursor = None;
         Ok(())
     }
 

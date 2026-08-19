@@ -224,6 +224,26 @@ export declare class TuiRenderer {
    */
   clear_selection(): void
   /**
+   * Set the renderer's caret override: position (`x`, `y`), shape
+   * (`"block"` / `"bar"` / `"underline"`), visibility, and blinking, all
+   * in viewport cells / DECSCUSR terms. The next [`render`](Self::render)
+   * (which the cursor edit forces) flushes through the cursor-aware path:
+   * the frame diff, then `MoveTo` + `SetCursorStyle` (nothing for the
+   * default steady block) + `Show`/`Hide` for the caret, so the hardware
+   * caret tracks the model. Errors on a destroyed renderer or an
+   * unrecognized shape string.
+   */
+  set_cursor(x: number, y: number, shape: string, visible: boolean, blink: boolean): void
+  /**
+   * Clear the renderer's caret override: the next [`render`](Self::render)
+   * (which the cursor edit forces) falls back to the legacy position-only
+   * flush — the frame diff with the caret parked at the top-left, no
+   * shape, blinking, or visibility control — byte-identical to a renderer
+   * that never called [`set_cursor`](Self::set_cursor). Errors on a
+   * destroyed renderer.
+   */
+  clear_cursor(): void
+  /**
    * The text of the renderer's current selection, extracted from the last
    * painted frame (the frame the most recent [`render`](Self::render)
    * produced): row-major and cluster/mask-aware — a multi-char cluster
