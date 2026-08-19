@@ -11,7 +11,7 @@ The render pipeline is described in [architecture.md](architecture.md). A
 component lives in two places:
 
 - **JS element** — declarative, reconciler-managed (e.g. `<StreamingText/>`
-  under `@tern/react` / `@tern/solid`). Produces a scene update.
+  under `@tern-tui/react` / `@tern-tui/solid`). Produces a scene update.
 - **Rust renderable** — the painting/behavior half in
   `src/core/tern-components` (the `Renderable` / `Text` / `Box` pattern).
 
@@ -21,8 +21,8 @@ renderable half** of [Input](#input), [Spinner](#spinner),
 [Panels / split layouts](#panels--split-layouts), and [StatusBar](#statusbar)
 in `src/core/tern-components` (state, interaction, and paint are unit- and
 golden-tested), plus the **JS elements and renderer wiring** for every
-component below: element factories in `@tern/core`, host
-components/factories in `@tern/react` and `@tern/solid`, focus/key routing via
+component below: element factories in `@tern-tui/core`, host
+components/factories in `@tern-tui/react` and `@tern-tui/solid`, focus/key routing via
 the core `FocusManager`, spinner timer redraw, the theme system, soft wrap,
 and the Phase 2 event consumers (resize reflow, panel drag-resize,
 focus-aware redraw, mouse wheel scroll, click-to-focus). The status table
@@ -30,7 +30,7 @@ below is current — the shipped rows reflect what runs today.
 
 ## Event model
 
-Terminal events reach the scene through `@tern/core`'s `Renderer`:
+Terminal events reach the scene through `@tern-tui/core`'s `Renderer`:
 `startEventStream()` starts push-based delivery (roadmap Phase 3 — shipped):
 the native binding's background event loop pushes every terminal event to the
 JS thread through a `ThreadsafeFunction`, yielding the tagged `TernEventJs`
@@ -50,7 +50,7 @@ dispatches each key to the focused element's handler (`routeKey`) and each
 paste to its paste handler (`routePaste` — an element that registered no
 `onPaste` never consumes, so the paste falls through to the tree handler).
 The tree-level input hooks consult the manager first — `useInput` in
-`@tern/react` and `subscribeInput` in `@tern/solid` route each key through
+`@tern-tui/react` and `subscribeInput` in `@tern-tui/solid` route each key through
 the core `FocusManager` before falling back to the tree handler.
 
 ### IME posture (decision)
@@ -107,8 +107,8 @@ from the matching box-drawing set by the compositor (`border_glyphs` in
 `tern-components`). The border color is controlled independently of the box's
 `fg`/`bg`:
 
-- **`borderColor`** (camelCase alias — `@tern/core` / `@tern/react` /
-  `@tern/solid`) → **`border_color`** (the binding's style key, snake_case) —
+- **`borderColor`** (camelCase alias — `@tern-tui/core` / `@tern-tui/react` /
+  `@tern-tui/solid`) → **`border_color`** (the binding's style key, snake_case) —
   a color string (`#rrggbb`, `indexed:N`, or `default`).
 - When set, the border ring paints with that color as its foreground (the
   glyphs themselves are unchanged); every other cell keeps its own style. When
@@ -165,10 +165,10 @@ backpressure keeps the event loop responsive; tail-follow + scroll-up detach
 works.
 
 **Shipped:** the `streaming_text` scene node ships end to end. `StreamingText`
-in `@tern/core` builds the node (fed via `Node.appendSpan`); `<StreamingText>`
-in `@tern/react` consumes the `stream` prop with an effect that appends each
+in `@tern-tui/core` builds the node (fed via `Node.appendSpan`); `<StreamingText>`
+in `@tern-tui/react` consumes the `stream` prop with an effect that appends each
 span, paints after every append, and feeds the auto-scroll; `StreamingText` +
-`subscribeStream` in `@tern/solid` do the same. Auto-scroll ships as the core
+`subscribeStream` in `@tern-tui/solid` do the same. Auto-scroll ships as the core
 `syncStreamTail` / `followTail` / `isStreamFollowing` / `setStreamAutoScroll`
 helpers, defaulting to tail-follow (`autoScroll: true`) — a manual scroll
 above the tail detaches the follow and stamps the scroll-to-bottom
@@ -199,7 +199,7 @@ half-open while tokens are still arriving. The view must render best-effort
 - **Syntax highlighting** inside code fences via tree-sitter (roadmap
   Phase 4 — shipped): the `tern-highlight` crate maps tree-sitter captures
   to style spans (keywords, strings, comments, types) over the whole fence;
-  `@tern/core`'s `highlightCode` feeds them into the fence's leaves (a
+  `@tern-tui/core`'s `highlightCode` feeds them into the fence's leaves (a
   fence with a recognized language renders one styled leaf per line with
   token colors, falling back to the single fence style for unknown
   languages or when the native addon is unavailable).
@@ -219,7 +219,7 @@ half-open while tokens are still arriving. The view must render best-effort
 **Acceptance:** a streamed Markdown answer renders progressively (fence closes
 correctly at the end); inline/block styles match a golden buffer test.
 
-**Shipped:** `MarkdownView` in `@tern/core` builds the `markdown` element — a
+**Shipped:** `MarkdownView` in `@tern-tui/core` builds the `markdown` element — a
 flex column of block nodes rendering the `source` (headings bold, H1
 underlined; paragraphs; bulleted/ordered lists; dimmed block quotes; `─`
 horizontal rules; and code fences as a `bg` box with one leaf per line,
@@ -265,7 +265,7 @@ narrow terminal and compose with side-by-side mode later.
 **Acceptance:** golden test for a 3-hunk diff: gutter alignment, kind colors,
 context dimming; side-by-side mode fills two panels without overflow.
 
-**Shipped:** `DiffView` in `@tern/core` renders the unified-diff rows — a
+**Shipped:** `DiffView` in `@tern-tui/core` renders the unified-diff rows — a
 dimmed gutter with right-aligned old/new line numbers, `+`/`-`/` ` markers,
 and per-kind colors (adds `#98c379`, dels `#e06c75`, context dimmed) — with
 `scroll_x` / `scroll_y` panning the whole region and the `wrap` prop passing
@@ -275,8 +275,8 @@ each hunk line one row per column aligned by line pair, with per-column
 gutters. Intra-line highlighting ships too: `inline_highlight` computes a
 char-level diff on each adjacent add/del pair and renders the changed
 segments bold + underlined on the line's kind color, leaving unchanged
-characters plain. `<DiffView>` in `@tern/react` and `DiffView` in
-`@tern/solid` materialize the same factory.
+characters plain. `<DiffView>` in `@tern-tui/react` and `DiffView` in
+`@tern-tui/solid` materialize the same factory.
 
 ---
 
@@ -325,11 +325,11 @@ for history navigation and word-jump.
 value, char-index cursor, placeholder, bounded history ring, and a
 renderer-agnostic `Key`/`handle_key` mapping; it materializes as a framed box
 with a `caret`-prop text leaf the compositor paints as a block caret. The JS
-element (`Input` in `@tern/core`; `<Input>` in `@tern/react`, `Input` in
-`@tern/solid`) adds focus/key routing: a `focusId` registers with the core
+element (`Input` in `@tern-tui/core`; `<Input>` in `@tern-tui/react`, `Input` in
+`@tern-tui/solid`) adds focus/key routing: a `focusId` registers with the core
 `FocusManager` (`useFocus`), routed keys edit the value via `editKey`, and
 `onChange` / `onSubmit` fire on edits and Enter. Routed paste (via `usePaste`
-in `@tern/react` / `subscribePaste` in `@tern/solid`) auto-pastes into a
+in `@tern-tui/react` / `subscribePaste` in `@tern-tui/solid`) auto-pastes into a
 focused `<Input focusId>` through the core `pasteInto` — inserting at the
 caret, multi-width aware, and firing `onChange` (an empty paste is a no-op).
 IME-confirmed CJK/IME strings round-trip losslessly through this paste path
@@ -345,7 +345,7 @@ determinate progress (tool execution, file upload, token budget).
 
 **Core problem:** animation needs a *periodic redraw* on top of a
 paint-on-demand pipeline. The JS side provides it — `<Spinner>` in
-`@tern/react` runs a tick interval while mounted (see the Rust renderable note
+`@tern-tui/react` runs a tick interval while mounted (see the Rust renderable note
 below), and the tick pauses while the terminal is unfocused (focus-aware
 redraw, [roadmap Phase 2](roadmap.md#phase-2--resize-focus--mouse-events--done) —
 shipped).
@@ -374,7 +374,7 @@ unmounted.
 **Rust renderable:** ships in `src/core/tern-components` — `Spinner` cycles
 indeterminate frames on `tick()` (the renderer timer drives it) and paints the
 determinate bar via `filled_cells()`/`bar()`. The JS element (`Spinner` in
-`@tern/core`; `<Spinner>` in `@tern/react`, `Spinner` in `@tern/solid`) adds
+`@tern-tui/core`; `<Spinner>` in `@tern-tui/react`, `Spinner` in `@tern-tui/solid`) adds
 timer redraw: a tick interval (default 100 ms) advances the frame via `tick`
 while mounted and is cleared on unmount.
 
@@ -416,11 +416,11 @@ keyboard resize sequence changes pane widths and a golden buffer matches.
 **Rust renderable:** ships in `src/core/tern-components` — `Panels` stacks
 `Panel`s (column or row), each with a collapsible header; `toggle`/`collapse`/
 `expand` hide the body and an `active` index tracks focus. The JS element
-(`Panels` in `@tern/core`; `<Panels>` in `@tern/react`, `Panels` in
-`@tern/solid`) exposes `collapsePanel` / `expandPanel` / `togglePanel` /
+(`Panels` in `@tern-tui/core`; `<Panels>` in `@tern-tui/react`, `Panels` in
+`@tern-tui/solid`) exposes `collapsePanel` / `expandPanel` / `togglePanel` /
 `focusPanel`. Mouse drag-resize ships as `startPanelDrag` / `dragPanels` /
-`endPanelDrag` in `@tern/core`, wired by `usePanelMouseDrag` (`@tern/react`)
-and `subscribePanelDrag` (`@tern/solid`); the flex-basis reflow of a drag
+`endPanelDrag` in `@tern-tui/core`, wired by `usePanelMouseDrag` (`@tern-tui/react`)
+and `subscribePanelDrag` (`@tern-tui/solid`); the flex-basis reflow of a drag
 into the layout engine ships — tern-layout maps the `flex_basis` prop into
 taffy's flex-basis, so a drag reflows the pane split (roadmap Phase 2,
 shipped).
@@ -461,7 +461,7 @@ test).
 **Rust renderable:** ships in `src/core/tern-components` — `StatusBar` holds
 left/center/right `Segment`s and `trimmed()` drops lowest-priority segments
 (rightmost-first on ties) against a row width. The JS element (`StatusBar` in
-`@tern/core`; `<StatusBar>` in `@tern/react`, `StatusBar` in `@tern/solid`)
+`@tern-tui/core`; `<StatusBar>` in `@tern-tui/react`, `StatusBar` in `@tern-tui/solid`)
 materializes as a single-row `space-between` strip (height 1) whose children
 are the left/center/right segment `Text` nodes.
 
@@ -512,12 +512,12 @@ scrollable popup that must not disturb the layout it overlays or docks to.
 **Acceptance:** interaction test: filter narrows the list, enter returns the
 highlighted option; golden test for the checkmark/selection styles.
 
-**Shipped:** `Select` in `@tern/core` renders the filter row (dimmed
+**Shipped:** `Select` in `@tern-tui/core` renders the filter row (dimmed
 `filter…` placeholder while empty), one option row per visible option (the
 highlighted row reversed, multi-mode rows `✓ `/`  `-prefixed), and in multi
 mode a selected-count summary row — driven by `selectKey` (`up` / `down` /
 `enter` / `escape`, typeahead filter, space toggles checkmarks).
-`<Select>` in `@tern/react` and `Select` in `@tern/solid` materialize it; a
+`<Select>` in `@tern-tui/react` and `Select` in `@tern-tui/solid` materialize it; a
 `focusId` (React) or `useFocus` (Solid) registers it with the `FocusManager`
 so routed keys drive it (`onChange` / `onConfirm` / `onDismiss` in React). A
 `floating` dropdown stamps the root box's `z_index` prop so it paints above
@@ -557,10 +557,10 @@ offsets are scene props, and the content is never re-laid-out per scroll step.
 thumb tracks the scroll fraction; a streaming node auto-scrolls inside the
 region.
 
-**Shipped:** `ScrollView` in `@tern/core` (with `scrollTo` / `scrollBy` /
+**Shipped:** `ScrollView` in `@tern-tui/core` (with `scrollTo` / `scrollBy` /
 `scrollTop` and the `SCROLLBAR_THUMB_CHAR` / `SCROLLBAR_TRACK_CHAR`
-constants), `<ScrollView>` in `@tern/react` (content is React children), and
-`ScrollView` in `@tern/solid` (content via the `children` prop). The
+constants), `<ScrollView>` in `@tern-tui/react` (content is React children), and
+`ScrollView` in `@tern-tui/solid` (content via the `children` prop). The
 `streaming_text` auto-scroll reuses the same clip/scroll machinery.
 
 ---
@@ -609,7 +609,7 @@ renderer with no native table node.
 **Acceptance:** golden test for per-column alignment and truncation; a key
 sequence moves the highlight and auto-scrolls the region (buffer matches).
 
-**Shipped:** `Table` in `@tern/core` builds the flex column — a sticky header
+**Shipped:** `Table` in `@tern-tui/core` builds the flex column — a sticky header
 row (paint z-order 1) above a scrollable content region, and one row leaf per
 visible data row: only the visible window `rows[scroll_y, scroll_y +
 clip_height)` is materialized (**windowed rows** — a large dataset does not
@@ -620,7 +620,7 @@ the highlighted row reversed). `tableKey` (up/down move the highlight and
 auto-scroll, clamped to the content bounds) and `visibleTableRows` (the
 visible window) drive it; `scroll_x` pans header + rows together, `scroll_y`
 pans only the content region, and `clip_height` sets the viewport. `<Table>`
-in `@tern/react` and `Table` in `@tern/solid` materialize the same factory.
+in `@tern-tui/react` and `Table` in `@tern-tui/solid` materialize the same factory.
 
 ---
 
@@ -667,14 +667,14 @@ layered on a paint-on-demand renderer.
 **Acceptance:** golden test for soft wrap and the caret column; interaction
 test for editing, line splits, and vertical moves across wrapped lines.
 
-**Shipped:** `Textarea` in `@tern/core` builds a framed box with one text
+**Shipped:** `Textarea` in `@tern-tui/core` builds a framed box with one text
 leaf per visible display row, soft-wrapped at `width` and vertically scrolled
 to keep the caret visible within `height`; `editTextareaKey` applies the
 editing keys (char insert, backspace/delete with line joins, left/right/
 home/end, `enter` splits, up/down across display lines preserving a preferred
 column) and returns the new `{ lines, row, col }`. `<Textarea>` in
-`@tern/react` adds `focusId` / `focusManager` / `onChange` / `onSubmit`
-(focus registration plus callbacks); `Textarea` in `@tern/solid` mirrors the
+`@tern-tui/react` adds `focusId` / `focusManager` / `onChange` / `onSubmit`
+(focus registration plus callbacks); `Textarea` in `@tern-tui/solid` mirrors the
 same focus wiring — a `focusId` prop registers the node with a `FocusManager`
 (routed keys edit it via `editTextareaKey`), firing `onChange` / `onSubmit`,
 with the registration disposed via `disposeTextareaFocus` (feature parity
@@ -725,14 +725,14 @@ closeModal(modal);  // restores the previously active focus
 dim; opening moves focus into the overlay and closing restores the previously
 active focus.
 
-**Shipped:** `Modal` in `@tern/core` composes the overlay — an absolutely
+**Shipped:** `Modal` in `@tern-tui/core` composes the overlay — an absolutely
 positioned root box (inset to the parent) stamped with `MODAL_Z_INDEX` (100),
 a dimmed backdrop box (`MODAL_BACKDROP_BG`), and a centered content box
 wrapping the content nodes (the `content` prop or rest-arg children).
 `openModal` / `closeModal` toggle visibility (`hidden` + `display`) and move
 focus through the `FocusManager` — `focusFirst` on open, restoring the
-recorded id (or blurring) on close. `<Modal>` in `@tern/react` takes the
-content as a `content` prop (no React children); `Modal` in `@tern/solid` is
+recorded id (or blurring) on close. `<Modal>` in `@tern-tui/react` takes the
+content as a `content` prop (no React children); `Modal` in `@tern-tui/solid` is
 the plain factory.
 
 ---
@@ -777,12 +777,12 @@ frame, not from a document model.
 **API sketch (JS):**
 
 ```tsx
-// @tern/react — one hook wires the whole gesture
+// @tern-tui/react — one hook wires the whole gesture
 useSelection();
 ```
 
 ```ts
-// @tern/solid — returns a disposer
+// @tern-tui/solid — returns a disposer
 const dispose = subscribeSelection(renderer);
 ```
 
@@ -800,7 +800,7 @@ tern-node renderer, surfaced as `Renderer.setSelection` / `clearSelection` /
 `selectionText` / `selectionWordRange`), the core interaction module
 (`startSelection` / `dragSelection` / `endSelection` / `copySelection` /
 `selectWordAt` / `selectionKey` / `SELECTION_DOUBLE_CLICK_MS`), and the host
-wiring `useSelection` (`@tern/react`) / `subscribeSelection` (`@tern/solid`).
+wiring `useSelection` (`@tern-tui/react`) / `subscribeSelection` (`@tern-tui/solid`).
 The overlay persists after `endSelection` — `Esc` or a bare click outside the
 selection rect clears it, and `copySelection` / `selectionText` stay valid
 against the last painted frame between gestures.
@@ -839,8 +839,8 @@ with no native tabs node.
 - **Keyboard driving.** `tabsKey` routes keys: `left` / `right` move the
   active tab (clamped at the ends); `ctrl+tab` / `ctrl+shift+tab` wrap to the
   next / previous tab; `ctrl+w` closes the active tab (the active index
-  re-clamps into the shorter list). `<Tabs focusId>` in `@tern/react` /
-  `Tabs({ focusId })` in `@tern/solid` register with a `FocusManager` so
+  re-clamps into the shorter list). `<Tabs focusId>` in `@tern-tui/react` /
+  `Tabs({ focusId })` in `@tern-tui/solid` register with a `FocusManager` so
   routed keys reach the node.
 
 **API sketch (JS):**
@@ -865,7 +865,7 @@ marker), the content region holds exactly the active tab's content, and a key
 sequence (arrows / ctrl+tab / ctrl+w) moves the active index and re-clamps it
 after a close (buffer matches).
 
-**Shipped:** `Tabs` in `@tern/core` builds the flex column — a tab bar row
+**Shipped:** `Tabs` in `@tern-tui/core` builds the flex column — a tab bar row
 (one `Text` leaf per tab; the active tab's label prefixed with the top-border
 marker `TAB_ACTIVE_MARKER` and painted with the primary palette colors
 `TAB_PRIMARY_FG` / `TAB_PRIMARY_BG` and reversed, closable tabs carrying the
@@ -875,8 +875,8 @@ props); `active` lives on the root box's props, and `activateTab` /
 `closeTab` / `tabsKey` mutate it and rebuild the composition in place
 (`left` / `right` move the active tab clamped, `ctrl+tab` / `ctrl+shift+tab`
 wrap around the ends, `ctrl+w` closes the active tab re-clamping the active
-index). `<Tabs>` in `@tern/react` takes the tabs as a `tabs` prop (no React
-children); `Tabs` in `@tern/solid` is the same factory with a `focusId`
+index). `<Tabs>` in `@tern-tui/react` takes the tabs as a `tabs` prop (no React
+children); `Tabs` in `@tern-tui/solid` is the same factory with a `focusId`
 option — both register with a `FocusManager` so routed keys drive the tabs.
 
 ---
@@ -931,7 +931,7 @@ filled cells, the percentage readout reads `ceil(value/max*100)%` (right
 aligned), the label is composed only when it fits, and `setProgress` repaints
 the bar without rebuilding the composition (buffer matches).
 
-**Shipped:** `Progress` in `@tern/core` builds the framed box — an in-flow
+**Shipped:** `Progress` in `@tern-tui/core` builds the framed box — an in-flow
 fill leaf (`'▓'` × `ceil(value/max * inner_width)`, `'░'` for the rest of the
 inner width) plus an optional dimmed label leaf left-aligned inside the bar
 area (composed only when it fits alongside the readout) and an optional
@@ -940,7 +940,7 @@ absolutely positioned overlays on the fill (the fill-cell math stays exact).
 The label text and `show_percentage` flag are JS bookkeeping (never scene
 props); `value`/`max` (or `ratio`) live on the root box's props, and
 `setProgress` mutates them and repaints the bar and readout in place — no
-rebuild. `<Progress>` in `@tern/react` and `Progress` in `@tern/solid`
+rebuild. `<Progress>` in `@tern-tui/react` and `Progress` in `@tern-tui/solid`
 materialize the factory with the `progress` component preset resolved onto
 the frame's props.
 
@@ -952,8 +952,8 @@ the frame's props.
 `mergeTheme(base, overrides)`, `resolveTheme(theme, props)` — resolves the
 semantic `role` / `component` hints on node props into plain `fg` / `bg` /
 `border_style` style keys at element-creation time (the hints are consumed and
-never reach the scene; explicit props always win). `@tern/react` provides
-`<ThemeProvider>` + `useTheme`; `@tern/solid` provides `setTheme` / `getTheme`
+never reach the scene; explicit props always win). `@tern-tui/react` provides
+`<ThemeProvider>` + `useTheme`; `@tern-tui/solid` provides `setTheme` / `getTheme`
 (module-level, merged over `defaultTheme`).
 
 **Soft wrap (shipped):** the `wrap` prop passes through to each content leaf

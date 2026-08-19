@@ -18,7 +18,7 @@ Rust; the JS side only describes the scene.
 - **Rust-native engine** — scene tree, layout (taffy), compositor, and
   diff-flush terminal frontend all in Rust; the JS side stays thin.
 - **React & SolidJS renderers** — first-class custom renderers
-  (`@tern/react`, `@tern/solid`) over one scene API. Same props → same scene,
+  (`@tern-tui/react`, `@tern-tui/solid`) over one scene API. Same props → same scene,
   full feature parity.
 - **Streaming-first** — `StreamingText` consumes an `AsyncIterable<Span>`
   with tail-follow auto-scroll, scroll-up detach, and a `▼` scroll-to-bottom
@@ -46,10 +46,10 @@ Rust; the JS side only describes the scene.
 ## How it works
 
 ```
- JS renderer (@tern/react | @tern/solid)
+ JS renderer (@tern-tui/react | @tern-tui/solid)
       │  scene updates
       ▼
- @tern/core (TypeScript bindings)
+ @tern-tui/core (TypeScript bindings)
       │  napi (tern-node)
       ▼
  tern-core scene tree → tern-layout (taffy) → compositor → tern-terminal
@@ -64,26 +64,28 @@ tern ships as four npm packages:
 | Package | What it is |
 |---------|------------|
 | `tern-node` | The native addon (Rust core, napi binding). Main package plus 5 per-platform sub-packages via `optionalDependencies`. |
-| `@tern/core` | TypeScript bindings over the addon: renderer, scene nodes, element factories, focus, theme, frame snapshots. Depends on `tern-node`. |
-| `@tern/react` | react-reconciler custom renderer — host components, hooks, `ThemeProvider`. Peers: `react` `^19.2.0`, `react-reconciler` `^0.33.0`. |
-| `@tern/solid` | SolidJS universal custom renderer — element factories, subscriptions, `setTheme`. Depends on `solid-js`. |
+| `@tern-tui/core` | TypeScript bindings over the addon: renderer, scene nodes, element factories, focus, theme, frame snapshots. Depends on `tern-node`. |
+| `@tern-tui/react` | react-reconciler custom renderer — host components, hooks, `ThemeProvider`. Peers: `react` `^19.2.0`, `react-reconciler` `^0.33.0`. |
+| `@tern-tui/solid` | SolidJS universal custom renderer — element factories, subscriptions, `setTheme`. Depends on `solid-js`. |
 
 ### Installation
 
 ```sh
 # React renderer
-npm install @tern/core @tern/react react react-reconciler
+npm install @tern-tui/core @tern-tui/react react react-reconciler
 
 # Solid renderer
-npm install @tern/core @tern/solid solid-js
+npm install @tern-tui/core @tern-tui/solid solid-js
 ```
 
 All packages are ESM-only (`"type": "module"`, `dist/index.js` +
 `dist/index.d.ts`) and require Node.js `>= 20`.
 
-> **Not on npm yet.** Everything ships at version `0.1.0`; publishing is
-> automated and only happens when a `v*` tag is pushed (see
-> [Release](#release)). Until then, consume the packages from the monorepo:
+> **Published on npm.** All packages ship at version `0.2.0` under the
+> `@tern-tui` scope — install them with the [snippet above](#installation).
+> Publishing is automated and re-runs when a `v*` tag is pushed (see
+> [Release](#release)). To develop against the monorepo instead, build from
+> source:
 
 ```sh
 git clone https://github.com/EricMoin/tern
@@ -93,30 +95,25 @@ cd src/bindings/tern-node
 npm install                    # addon deps (use npm install, not npm ci — see below)
 npm run build                  # napi build --platform --release && node fix-dts.mjs
 cd ../..
-npm run build -w @tern/core    # tsc build + fix-dts (core first)
-npm run build -w @tern/react   # depends on @tern/core
-npm run build -w @tern/solid   # depends on @tern/core
+npm run build -w @tern-tui/core    # tsc build + fix-dts (core first)
+npm run build -w @tern-tui/react   # depends on @tern-tui/core
+npm run build -w @tern-tui/solid   # depends on @tern-tui/core
 ```
 
-The root workspace install symlinks `@tern/core`, `@tern/react`,
-`@tern/solid` and `tern-node` into `node_modules`, so the packages are
-importable by name from anywhere in the checkout. The bundled demos run
-Deno-first straight off the TypeScript sources (via the `deno.json` import
-map); a Node consumer imports the built `dist`, hence the build steps above.
-Alternatively, `npm pack -w @tern/core` (etc.) produces installable tarballs —
-note that `@tern/core` depends on `tern-node`, which is itself unpublished,
-so a standalone tarball install outside the workspace also needs `tern-node`
-(and its per-platform packages) resolvable; the workspace is the practical
-pre-release route.
+The root workspace install links the JS packages and the native addon into
+`node_modules`, so they are importable by name from anywhere in the checkout.
+The bundled demos run Deno-first straight off the TypeScript sources (via the
+`deno.json` import map); a Node consumer imports the built `dist`, hence the
+build steps above.
 
-### Quick start — @tern/react
+### Quick start — @tern-tui/react
 
 ```tsx
 // app.tsx — run with: deno run --allow-all app.tsx
-// (requires the native addon built and the @tern/* dist built — see Installation)
+// (requires the native addon built and the @tern-tui/* dist built — see Installation)
 import { createElement } from "react";
-import { createRenderer } from "@tern/core";
-import { Box, Text, render, useApp, useInput } from "@tern/react";
+import { createRenderer } from "@tern-tui/core";
+import { Box, Text, render, useApp, useInput } from "@tern-tui/react";
 
 function App() {
   const { exit } = useApp();
@@ -150,13 +147,13 @@ for await (const event of renderer.events) {
 The scene is a plain React tree of host components. Bare string children are
 rejected — text lives in an explicit `<Text text="..." />` element.
 
-### Quick start — @tern/solid
+### Quick start — @tern-tui/solid
 
 ```ts
 // app.ts — run with: deno run --allow-all app.ts
-// (requires the native addon built and the @tern/* dist built — see Installation)
-import { createRenderer } from "@tern/core";
-import { Box, Text, render, subscribeInput } from "@tern/solid";
+// (requires the native addon built and the @tern-tui/* dist built — see Installation)
+import { createRenderer } from "@tern-tui/core";
+import { Box, Text, render, subscribeInput } from "@tern-tui/solid";
 
 const renderer = createRenderer({ exitOnCtrlC: true });
 
@@ -192,7 +189,7 @@ renderer.destroy();
   transpilation step (the demos run Deno-first, straight from source).
 - **Deno 2.x** — supported; Node-API addons load with `--allow-ffi`, and the
   demos run with `deno run --allow-all`. `deno.json` import-maps
-  `@tern/core` to the source for in-repo runs.
+  `@tern-tui/core` to the source for in-repo runs.
 - **Terminal/PTY required** — constructing a renderer enters raw mode and
   the alternate screen immediately (crossterm). The scene renders only into
   a real terminal; non-interactive shells cannot paint it. For headless
@@ -265,8 +262,8 @@ Linux, Windows arm64, ...) are not covered — build the addon locally.
 | `Modal` | Dimmed overlay with centered content and focus isolation |
 
 Interactive elements register with a `FocusManager`: `focusId` on the
-`@tern/react` host components, `useFocus(id, node, onKey, onPaste?)` on the
-core, `subscribe*` helpers on `@tern/solid`. See
+`@tern-tui/react` host components, `useFocus(id, node, onKey, onPaste?)` on the
+core, `subscribe*` helpers on `@tern-tui/solid`. See
 [docs/guide.md](docs/guide.md) for the full widget API reference.
 
 ## Events & interaction
@@ -295,13 +292,13 @@ deno run --allow-all packages/examples/kitchen-sink-react.ts
 deno run --allow-all packages/examples/kitchen-sink-solid.ts
 ```
 
-Or through the `@tern/examples` workspace scripts:
+Or through the `@tern-tui/examples` workspace scripts:
 
 ```sh
-npm run demo:react -w @tern/examples
-npm run demo:solid -w @tern/examples
-npm run demo:kitchen-react -w @tern/examples
-npm run demo:kitchen-solid -w @tern/examples
+npm run demo:react -w @tern-tui/examples
+npm run demo:solid -w @tern-tui/examples
+npm run demo:kitchen-react -w @tern-tui/examples
+npm run demo:kitchen-solid -w @tern-tui/examples
 ```
 
 Each demo renders a scene, asserts it against the scene tree, and quits on
@@ -311,14 +308,15 @@ Each demo renders a scene, asserts it against the scene tree, and quits on
 
 | Package | What it is |
 |---------|------------|
-| [`@tern/core`](packages/core/README.md) | TypeScript bindings over the napi addon: renderer, scene nodes, element factories, focus, theme, frame snapshots |
-| [`@tern/react`](packages/react/README.md) | react-reconciler custom renderer — host components, hooks, `ThemeProvider` |
-| [`@tern/solid`](packages/solid/README.md) | SolidJS universal custom renderer — factories, subscriptions, `setTheme` |
-| `@tern/examples` | Runnable demos (`react-demo.ts`, `solid-demo.ts`, kitchen-sink scenes) with a PTY smoke harness (`run-smoke.sh`) |
+| [`@tern-tui/core`](packages/core/README.md) | TypeScript bindings over the napi addon: renderer, scene nodes, element factories, focus, theme, frame snapshots |
+| [`@tern-tui/react`](packages/react/README.md) | react-reconciler custom renderer — host components, hooks, `ThemeProvider` |
+| [`@tern-tui/solid`](packages/solid/README.md) | SolidJS universal custom renderer — factories, subscriptions, `setTheme` |
+| `@tern-tui/examples` | Runnable demos (`react-demo.ts`, `solid-demo.ts`, kitchen-sink scenes) with a PTY smoke harness (`run-smoke.sh`) |
 
 ## Documentation
 
 - [docs/guide.md](docs/guide.md) — getting started, component API reference, event model, theme usage
+- [docs/api/](docs/api/index.html) — generated API reference for `@tern-tui/core` / `@tern-tui/react` / `@tern-tui/solid` (build: `deno task docs:api`)
 - [docs/architecture.md](docs/architecture.md) — render pipeline and repository conventions
 - [docs/components.md](docs/components.md) — code-agent component roadmap and status
 - [docs/roadmap.md](docs/roadmap.md) — post-MVP phases
@@ -340,9 +338,9 @@ cd src/bindings/tern-node
 npm install                                  # addon deps (npm install, not npm ci — see CONTRIBUTING.md)
 npm run build                                # napi build --platform --release && node fix-dts.mjs
 cd ../..
-npm run build -w @tern/core                   # tsc build + fix-dts (core first)
-npm run build -w @tern/react                  # depends on @tern/core
-npm run build -w @tern/solid                  # depends on @tern/core
+npm run build -w @tern-tui/core                   # tsc build + fix-dts (core first)
+npm run build -w @tern-tui/react                  # depends on @tern-tui/core
+npm run build -w @tern-tui/solid                  # depends on @tern-tui/core
 ```
 
 `npm run build:debug` in `src/bindings/tern-node` is the fast local dev
@@ -370,11 +368,11 @@ by hand. Pushing a `v*` tag (e.g. `v0.1.0`) — or running
 2. **Release** — collects the binaries into the per-platform packages
    (`napi create-npm-dirs` + `napi artifacts`), publishes `tern-node` (its
    `prepublishOnly` publishes the `tern-node-<platform>` packages first),
-   then builds and publishes `@tern/core` → `@tern/react` → `@tern/solid`
+   then builds and publishes `@tern-tui/core` → `@tern-tui/react` → `@tern-tui/solid`
    in dependency order.
 
 The workflow requires the `NPM_TOKEN` secret — an npm automation token with
-publish rights on the `@tern/*` and `tern-node*` names — and declares
+publish rights on the `@tern-tui/*` and `tern-node*` names — and declares
 `id-token: write` for npm provenance.
 
 ```
