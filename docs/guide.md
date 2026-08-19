@@ -1,7 +1,7 @@
 # tern Guide
 
-This guide walks through building a tern TUI with `@tern/react` or
-`@tern/solid`: getting started, the component set, the event model, and
+This guide walks through building a tern TUI with `@tern-tui/react` or
+`@tern-tui/solid`: getting started, the component set, the event model, and
 theme usage. For the rendering pipeline see
 [architecture.md](architecture.md); for the widget roadmap status see
 [components.md](components.md); for the post-MVP phases see
@@ -41,9 +41,9 @@ bash packages/examples/run-smoke.sh
 
 ### Write a minimal app
 
-See the quick-starts in the [root README](../README.md): `@tern/react`
+See the quick-starts in the [root README](../README.md): `@tern-tui/react`
 uses a React component tree with `render` + `useApp`/`useInput`;
-`@tern/solid` builds the scene with element factories and mounts it with the
+`@tern-tui/solid` builds the scene with element factories and mounts it with the
 universal `render`, using `subscribeInput` for input.
 
 ### Terminal capabilities, window title, and alt screen
@@ -109,7 +109,7 @@ renderer.setClipboard("answer: 42");   // paste it anywhere
 Every widget exists in three forms, all producing the same scene node
 structure:
 
-| Element | `@tern/react` | `@tern/solid` | Description |
+| Element | `@tern-tui/react` | `@tern-tui/solid` | Description |
 |---------|---------------|---------------|-------------|
 | Box | `<Box>` | `Box(props)` | Container: border, background, padding, flex layout |
 | Text | `<Text text="..." />` | `Text(props)` | Text leaf (string children are rejected in React) |
@@ -158,8 +158,8 @@ is materialized (**windowed rows**; a large dataset does not create one scene
 node per row — the full dataset stays JS bookkeeping in `tableRegionStates`,
 and the scroll clamp measures the full content height) — with per-column
 width/alignment: each cell padded to its column width, overflow truncated
-never mid-glyph, the highlighted row reversed. `<Table>` in `@tern/react`
-and `Table` in `@tern/solid` materialize the same factory.
+never mid-glyph, the highlighted row reversed. `<Table>` in `@tern-tui/react`
+and `Table` in `@tern-tui/solid` materialize the same factory.
 
 - `TableProps` — `columns: TableColumn[]`, `rows: (string | number)[][]`,
   `scroll_x` / `scroll_y` (offsets in cells), `highlight` (row index),
@@ -200,8 +200,8 @@ active tab's content nodes. The tab list is JS bookkeeping on the node props
   `ctrl+tab` / `ctrl+shift+tab` wrap to next / previous; `ctrl+w` closes the
   active tab. Returns `{ active, count }`.
 
-`<Tabs>` in `@tern/react` adds `focusId` / `focusManager` / `onChange` /
-`onClose`; `Tabs` in `@tern/solid` is the same factory, registered with a
+`<Tabs>` in `@tern-tui/react` adds `focusId` / `focusManager` / `onChange` /
+`onClose`; `Tabs` in `@tern-tui/solid` is the same factory, registered with a
 `FocusManager` and disposed via `disposeTabsFocus(node)`. No new napi node
 kind — the element materializes as a `box`.
 
@@ -221,8 +221,8 @@ positioned overlays.
   `20`).
 - `setProgress(node, value, max?)` — repaint a live bar in place (no rebuild).
 
-`<Progress>` in `@tern/react` resolves the `progress` component theme preset;
-`Progress` in `@tern/solid` re-exports `setProgress`.
+`<Progress>` in `@tern-tui/react` resolves the `progress` component theme preset;
+`Progress` in `@tern-tui/solid` re-exports `setProgress`.
 
 ### DiffView
 
@@ -244,7 +244,7 @@ region. `hunks` / `mode` / `inline_highlight` are consumed by the factory
 
 `scroll_x` / `scroll_y` pan the whole region; `wrap` passes through to each
 content leaf (`false` keeps every diff line single-row, the classic diff
-look). `<DiffView>` in `@tern/react` and `DiffView` in `@tern/solid`
+look). `<DiffView>` in `@tern-tui/react` and `DiffView` in `@tern-tui/solid`
 materialize the same factory.
 
 ### Textarea
@@ -266,9 +266,9 @@ node as JS bookkeeping and never reaches the scene props.
 
 `width` soft-wraps long lines into display rows (token-aware); `height` sets
 the visible window with vertical scroll-to-caret. `<Textarea>` in
-`@tern/react` adds `focusId` / `focusManager` / `onChange` / `onSubmit` and
+`@tern-tui/react` adds `focusId` / `focusManager` / `onChange` / `onSubmit` and
 registers with a `FocusManager` so routed keys edit it; `Textarea` in
-`@tern/solid` is the plain factory.
+`@tern-tui/solid` is the plain factory.
 
 #### Grapheme clusters
 
@@ -302,8 +302,8 @@ wrapping the content nodes (`content` prop or rest-arg children).
   `display: none`) and restores the recorded focus id, or blurs when nothing
   was recorded (or the recorded id was unregistered meanwhile).
 
-`<Modal>` in `@tern/react` takes the content as a `content` prop (no React
-children); `Modal` in `@tern/solid` is the plain factory.
+`<Modal>` in `@tern-tui/react` takes the content as a `content` prop (no React
+children); `Modal` in `@tern-tui/solid` is the plain factory.
 
 ### FocusManager
 
@@ -346,9 +346,9 @@ not a change callback prop.
   grapheme-cluster boundary (a mid-cluster cursor snaps to the boundary
   after its cluster — where its caret visually paints). Returns
   `{ lines, row, col }`.
-- `usePaste(handler, { isActive, focusManager })` (`@tern/react`) and
+- `usePaste(handler, { isActive, focusManager })` (`@tern-tui/react`) and
   `subscribePaste(renderer, handler, { isActive, focusManager })`
-  (`@tern/solid`) — route each paste through the `FocusManager` first
+  (`@tern-tui/solid`) — route each paste through the `FocusManager` first
   (`routePaste`); only when no focused element handles it does the tree-level
   `handler` receive the text. React tears the subscription down on unmount;
   Solid returns a disposer. A focused `<Input focusId>` / `<Textarea
@@ -386,20 +386,20 @@ not a change callback prop.
 
 ### Text selection
 
-`useSelection()` (`@tern/react`) and `subscribeSelection(renderer)`
-(`@tern/solid`) wire the selection state machine onto the renderer's mouse
+`useSelection()` (`@tern-tui/react`) and `subscribeSelection(renderer)`
+(`@tern-tui/solid`) wire the selection state machine onto the renderer's mouse
 events: press-drag-release selects, a double-click selects the word under
 the pointer, and release copies the selected text to the clipboard
 (copy-on-release). Each applied step repaints the scene so the native
 overlay renders; non-mouse events fall through.
 
 ```tsx
-// @tern/react
+// @tern-tui/react
 useSelection();
 ```
 
 ```ts
-// @tern/solid
+// @tern-tui/solid
 const dispose = subscribeSelection(renderer);   // returns a disposer
 ```
 
@@ -418,9 +418,9 @@ traversal moves between them, and every `down_left` click focuses the
 topmost registered node under the cursor.
 
 ```tsx
-// @tern/react
-import { Box, Input, Textarea, Select, Table, useInput } from "@tern/react";
-import { tableKey, focusManager } from "@tern/core";
+// @tern-tui/react
+import { Box, Input, Textarea, Select, Table, useInput } from "@tern-tui/react";
+import { tableKey, focusManager } from "@tern-tui/core";
 import { useRef } from "react";
 
 function ComposeForm() {
@@ -447,9 +447,9 @@ function ComposeForm() {
 ```
 
 ```ts
-// @tern/solid — the same scene, built with factories
-import { Box, Textarea, Select, Table, Input, useFocus } from "@tern/solid";
-import { editTextareaKey } from "@tern/core";
+// @tern-tui/solid — the same scene, built with factories
+import { Box, Textarea, Select, Table, Input, useFocus } from "@tern-tui/solid";
+import { editTextareaKey } from "@tern-tui/core";
 
 const box = Box({ flex_direction: "column", padding: 1 });
 box.addChild(Textarea({ lines: ["To:"], width: 60, height: 3 }));
@@ -469,9 +469,9 @@ when nothing was recorded). The `<Modal>` ref forwards to the modal node so
 the helpers can be called on it.
 
 ```tsx
-// @tern/react — content is a core Node[] prop (no React children)
-import { Modal } from "@tern/react";
-import { Box, Input, openModal, closeModal, useFocus, editKey } from "@tern/core";
+// @tern-tui/react — content is a core Node[] prop (no React children)
+import { Modal } from "@tern-tui/react";
+import { Box, Input, openModal, closeModal, useFocus, editKey } from "@tern-tui/core";
 import { useRef } from "react";
 
 // The overlay's focusable: registered first, so openModal's focusFirst()
@@ -488,7 +488,7 @@ const close = () => closeModal(modalRef.current!); // restores prior focus
 ```
 
 ```ts
-// @tern/solid
+// @tern-tui/solid
 const modal = Modal({ content: [
   Box({ padding: 1 }, Text({ text: "Apply this edit?" }),
       Input({ placeholder: "y/n" })),
@@ -503,7 +503,7 @@ Attach the wheel-scroll consumer to a `ScrollView` / `Table` ref; consumed
 wheels repaint the scene, other events fall through.
 
 ```tsx
-// @tern/react
+// @tern-tui/react
 const viewRef = useRef<Node | null>(null);
 useWheelScroll(viewRef);
 <ScrollView ref={viewRef} width={60} height={10} clip_height={10}>
@@ -512,7 +512,7 @@ useWheelScroll(viewRef);
 ```
 
 ```ts
-// @tern/solid
+// @tern-tui/solid
 const view = ScrollView({ width: 60, height: 10, clip_height: 10 });
 view.addChild(Text({ text: log }));
 subscribeWheelScroll(renderer, view);   // returns a disposer
@@ -528,12 +528,12 @@ routing (a bare Tab / Shift+Tab always moves focus), skip the ids in
 move.
 
 ```tsx
-// @tern/react
+// @tern-tui/react
 useFocusTraversal({ exclude: ["modal-input"] });
 ```
 
 ```ts
-// @tern/solid — the renderer is an explicit argument; manager defaults to
+// @tern-tui/solid — the renderer is an explicit argument; manager defaults to
 // the core module-level focusManager. Returns a disposer.
 const dispose = subscribeFocusTraversal(renderer, undefined, ["modal-input"]);
 ```
@@ -550,7 +550,7 @@ row count + string equality) for golden assertions — the canonical
 rounded-border scene:
 
 ```ts
-import { Box, Text, createRenderer, framesEqual } from "@tern/core";
+import { Box, Text, createRenderer, framesEqual } from "@tern-tui/core";
 
 const renderer = createRenderer();
 renderer.root.addChild(Box({ border_style: "rounded", padding: 1 },
@@ -630,23 +630,23 @@ so the loop observes it and sees `renderer.destroyed`).
 
 Elements that edit on keys register with a `FocusManager`:
 
-- `@tern/react`: `<Input focusId="...">`, `<Textarea focusId="...">` and
+- `@tern-tui/react`: `<Input focusId="...">`, `<Textarea focusId="...">` and
   `<Select focusId="...">` register automatically; `useFocus(id, nodeRef,
   onKey, onPaste?)` registers an arbitrary element's node.
-- `@tern/solid`: `useFocus(id, node, onKey, onPaste?)` (from `@tern/core`)
+- `@tern-tui/solid`: `useFocus(id, node, onKey, onPaste?)` (from `@tern-tui/core`)
   registers a node directly.
 
 The tree-level input hooks route each key through the manager first — when a
 focused element handles it, the tree handler is skipped:
 
-- `@tern/react`: `useInput(handler)`.
-- `@tern/solid`: `subscribeInput(renderer, handler)` (Solid has no context,
+- `@tern-tui/react`: `useInput(handler)`.
+- `@tern-tui/solid`: `subscribeInput(renderer, handler)` (Solid has no context,
   so the renderer is an explicit argument).
 
 Paste routing mirrors key routing: the tree-level paste hooks
-(`usePaste(handler, { isActive, focusManager })` in `@tern/react`,
+(`usePaste(handler, { isActive, focusManager })` in `@tern-tui/react`,
 `subscribePaste(renderer, handler, { isActive, focusManager })` in
-`@tern/solid`) route each paste through the manager's `routePaste` first — a
+`@tern-tui/solid`) route each paste through the manager's `routePaste` first — a
 focused element with an `onPaste` handler consumes it (a focused `<Input
 focusId>` / `<Textarea focusId>` auto-pastes via `pasteInto` /
 `pasteIntoTextarea`, firing `onChange`); only when nothing focused handles
@@ -663,39 +663,39 @@ or `null`.
 Click-to-focus routes a `down_left` press to the topmost registered focusable
 node under the cursor: the core `focusAt(renderer, event)` gates the press
 with `Renderer.hit_test` and walks the live scene tree via `focusIdFor`;
-`useClickToFocus(renderer)` (`@tern/react`) and
-`subscribeClickFocus(renderer)` (`@tern/solid`) wire it per app.
+`useClickToFocus(renderer)` (`@tern-tui/react`) and
+`subscribeClickFocus(renderer)` (`@tern-tui/solid`) wire it per app.
 
 ### Resize, focus and mouse consumers
 
 The Phase 2 event surface is consumed in the renderers:
 
-- **Resize reflow** — `useResize(handler)` (`@tern/react`) and
-  `subscribeResize(renderer, handler)` (`@tern/solid`) re-invoke
+- **Resize reflow** — `useResize(handler)` (`@tern-tui/react`) and
+  `subscribeResize(renderer, handler)` (`@tern-tui/solid`) re-invoke
   `renderer.render()` after each resize so the compositor re-lays out.
-- **Panel drag-resize** — `usePanelMouseDrag(panelsRef)` (`@tern/react`) and
-  `subscribePanelDrag(renderer, panels)` (`@tern/solid`) map mouse drags on
+- **Panel drag-resize** — `usePanelMouseDrag(panelsRef)` (`@tern-tui/react`) and
+  `subscribePanelDrag(renderer, panels)` (`@tern-tui/solid`) map mouse drags on
   the 1-cell gutters between panels to `flex_basis` changes (the core
   `startPanelDrag` / `dragPanels` / `endPanelDrag` helpers, clamped to the
   pane min sizes). Presses are gated by `renderer.hit_test(col, row)` so only
   painted gutter cells start a drag.
-- **Wheel scroll** — `useWheelScroll(viewRef)` (`@tern/react`) and
-  `subscribeWheelScroll(renderer, view)` (`@tern/solid`) map wheel events
+- **Wheel scroll** — `useWheelScroll(viewRef)` (`@tern-tui/react`) and
+  `subscribeWheelScroll(renderer, view)` (`@tern-tui/solid`) map wheel events
   (`scroll_up` / `scroll_down` / `scroll_left` / `scroll_right`) through the
   core `wheelScroll(view, event)` helper onto the view's offsets (`scrollBy`
   ±1, clamped to the content bounds; a `table` scrolls its content region so
   the sticky header stays pinned). A consumed wheel repaints the scene;
   non-wheel events fall through.
-- **Mouse selection** — `useSelection()` (`@tern/react`) and
-  `subscribeSelection(renderer)` (`@tern/solid`) wire the core selection
+- **Mouse selection** — `useSelection()` (`@tern-tui/react`) and
+  `subscribeSelection(renderer)` (`@tern-tui/solid`) wire the core selection
   helpers (`startSelection` / `dragSelection` / `endSelection`) onto the
   renderer's mouse events over the native selection overlay: press-drag-
   release selects, a double-click selects the word under the pointer, and
   release copies the selected text to the clipboard (copy-on-release —
   `copySelection` before `endSelection`). Each applied step repaints the
   scene; non-mouse events fall through.
-- **Focus-aware redraw** — the `@tern/react` `<Spinner>` mount effect and
-  `@tern/solid` `startSpinner` skip `tick()` / `render()` while the terminal
+- **Focus-aware redraw** — the `@tern-tui/react` `<Spinner>` mount effect and
+  `@tern-tui/solid` `startSpinner` skip `tick()` / `render()` while the terminal
   is unfocused, resuming on regain.
 
 ## Theme usage
@@ -714,14 +714,14 @@ per-component presets for `input` / `textarea` / `spinner` / `status_bar` /
   per-preset keys merge; the base is never mutated).
 - `resolveTheme(theme, props)` — stamp `fg` / `bg` / `border_style` onto
   props from `component` / `role` hints. Explicit props always win.
-- `@tern/react`: `<ThemeProvider theme={overrides}>` provides a merged theme
+- `@tern-tui/react`: `<ThemeProvider theme={overrides}>` provides a merged theme
   to the subtree; `useTheme()` reads it (defaults to `defaultTheme`).
-- `@tern/solid`: `setTheme(overrides)` swaps the module-level active theme
+- `@tern-tui/solid`: `setTheme(overrides)` swaps the module-level active theme
   (merged over `defaultTheme`); `getTheme()` reads it. Solid has no context,
   so the theme is global state.
 
 ```tsx
-// @tern/react
+// @tern-tui/react
 <ThemeProvider theme={{ palette: { primary: { fg: "#123456" } } }}>
   <Box role="primary" />            {/* fg resolves to #123456 */}
   <Box component="input" />         {/* border_style from the input preset */}
@@ -729,7 +729,7 @@ per-component presets for `input` / `textarea` / `spinner` / `status_bar` /
 ```
 
 ```ts
-// @tern/solid
+// @tern-tui/solid
 setTheme({ components: { input: { border_style: "double" } } });
 Input({ placeholder: "ask…" });     // framed box resolves the preset
 ```

@@ -121,7 +121,7 @@ burst of scene mutations repaints once instead of once per call
 
 ### 7. Removal of the redundant React pre-commit paint
 
-The `@tern/react` reconciler no longer paints in `prepareForCommit` — the
+The `@tern-tui/react` reconciler no longer paints in `prepareForCommit` — the
 pre-commit paint (of the pre-mutation tree) was redundant with the post-commit
 one. `resetAfterCommit` calls `renderer.render()` and is now the single paint
 per commit (`packages/react/src/reconciler.ts`).
@@ -183,7 +183,7 @@ The compositor is instrumented (`last_paint_mode`, `last_repainted_node_count`)
 so tests can prove a one-cell mutation takes the dirty path and a resize takes
 the full path (`src/core/tern-components/tests/incremental_consistency.rs`).
 
-### 10. Props incremental sync (tern-node + @tern/core)
+### 10. Props incremental sync (tern-node + @tern-tui/core)
 
 `Node.setProps` (`packages/core/src/index.ts`) no longer serializes the whole
 prop map and replaces it wholesale. It diffs the incoming map against the
@@ -269,7 +269,7 @@ requestFrame(callback?: () => void): () => void
 Usage example (an animation ticker):
 
 ```ts
-import { Spinner, createRenderer, tick } from "@tern/core";
+import { Spinner, createRenderer, tick } from "@tern-tui/core";
 
 const renderer = createRenderer({ title: "coalesced frames" });
 const spinner = Spinner({});
@@ -320,7 +320,7 @@ Notes:
   [Results](#results--read-them-honestly)); the second block mutates exactly
   one cell per frame — the incremental-layout target.
 - The TS bench (`tools/bench/render.bench.ts`) loads the real `tern-node`
-  addon through `@tern/core`, builds the same synthetic scene, and runs four
+  addon through `@tern-tui/core`, builds the same synthetic scene, and runs four
   scenarios: 0 = animated round-trip (N = 1000 `renderer.render()` calls with
   a `Spinner` tick between frames), 1 = no-change frames (epoch idle fast
   path), 2 = single-cell change frames (incremental-layout target), 3 =
