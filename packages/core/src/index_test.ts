@@ -6618,9 +6618,12 @@ Deno.test("focusAt defaults to the shared focusManager", () => {
 // The selection module drives the renderer's native selection overlay
 // (subtask 1) from mouse events: `down_left` starts a session (a double-click
 // within SELECTION_DOUBLE_CLICK_MS ms / one cell selects the word),
-// `drag_left` moves the active endpoint, any `up_*` ends the session with
-// clear-on-release. copySelection pushes the selection text to the clipboard;
-// selectionKey binds ctrl+shift+c (plain ctrl+c stays unconsumed).
+// `drag_left` moves the active endpoint, any `up_*` ends the session. The
+// overlay is persistent after release — a later copySelection still returns
+// the text — and is cleared by `escape` (selectionKey) or by a bare release
+// of a press that landed outside it (click-elsewhere). copySelection pushes
+// the selection text to the clipboard; selectionKey binds ctrl+shift+c
+// (plain ctrl+c stays unconsumed).
 //
 // Scenes are the fake painter's canonical single-row "hello world" (11x1, or
 // 11x2 for the multi-row '\n' join) painted via `snapshotFrame` so the fake
@@ -6835,7 +6838,7 @@ Deno.test("copySelection pushes the selection text to the clipboard", () => {
   });
 });
 
-Deno.test("endSelection clears the selection overlay on release (clear-on-release)", () => {
+Deno.test("selection overlay persists after release (persistent selection)", () => {
   withFakeAddon(() => {
     const renderer = createRenderer();
     renderer.root.addChild(Box({}, Text({ text: "hello world" })));
@@ -6848,15 +6851,99 @@ Deno.test("endSelection clears the selection overlay on release (clear-on-releas
       throw new Error(`active selectionText = ${JSON.stringify(renderer.selectionText())}`);
     }
 
-    // The release ends the session AND clears the overlay: no reversed cells
-    // survive the gesture.
+    // The release ends the session but leaves the overlay up: the reversed
+    // cells survive the gesture (a later copySelection still returns text).
     if (endSelection(renderer, mouse("up_left", 10, 0)) === null) {
       throw new Error("up_left must end the selection");
     }
-    if (renderer.selectionText() !== "") {
+    assertSelection({ col1: 6, row1: 0, col2: 10, row2: 0 });
+    if (renderer.selectionText() !== "world") {
       throw new Error(`selectionText after release = ${JSON.stringify(renderer.selectionText())}`);
     }
+    renderer.destroy();
+  });
+});
+
+Deno.test("copySelection after release returns the selected text", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Box({}, Text({ text: "hello world" })));
+    renderer.snapshotFrame(11, 1);
+    // Read through a function: TS control-flow narrowing would otherwise pin
+    // `lastClipboard` to the literal of the first assertion below.
+    const clipboard = (): string | null => lastClipboard;
+
+    startSelection(renderer, mouse("down_left", 6, 0));
+    dragSelection(renderer, mouse("drag_left", 10, 0));
+    if (endSelection(renderer, mouse("up_left", 10, 0)) === null) {
+      throw new Error("up_left must end the selection");
+    }
+    // The overlay persists after the release, so the copy still extracts the
+    // selected region — no copy-before-end requirement anymore.
+    copySelection(renderer);
+    if (clipboard() !== "world") {
+      throw new Error(`copy after release = ${JSON.stringify(clipboard())}`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("a bare press outside the persistent selection clears it (click-elsewhere)", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Box({}, Text({ text: "hello world" })));
+    renderer.snapshotFrame(11, 1);
+
+    // Select "world" (cols 6-10) and release: the overlay persists.
+    startSelection(renderer, mouse("down_left", 6, 0));
+    dragSelection(renderer, mouse("drag_left", 10, 0));
+    endSelection(renderer, mouse("up_left", 10, 0));
+    assertSelection({ col1: 6, row1: 0, col2: 10, row2: 0 });
+
+    // A bare press (no drag) on a cell outside the persistent rect is
+    // click-elsewhere: the release deselects — no 1-cell residue, no old
+    // overlay.
+    startSelection(renderer, mouse("down_left", 2, 0));
+    if (endSelection(renderer, mouse("up_left", 2, 0)) === null) {
+      throw new Error("up_left must end the selection");
+    }
     assertSelection(null);
+    if (renderer.selectionText() !== "") {
+      throw new Error(`selectionText after click-elsewhere = ${JSON.stringify(renderer.selectionText())}`);
+    }
+
+    // A bare press INSIDE the persistent rect is not click-elsewhere: it
+    // reselects the pressed cell and keeps the overlay (no clear).
+    startSelection(renderer, mouse("down_left", 6, 0));
+    dragSelection(renderer, mouse("drag_left", 10, 0));
+    endSelection(renderer, mouse("up_left", 10, 0));
+    startSelection(renderer, mouse("down_left", 8, 0));
+    endSelection(renderer, mouse("up_left", 8, 0));
+    assertSelection({ col1: 8, row1: 0, col2: 8, row2: 0 });
+    renderer.destroy();
+  });
+});
+
+Deno.test("selectionKey escape clears the persistent selection", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(Box({}, Text({ text: "hello world" })));
+    renderer.snapshotFrame(11, 1);
+
+    // Select "world" and release: the overlay persists.
+    startSelection(renderer, mouse("down_left", 6, 0));
+    dragSelection(renderer, mouse("drag_left", 10, 0));
+    endSelection(renderer, mouse("up_left", 10, 0));
+    assertSelection({ col1: 6, row1: 0, col2: 10, row2: 0 });
+
+    // `escape` is the explicit clear: consumed, and the overlay is gone.
+    if (selectionKey(renderer, { name: "escape", ctrl: false, alt: false, shift: false }) !== true) {
+      throw new Error("escape must be consumed");
+    }
+    assertSelection(null);
+    if (renderer.selectionText() !== "") {
+      throw new Error(`selectionText after escape = ${JSON.stringify(renderer.selectionText())}`);
+    }
     renderer.destroy();
   });
 });

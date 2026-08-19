@@ -51,8 +51,11 @@
  *   `SELECTION_DOUBLE_CLICK_MS` ms on nearby cells select the word under the
  *   pointer via `selectWordAt`), `copySelection(renderer)` copies the
  *   selection text to the system clipboard (OSC 52), and `selectionKey`
- *   binds `ctrl+shift+c` to copy — plain `ctrl+c` stays the exit convention
- *   and is never consumed.
+ *   binds `ctrl+shift+c` to copy and `escape` to clear. The overlay is
+ *   persistent: it survives the release (a later `copySelection` still
+ *   returns the text) and is replaced by a new selection, cleared by
+ *   `escape`, or deselected by a bare press outside it — plain `ctrl+c`
+ *   stays the exit convention and is never consumed.
  * - A theme system: `Theme` (a named palette of fg/bg per semantic role plus
  *   per-component style presets), `defaultTheme`, `mergeTheme(base, overrides)`
  *   and `resolveTheme(theme, props)`. Resolution consumes semantic hints
@@ -5906,10 +5909,12 @@ function topmostFocusId(root: Node, manager: FocusManager): string | null {
 // `down_left` press starts a selection session anchored at the pressed cell
 // ({@link startSelection}); each `drag_left` moves the active endpoint to the
 // dragged cell, extending the selection rect ({@link dragSelection}); any
-// `up_*` release ends the session ({@link endSelection}) — clear-on-release,
-// the overlay is transient and lives only while the mouse button is held, so
-// a released gesture leaves no reversed cells (persistent selection after
-// release is future work). The session lives per renderer (a WeakMap,
+// `up_*` release ends the session ({@link endSelection}) — the overlay is
+// persistent and survives the release, so a released gesture leaves the
+// reversed cells up for a later {@link copySelection}; a bare release of a
+// press that landed outside the previous selection (click-elsewhere)
+// deselects, and `escape` in {@link selectionKey} clears explicitly. The
+// session lives per renderer (a WeakMap,
 // mirroring `panelDrags`), so independent renderers never share selection
 // state.
 //
@@ -5933,8 +5938,9 @@ function topmostFocusId(root: Node, manager: FocusManager): string | null {
 // The helpers are pure interaction math over the renderer's selection API;
 // they never paint. The host drives the render loop — a `render()` after
 // routing mouse events paints the overlay (or clears it) — mirroring
-// `wheelScroll` / `focusAt`. A host that wants copy-on-release calls
-// {@link copySelection} before {@link endSelection}.
+// `wheelScroll` / `focusAt`. Because the overlay persists after release, a
+// host may copy at release (copy-on-release, `copySelection` before
+// `endSelection`) or lazily whenever the overlay is up.
 
 /** The double-click window: two `down_left` presses on nearby cells within
  * this many milliseconds synthesize a double-click (word select). */
@@ -5946,10 +5952,34 @@ interface SelectionSession {
   anchor: { col: number; row: number };
   /** The moving endpoint (updated by each {@link dragSelection}). */
   active: { col: number; row: number };
+  /** The overlay that was up when the press landed — the previous
+   * persistent selection, or `null` when the overlay was cleared (or the
+   * press synthesized a double-click, which deliberately replaces rather
+   * than click-elsewhere-deselects). A bare release of a press outside it
+   * clears the overlay ({@link endSelection}). */
+  prior: SelectionRange | null;
 }
 
 /** The active selection session per renderer (one at a time per renderer). */
 const selectionSessions = new WeakMap<Renderer, SelectionSession>();
+
+/** The renderer's selection overlay rect, mirrored on the JS side: the
+ * native surface exposes no selection getter, and the click-elsewhere clear
+ * in {@link endSelection} must know where the persistent overlay sat before
+ * the current gesture replaced it. Updated by every helper that applies or
+ * clears a selection (`null`/absent when the overlay is cleared). */
+const selectionLastRect = new WeakMap<Renderer, SelectionRange>();
+
+/** Whether the cell (`col`, `row`) lies inside the (possibly reversed)
+ * selection rect `range`. */
+function rangeContains(range: SelectionRange, col: number, row: number): boolean {
+  return (
+    col >= Math.min(range.col1, range.col2) &&
+    col <= Math.max(range.col1, range.col2) &&
+    row >= Math.min(range.row1, range.row2) &&
+    row <= Math.max(range.row1, range.row2)
+  );
+}
 
 /** The most recent `down_left` press per renderer, for double-click
  * synthesis. */
@@ -5999,8 +6029,11 @@ export function selectWordAt(renderer: Renderer, col: number, row: number): Sele
  * a nearby cell — within {@link SELECTION_DOUBLE_CLICK_MS} milliseconds and
  * no more than one cell away — is treated as a double-click and selects the
  * word under the pointer instead ({@link selectWordAt}; a double-click on
- * whitespace falls back to the 1-cell selection). Returns the applied
- * selection range, or `null` when the event is not `down_left`.
+ * whitespace falls back to the 1-cell selection). The overlay that was up
+ * when the press landed is recorded on the session: a bare release of a
+ * press outside it clears (click-elsewhere deselects), anything else
+ * replaces it. Returns the applied selection range, or `null` when the event
+ * is not `down_left`.
  */
 export function startSelection(renderer: Renderer, event: MouseEventJs): SelectionRange | null {
   if (event.kind !== "down_left") return null;
@@ -6012,6 +6045,10 @@ export function startSelection(renderer: Renderer, event: MouseEventJs): Selecti
     prev !== undefined &&
     at - prev.at <= SELECTION_DOUBLE_CLICK_MS &&
     Math.abs(col - prev.col) + Math.abs(row - prev.row) <= 1;
+  // Snapshot the overlay before this gesture replaces it: the click-
+  // elsewhere clear in {@link endSelection} judges a bare release against
+  // where the persistent selection sat when the press landed.
+  const prior = selectionLastRect.get(renderer) ?? null;
   let range: SelectionRange;
   if (doubleClick) {
     const word = selectWordAt(renderer, col, row);
@@ -6025,7 +6062,15 @@ export function startSelection(renderer: Renderer, event: MouseEventJs): Selecti
     range = { col1: col, row1: row, col2: col, row2: row };
     renderer.setSelection(col, row, col, row);
   }
-  selectionSessions.set(renderer, { anchor: { col, row }, active: { col, row } });
+  // A double-click never click-elsewhere-deselects: it is a deliberate
+  // replacement, so its session carries no `prior` (bare releases of it keep
+  // the applied word/1-cell overlay).
+  selectionSessions.set(renderer, {
+    anchor: { col, row },
+    active: { col, row },
+    prior: doubleClick ? null : prior,
+  });
+  selectionLastRect.set(renderer, range);
   selectionLastPress.set(renderer, { col, row, at });
   return range;
 }
@@ -6049,36 +6094,53 @@ export function dragSelection(renderer: Renderer, event: MouseEventJs): Selectio
     row2: session.active.row,
   };
   renderer.setSelection(range.col1, range.row1, range.col2, range.row2);
+  selectionLastRect.set(renderer, range);
   return range;
 }
 
 /**
- * End an active mouse selection: any `up_*` release clears the session and
- * the selection overlay — clear-on-release, the highlight is transient and
- * lives only while the mouse button is held. Returns the selection rect at
+ * End an active mouse selection: any `up_*` release ends the session but
+ * leaves the selection overlay up (persistent selection after release) — the
+ * highlight survives until a new selection replaces it, `escape` clears it
+ * ({@link selectionKey}), or a bare release of a press that landed outside
+ * the overlay up at press time clears it (click-elsewhere deselects). A drag
+ * release always persists the dragged rect. Returns the selection rect at
  * release, or `null` when no session was active (or the event is not an
- * `up_*` release). A host that wants the release-time text on the clipboard
- * calls {@link copySelection} before `endSelection` (copy-on-release).
+ * `up_*` release).
  */
 export function endSelection(renderer: Renderer, event: MouseEventJs): SelectionRange | null {
   const session = selectionSessions.get(renderer);
   if (session === undefined || !event.kind.startsWith("up")) return null;
   selectionSessions.delete(renderer);
-  renderer.clearSelection();
-  return {
+  const range: SelectionRange = {
     col1: session.anchor.col,
     row1: session.anchor.row,
     col2: session.active.col,
     row2: session.active.row,
   };
+  const bare =
+    session.anchor.col === session.active.col && session.anchor.row === session.active.row;
+  if (
+    bare && session.prior !== null &&
+    !rangeContains(session.prior, session.anchor.col, session.anchor.row)
+  ) {
+    // A bare click (no drag) outside the previous persistent selection is
+    // click-elsewhere: deselect instead of leaving the 1-cell press up.
+    renderer.clearSelection();
+    selectionLastRect.delete(renderer);
+  } else {
+    selectionLastRect.set(renderer, range);
+  }
+  return range;
 }
 
 /**
  * Copy the renderer's current selection text to the system clipboard (OSC 52
- * via {@link Renderer.setClipboard}): `setClipboard(selectionText())`. With
- * the v1 clear-on-release contract the copy must happen while the selection
- * is active — during the press-drag-release gesture, or in the host's
- * `up_*` handler before it calls {@link endSelection} (copy-on-release).
+ * via {@link Renderer.setClipboard}): `setClipboard(selectionText())`. The
+ * overlay is persistent (it survives {@link endSelection}), so the copy may
+ * happen during the gesture, right after the release, or any time before the
+ * overlay is cleared (by `escape`, a bare press outside it, or a new
+ * selection replacing it) — hosts can keep copy-on-release or copy lazily.
  */
 export function copySelection(renderer: Renderer): void {
   renderer.setClipboard(renderer.selectionText());
@@ -6086,16 +6148,24 @@ export function copySelection(renderer: Renderer): void {
 
 /**
  * The selection key handler: maps the copy key — `ctrl+shift+c` — to
- * {@link copySelection}, returning whether the key was consumed. Plain
- * `ctrl+c` (the app's exit convention) is deliberately not handled and
- * returns `false`, so it falls through to the exit binding. Note that some
- * terminal emulators intercept `ctrl+shift+c` for their own copy before the
- * app sees it; hosts that want a different copy key can pass a different
- * mapping.
+ * {@link copySelection} and `escape` to {@link Renderer.clearSelection} (the
+ * explicit clear for a persistent selection), returning whether the key was
+ * consumed. Plain `ctrl+c` (the app's exit convention) is deliberately not
+ * handled and returns `false`, so it falls through to the exit binding. Note
+ * that some terminal emulators intercept `ctrl+shift+c` for their own copy
+ * before the app sees it; hosts that want a different copy key can pass a
+ * different mapping.
  */
 export function selectionKey(renderer: Renderer, event: KeyEvent): boolean {
   if (event.name === "char" && event.char === "c" && event.ctrl && event.shift && !event.alt) {
     copySelection(renderer);
+    return true;
+  }
+  // `escape` is the explicit clear: the persistent selection (or a live one)
+  // is dismissed, so a later bare press starts fresh.
+  if (event.name === "escape") {
+    renderer.clearSelection();
+    selectionLastRect.delete(renderer);
     return true;
   }
   return false;

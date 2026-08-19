@@ -26,6 +26,7 @@ import {
   openModal,
   scrollTo,
   scrollToBottom,
+  selectionKey,
   setSelectionClockForTesting,
   useFocus as coreUseFocus,
   type KeyEvent,
@@ -3246,7 +3247,9 @@ Deno.test("useClickToFocus focuses the topmost registered node on a down_left an
 // `selectionFakeRows` frame the text/word reads draw from): a `down_left`
 // anchors the selection and re-renders (paints the overlay), a `drag_left`
 // extends it, and an `up_*` release copies the selected text
-// (copy-on-release) before clearing the overlay; a double-click (a second
+// (copy-on-release) and leaves the overlay up (persistent selection — the
+// highlight survives until `escape` or a bare press outside it
+// (click-elsewhere) clears it); a double-click (a second
 // press on a nearby cell within SELECTION_DOUBLE_CLICK_MS ms) selects the
 // word under the pointer instead; non-mouse events fall through; the
 // subscription is torn down on unmount.
@@ -3276,7 +3279,7 @@ function assertDragSelection(
   }
 }
 
-Deno.test("useSelection wires the core selection state machine (down/drag/up, copy-on-release, double-click word select)", async () => {
+Deno.test("useSelection wires the core selection state machine (down/drag/up, copy-on-release, persistent overlay, double-click word select)", async () => {
   setAddonForTesting(dragFakeAddon);
   try {
     const renderer = createRenderer();
@@ -3315,19 +3318,29 @@ Deno.test("useSelection wires the core selection state machine (down/drag/up, co
     assertDragSelection(sel(), { col1: 6, row1: 0, col2: 10, row2: 0 });
     if (renderCount() !== 2) throw new Error(`a drag must re-render (renders = ${renderCount()})`);
 
-    // An up_* release copies the selected text (copy-on-release) and clears
-    // the overlay (clear-on-release) — the transient highlight leaves no
-    // reversed cells after the gesture.
+    // An up_* release copies the selected text (copy-on-release) and ends
+    // the session but leaves the overlay up (persistent selection): the
+    // highlight survives until escape or a bare press outside it
+    // (click-elsewhere) clears it.
     emit("up_left", 10, 0);
     if (clipboard() !== "world") throw new Error(`copy-on-release = ${JSON.stringify(clipboard())}`);
-    assertDragSelection(sel(), null);
+    assertDragSelection(sel(), { col1: 6, row1: 0, col2: 10, row2: 0 });
     if (renderCount() !== 3) throw new Error(`an up must re-render (renders = ${renderCount()})`);
 
-    // A non-mouse event falls through: no selection, no re-render.
+    // A non-mouse event falls through: the persistent overlay is untouched
+    // and nothing re-renders.
     const rendersBefore = renderCount();
     dispatchEvent({ type: "key", key: { name: "char", char: "q", ctrl: false, alt: false, shift: false } });
-    assertDragSelection(sel(), null);
+    assertDragSelection(sel(), { col1: 6, row1: 0, col2: 10, row2: 0 });
     if (renderCount() !== rendersBefore) throw new Error("a key event must not re-render");
+
+    // `escape` is the explicit clear for the persistent selection: hosts
+    // route the core `selectionKey` (ctrl+shift+c / escape) through
+    // `useInput`. The escape is consumed and the overlay is gone.
+    if (selectionKey(renderer, keyEvent({ name: "escape" })) !== true) {
+      throw new Error("escape must be consumed");
+    }
+    assertDragSelection(sel(), null);
 
     // A double-click (a second press on a nearby cell within the window)
     // selects the word under the pointer instead of a 1-cell selection.
@@ -3346,7 +3359,10 @@ Deno.test("useSelection wires the core selection state machine (down/drag/up, co
     setSelectionClockForTesting(() => 2300); // +300 ms, but 2 cells away
     emit("down_left", 8, 0);
     assertDragSelection(sel(), { col1: 8, row1: 0, col2: 8, row2: 0 });
+    // The bare release of a press outside the overlay is click-elsewhere:
+    // it deselects (no 1-cell residue, no old overlay).
     emit("up_left", 8, 0);
+    assertDragSelection(sel(), null);
 
     // Unmount tears the subscription down: events no longer route.
     await act(() => {
