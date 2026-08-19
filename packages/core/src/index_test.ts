@@ -2276,6 +2276,53 @@ Deno.test("editKey backspace removes a ZWJ family emoji as one cluster", () => {
   }
 });
 
+/** A base plus a combining acute — one 2-code-unit grapheme cluster rendered
+ * in 1 terminal column (the mark is zero-width). */
+const COMBINING_ACUTE = "e\u{301}";
+
+Deno.test("editKey steps over a base+combining sequence as one cluster", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  // "a" + "e\u0301" + "b" is 3 grapheme clusters, each 1 display column:
+  // the combining mark rides on its base and is never a step of its own.
+  const mk = (caret: number) => Input({ value: `a${COMBINING_ACUTE}b`, caret });
+  // Right steps 0 → 1 → 2: over 'a', over the whole cluster, over 'b'.
+  const r1 = editKey(mk(0), { name: "right", ...base });
+  if (r1.caret !== 1) throw new Error(`right over a = ${r1.caret}`);
+  const r2 = editKey(mk(1), { name: "right", ...base });
+  if (r2.caret !== 2) throw new Error(`right over the combining cluster = ${r2.caret}`);
+  const r3 = editKey(mk(2), { name: "right", ...base });
+  if (r3.caret !== 3) throw new Error(`right over b = ${r3.caret}`);
+  // Left steps 2 → 1 → 0 — never a column between the base and its mark.
+  const l1 = editKey(mk(2), { name: "left", ...base });
+  if (l1.caret !== 1) throw new Error(`left over b = ${l1.caret}`);
+  const l2 = editKey(mk(1), { name: "left", ...base });
+  if (l2.caret !== 0) throw new Error(`left over the combining cluster = ${l2.caret}`);
+});
+
+Deno.test("editKey backspace removes a base+combining sequence whole", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  // Backspace from the end removes 'b', then the whole 2-code-unit cluster
+  // (base + mark together), then 'a' — never the bare base or lone mark.
+  const step1 = editKey(Input({ value: `a${COMBINING_ACUTE}b`, caret: 3 }), {
+    name: "backspace",
+    ...base,
+  });
+  if (step1.value !== `a${COMBINING_ACUTE}` || step1.caret !== 2) {
+    throw new Error(`backspace b = ${JSON.stringify(step1)}`);
+  }
+  const step2 = editKey(Input({ value: `a${COMBINING_ACUTE}`, caret: 2 }), {
+    name: "backspace",
+    ...base,
+  });
+  if (step2.value !== "a" || step2.caret !== 1) {
+    throw new Error(`backspace combining = ${JSON.stringify(step2)}`);
+  }
+  const step3 = editKey(Input({ value: "a", caret: 1 }), { name: "backspace", ...base });
+  if (step3.value !== "" || step3.caret !== 0) {
+    throw new Error(`backspace a = ${JSON.stringify(step3)}`);
+  }
+});
+
 Deno.test("pasteInto inserts text at the caret and advances the caret", () => {
   const input = Input({ value: "ab", caret: 1 });
   const next = pasteInto(input, "XY");
@@ -3249,6 +3296,72 @@ Deno.test("pasteIntoTextarea before a ZWJ cluster inserts at the cluster boundar
   if (snapped.lines[0] !== `a${FAMILY_EMOJI}Xb`) throw new Error(`snap value = ${snapped.lines[0]}`);
   if (snapped.row !== 0 || snapped.col !== 13) {
     throw new Error(`snap row/col = ${snapped.row}/${snapped.col}`);
+  }
+});
+
+Deno.test("editTextareaKey steps over a base+combining sequence as one cluster", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  // The line is 'a' + "e\u0301" + 'b'; col is a code-unit index. The
+  // combining cluster occupies code units 1..3 (base 'e' at 1, mark at 2);
+  // 'b' starts at 3.
+  const right1 = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 0 }), {
+    name: "right",
+    ...base,
+  });
+  if (right1.col !== 1) throw new Error(`right over a = ${right1.col}`);
+  const right2 = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 1 }), {
+    name: "right",
+    ...base,
+  });
+  if (right2.col !== 3) throw new Error(`right over the combining cluster = ${right2.col}`);
+  const right3 = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 3 }), {
+    name: "right",
+    ...base,
+  });
+  if (right3.col !== 4) throw new Error(`right over b = ${right3.col}`);
+  const left1 = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 4 }), {
+    name: "left",
+    ...base,
+  });
+  if (left1.col !== 3) throw new Error(`left over b = ${left1.col}`);
+  const left2 = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 3 }), {
+    name: "left",
+    ...base,
+  });
+  if (left2.col !== 1) throw new Error(`left over the combining cluster = ${left2.col}`);
+  const left3 = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 1 }), {
+    name: "left",
+    ...base,
+  });
+  if (left3.col !== 0) throw new Error(`left over a = ${left3.col}`);
+});
+
+Deno.test("editTextareaKey backspace and delete remove a base+combining sequence whole", () => {
+  const base = { ctrl: false, alt: false, shift: false } as const;
+  // Backspace before 'b' removes 'b'; backspace before the cluster removes
+  // the whole 2-code-unit base+mark pair, never a fragment.
+  const bsB = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 4 }), {
+    name: "backspace",
+    ...base,
+  });
+  if (bsB.lines[0] !== `a${COMBINING_ACUTE}` || bsB.col !== 3) {
+    throw new Error(`backspace b = ${JSON.stringify(bsB)}`);
+  }
+  const bsSeq = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 3 }), {
+    name: "backspace",
+    ...base,
+  });
+  if (bsSeq.lines[0] !== "ab" || bsSeq.col !== 1) {
+    throw new Error(`backspace combining = ${JSON.stringify(bsSeq)}`);
+  }
+  // Delete at the cluster boundary removes the whole cluster; the cursor
+  // stays at the boundary.
+  const del = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 1 }), {
+    name: "delete",
+    ...base,
+  });
+  if (del.lines[0] !== "ab" || del.col !== 1) {
+    throw new Error(`delete combining = ${JSON.stringify(del)}`);
   }
 });
 

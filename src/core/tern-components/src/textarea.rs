@@ -2,8 +2,9 @@
 //! lines, caret placement, and key handling.
 //!
 //! The component is plain state plus editing operations: `lines` (the logical
-//! lines of text), a char-index `row`/`col` cursor, and a `caret_visible`
-//! flag the renderer toggles for blinking. It mirrors [`Input`](crate::Input)
+//! lines of text), a char-index `row`/`col` cursor that always sits on a
+//! grapheme-cluster boundary, and a `caret_visible` flag the renderer toggles
+//! for blinking. It mirrors [`Input`](crate::Input)
 //! in spirit — same builder shape, same renderer-agnostic
 //! [`Key`](crate::Key) / [`KeyAction`](crate::KeyAction) mapping — but the
 //! edit model is multi-line: Enter splits the line, backspace/delete join
@@ -33,7 +34,7 @@
 //! Scope lock (subtask 3): the edit model only — insert/delete/navigation/
 //! split. No clipboard, IME composition, or selection.
 
-use tern_core::{char_width, strip_escapes};
+use tern_core::{char_width, clusters, strip_escapes};
 use tern_core::scene::{NodeId, PropValue, Scene};
 use tern_core::style::Style;
 
@@ -48,7 +49,9 @@ pub struct Textarea {
     /// Cursor row: the index into [`lines`](Self::lines).
     pub row: usize,
     /// Cursor column: a *char index* into `lines[row]` (0 = before the first
-    /// char, `chars().count()` = after the last).
+    /// char, `chars().count()` = after the last), always on a grapheme-cluster
+    /// boundary — editing and navigation step whole clusters
+    /// ([`tern_core::clusters`]) so a cluster is never split or straddled.
     pub col: usize,
     /// The style of the entered text.
     pub style: Style,
@@ -151,6 +154,10 @@ impl Textarea {
     // --- Editing ---------------------------------------------------------
 
     /// Insert `ch` at the cursor on the current line and advance past it.
+    /// The caret lands on the end of the cluster containing the inserted
+    /// char — an inserted base before a combining mark (or a combining mark
+    /// after a base) merges into one cluster, and the caret steps past it
+    /// whole.
     pub fn insert_char(&mut self, ch: char) {
         self.vertical_sticky = false;
         let line = &mut self.lines[self.row];
@@ -158,21 +165,46 @@ impl Textarea {
         let i = self.col.min(chars.len());
         chars.insert(i, ch);
         *line = chars.into_iter().collect();
-        self.col = i + 1;
+        // The inserted char can merge with a following combining mark into
+        // one cluster — inserting 'a' at col 0 of "\u{301}x" yields
+        // "a\u{301}x" with the caret past the whole cluster. Land on the end
+        // of the cluster containing the inserted index, falling back to
+        // `i + 1` if none does.
+        self.col = cluster_ranges(&self.lines[self.row])
+            .iter()
+            .find(|(start, end)| *start <= i && i < *end)
+            .map(|(_, end)| *end)
+            .unwrap_or(i + 1);
         self.preferred_col = self.current_display_col();
         self.scroll_to_caret();
     }
 
-    /// Delete the character before the cursor; at the start of a line, join
-    /// the line into the previous one (cursor at the join).
+    /// Delete the whole grapheme cluster before the cursor; at the start of a
+    /// line, join the line into the previous one (cursor at the join).
     pub fn delete_backward(&mut self) {
         self.vertical_sticky = false;
         if self.col > 0 {
             let line = &mut self.lines[self.row];
+            let ranges = cluster_ranges(line);
+            // The cluster to delete: the one whose range ends at `col` when
+            // `col` sits on a boundary, else the one containing `col` (a
+            // mid-cluster external write deletes the containing cluster
+            // whole); a `col` past the line's end deletes the last cluster.
+            let (start, end) = ranges
+                .iter()
+                .find(|(_, end)| *end == self.col)
+                .or_else(|| {
+                    ranges
+                        .iter()
+                        .find(|(start, end)| *start <= self.col && self.col < *end)
+                })
+                .or_else(|| ranges.iter().last())
+                .copied()
+                .unwrap_or((0, 0));
             let mut chars: Vec<char> = line.chars().collect();
-            chars.remove(self.col - 1);
+            chars.drain(start..end);
             *line = chars.into_iter().collect();
-            self.col -= 1;
+            self.col = start;
         } else if self.row > 0 {
             // Join into the previous line: the cursor lands at the join
             // point (the previous line's end, before the appended tail).
@@ -189,15 +221,24 @@ impl Textarea {
         self.scroll_to_caret();
     }
 
-    /// Delete the character under the cursor; at the end of a line, join the
-    /// next line into this one.
+    /// Delete the whole grapheme cluster under the cursor; at the end of a
+    /// line, join the next line into this one.
     pub fn delete_forward(&mut self) {
         self.vertical_sticky = false;
         let line_len = self.lines[self.row].chars().count();
         if self.col < line_len {
             let line = &mut self.lines[self.row];
+            let ranges = cluster_ranges(line);
+            // The cluster under the cursor: the one containing `col` (its
+            // start when `col` is on a boundary). A mid-cluster external
+            // `col` deletes the whole containing cluster.
+            let (start, end) = ranges
+                .iter()
+                .find(|(start, end)| *start <= self.col && self.col < *end)
+                .copied()
+                .unwrap_or((self.col, self.col + 1));
             let mut chars: Vec<char> = line.chars().collect();
-            chars.remove(self.col);
+            chars.drain(start..end);
             *line = chars.into_iter().collect();
         } else if self.row + 1 < self.lines.len() {
             let tail = self.lines.remove(self.row + 1);
@@ -212,6 +253,8 @@ impl Textarea {
 
     /// Split the current line at the cursor (Enter): the tail becomes a new
     /// line below it and the cursor moves to the start of the new line.
+    /// `col` is always on a grapheme-cluster boundary, so the char-vec split
+    /// below never cuts a cluster.
     pub fn split_line(&mut self) {
         self.vertical_sticky = false;
         let line = &self.lines[self.row];
@@ -238,12 +281,27 @@ impl Textarea {
 
     // --- Navigation ------------------------------------------------------
 
-    /// Move the cursor one character left; at the start of a line, jump to
-    /// the end of the previous line.
+    /// Move the cursor one grapheme cluster left (to the start of the
+    /// previous cluster); at the start of a line, jump to the end of the
+    /// previous line.
     pub fn move_left(&mut self) {
         self.vertical_sticky = false;
-        if self.col > 0 {
-            self.col -= 1;
+        let line_len = self.lines[self.row].chars().count();
+        // Clamp a past-end external `col` so the cluster lookup stays in
+        // range.
+        let col = self.col.min(line_len);
+        if col > 0 {
+            let ranges = cluster_ranges(&self.lines[self.row]);
+            // Step to the start of the cluster whose range ends at `col` (the
+            // previous cluster on a boundary); a mid-cluster `col` snaps to
+            // the start of the containing cluster instead of stepping past
+            // it.
+            self.col = ranges
+                .iter()
+                .find(|(_, end)| *end == col)
+                .or_else(|| ranges.iter().find(|(s, e)| *s <= col && col < *e))
+                .map(|(start, _)| *start)
+                .unwrap_or(0);
         } else if self.row > 0 {
             self.row -= 1;
             self.col = self.lines[self.row].chars().count();
@@ -252,13 +310,25 @@ impl Textarea {
         self.scroll_to_caret();
     }
 
-    /// Move the cursor one character right; at the end of a line, jump to the
-    /// start of the next line.
+    /// Move the cursor one grapheme cluster right (to the end of the cluster
+    /// under the cursor); at the end of a line, jump to the start of the next
+    /// line.
     pub fn move_right(&mut self) {
         self.vertical_sticky = false;
         let line_len = self.lines[self.row].chars().count();
-        if self.col < line_len {
-            self.col += 1;
+        // Clamp a past-end external `col` so the cluster lookup stays in
+        // range.
+        let col = self.col.min(line_len);
+        if col < line_len {
+            let ranges = cluster_ranges(&self.lines[self.row]);
+            // Step to the end of the cluster under the cursor (the cluster
+            // containing `col`, starting at `col` on a boundary); a
+            // mid-cluster `col` jumps to the end of the containing cluster.
+            self.col = ranges
+                .iter()
+                .find(|(start, end)| *start <= col && col < *end)
+                .map(|(_, end)| *end)
+                .unwrap_or(col + 1);
         } else if self.row + 1 < self.lines.len() {
             self.row += 1;
             self.col = 0;
@@ -267,7 +337,8 @@ impl Textarea {
         self.scroll_to_caret();
     }
 
-    /// Move the cursor to the start of the current line.
+    /// Move the cursor to the start of the current line (char index 0 is a
+    /// cluster boundary by definition).
     pub fn move_home(&mut self) {
         self.vertical_sticky = false;
         self.col = 0;
@@ -275,7 +346,8 @@ impl Textarea {
         self.scroll_to_caret();
     }
 
-    /// Move the cursor to the end of the current line.
+    /// Move the cursor to the end of the current line (`chars().count()` is
+    /// always a cluster boundary).
     pub fn move_end(&mut self) {
         self.vertical_sticky = false;
         self.col = self.lines[self.row].chars().count();
@@ -413,11 +485,27 @@ impl Textarea {
             .collect()
     }
 
+    /// The start char index of the cluster containing `col` in `lines[row]`;
+    /// `None` when `col` is past the line's end (callers keep `col`
+    /// unchanged). On a cluster boundary this returns `col` itself.
+    fn cluster_start_at(&self, row: usize, col: usize) -> Option<usize> {
+        let line = self.lines.get(row)?;
+        cluster_ranges(line)
+            .iter()
+            .find(|(start, end)| *start <= col && col < *end)
+            .map(|(start, _)| *start)
+    }
+
     /// The display-line offset (within `lines[row]`'s wrapped lines) that
     /// contains char index `col`. A char dropped by the wrap (e.g. a trailing
     /// space at a full row) maps to the display line it trails.
     fn offset_of_col(&self, row: usize, col: usize) -> usize {
         let wrapped = self.wrapped_with_offsets(row);
+        // Defensive: `col` is on a cluster boundary by construction, but an
+        // external write could leave it mid-cluster — snap to the containing
+        // cluster's start so a cluster is never attributed across display
+        // lines. The comparison below is char-space and stays exact.
+        let col = self.cluster_start_at(row, col).unwrap_or(col);
         for (i, (dl, start)) in wrapped.iter().enumerate() {
             if col <= start + dl.chars().count() {
                 return i;
@@ -433,12 +521,24 @@ impl Textarea {
 
     /// The caret's display column within the display line at `offset` of
     /// `row`, and the char index where that display line starts (within the
-    /// logical line).
+    /// logical line). The column sums *cluster* widths, not per-char widths.
     fn caret_display_in(&self, row: usize, offset: usize) -> (usize, usize) {
         let wrapped = self.wrapped_with_offsets(row);
         let (dl, start) = wrapped.get(offset).cloned().unwrap_or_default();
         let local = self.col.saturating_sub(start).min(dl.chars().count());
-        let col: usize = dl.chars().take(local).map(|c| char_width(c) as usize).sum();
+        // Walk whole clusters, accumulating width while the consumed char
+        // count stays within `local`: a ZWJ emoji cluster is one 2-column
+        // unit, a combining sequence renders at its base's width — the same
+        // columns the renderer paints.
+        let mut col = 0usize;
+        let mut consumed = 0usize;
+        for c in clusters(&dl) {
+            if consumed + c.text.chars().count() > local {
+                break;
+            }
+            consumed += c.text.chars().count();
+            col += c.width as usize;
+        }
         (col, start)
     }
 
@@ -473,13 +573,16 @@ impl Textarea {
         let (dl, start) = wrapped.get(offset).cloned().unwrap_or_default();
         let mut col = 0usize;
         let mut local = 0usize;
-        for ch in dl.chars() {
-            let w = char_width(ch) as usize;
+        // Step per cluster: a column inside a wide or multi-char cluster
+        // snaps to that cluster's start, and a whole cluster occupies its
+        // full width.
+        for c in clusters(&dl) {
+            let w = c.width as usize;
             if col + w > target_col {
                 break;
             }
             col += w;
-            local += 1;
+            local += c.text.chars().count();
         }
         start + local
     }
@@ -526,7 +629,7 @@ impl Textarea {
     /// compositor sizes it to the viewport (see
     /// [`Compositor::paint`](crate::Compositor::paint)).
     pub(crate) fn frame(&self) -> Box {
-        Box::new(self.frame_style, vec![])
+        Box::new(self.frame_style.clone(), vec![])
             .padding(self.padding as i64)
             .border(self.border as i64)
             .column()
@@ -552,7 +655,7 @@ impl Textarea {
                 .cloned()
                 .unwrap_or_default();
             let id = scene
-                .add_text(parent, &text, self.style)
+                .add_text(parent, &text, self.style.clone())
                 .expect("textarea line leaf under its frame");
             if self.caret_visible && display_row == caret_row {
                 let (caret_col, _) = self.caret_display_in(row, offset);
@@ -589,6 +692,21 @@ impl From<Textarea> for Renderable {
     fn from(textarea: Textarea) -> Self {
         Renderable::Textarea(textarea)
     }
+}
+
+/// The char-index ranges of `line`'s grapheme clusters: one `(start, end)`
+/// per cluster (end exclusive, in chars). Clusters are contiguous and
+/// non-overlapping, so a char index is either on a boundary (the end of one
+/// range equals the start of the next) or inside exactly one range.
+fn cluster_ranges(line: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    for c in clusters(line) {
+        let end = start + c.text.chars().count();
+        ranges.push((start, end));
+        start = end;
+    }
+    ranges
 }
 
 /// The display lines of `line` when soft-wrapped at `width` columns (at
@@ -1134,5 +1252,115 @@ mod tests {
         assert_eq!(buffer.cell(1, 3).unwrap().ch, 'r');
         let caret = buffer.cell(4, 3).unwrap();
         assert!(caret.style.modifiers.contains(Modifiers::REVERSED));
+    }
+
+    // --- grapheme-cluster editing ----------------------------------------
+
+    // The ZWJ family emoji (U+1F468 ZWJ U+1F469 ZWJ U+1F467 ZWJ U+1F466) is
+    // 7 chars in one cluster (char range 1..8 below); "e\u{301}" is a
+    // 2-char cluster. Written as escapes so the joiners cannot be lost in
+    // transit.
+    const FAMILY: &str = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+
+    #[test]
+    fn left_right_step_whole_grapheme_clusters() {
+        let mut ta = Textarea::with_value(&format!("a{FAMILY}e\u{301}b"));
+        assert_eq!(ta.lines[0].chars().count(), 11);
+        ta.move_end();
+        assert_eq!((ta.row, ta.col), (0, 11));
+        // Left steps whole clusters: past 'b', past the whole "e\u{301}"
+        // cluster, past the whole ZWJ emoji, to the start.
+        ta.move_left();
+        assert_eq!((ta.row, ta.col), (0, 10));
+        ta.move_left();
+        assert_eq!((ta.row, ta.col), (0, 8));
+        ta.move_left();
+        assert_eq!((ta.row, ta.col), (0, 1));
+        ta.move_left();
+        assert_eq!((ta.row, ta.col), (0, 0));
+        ta.move_left(); // sticks at the start
+        assert_eq!((ta.row, ta.col), (0, 0));
+        // Right walks back cluster by cluster to the end.
+        ta.move_right();
+        assert_eq!((ta.row, ta.col), (0, 1));
+        ta.move_right();
+        assert_eq!((ta.row, ta.col), (0, 8));
+        ta.move_right();
+        assert_eq!((ta.row, ta.col), (0, 10));
+        ta.move_right();
+        assert_eq!((ta.row, ta.col), (0, 11));
+    }
+
+    #[test]
+    fn delete_backward_removes_whole_clusters() {
+        let mut ta = Textarea::with_value(&format!("a{FAMILY}e\u{301}b"));
+        ta.move_end();
+        ta.delete_backward();
+        assert_eq!(ta.lines, vec![format!("a{FAMILY}e\u{301}")]);
+        assert_eq!(ta.col, 10);
+        ta.delete_backward();
+        assert_eq!(ta.lines, vec![format!("a{FAMILY}")]);
+        assert_eq!(ta.col, 8);
+        ta.delete_backward();
+        assert_eq!(ta.lines, vec!["a"]);
+        assert_eq!(ta.col, 1);
+        ta.delete_backward();
+        assert_eq!(ta.lines, vec![""]);
+        assert_eq!(ta.col, 0);
+    }
+
+    #[test]
+    fn delete_forward_removes_whole_clusters() {
+        // The ZWJ emoji vanishes whole with one delete.
+        let mut ta = Textarea::with_value(&format!("a{FAMILY}e\u{301}b"));
+        ta.col = 1;
+        ta.delete_forward();
+        assert_eq!(ta.lines, vec!["ae\u{301}b"]);
+        assert_eq!(ta.col, 1);
+        // The combining sequence vanishes whole too.
+        let mut ta = Textarea::with_value(&format!("a{FAMILY}e\u{301}b"));
+        ta.col = 8;
+        ta.delete_forward();
+        assert_eq!(ta.lines, vec![format!("a{FAMILY}b")]);
+        assert_eq!(ta.col, 8);
+    }
+
+    #[test]
+    fn caret_display_col_sums_cluster_widths() {
+        // "ab" (2 cols) + the ZWJ emoji (2 cols) = display col 4, not the 9
+        // a per-char width sum would give.
+        let mut emoji = Textarea::with_value(&format!("ab{FAMILY}"));
+        emoji.move_end();
+        assert_eq!(emoji.current_display_col(), 4);
+        // The combining sequence renders at its base's width: 2 cols.
+        let mut combining = Textarea::with_value("e\u{301}x");
+        combining.move_end();
+        assert_eq!(combining.current_display_col(), 2);
+        // Wide glyphs keep their 2-column width.
+        let mut wide = Textarea::with_value("aコb");
+        wide.move_end();
+        assert_eq!(wide.current_display_col(), 4);
+    }
+
+    #[test]
+    fn materialize_caret_prop_uses_cluster_width() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let mut ta = Textarea::with_value(&format!("ab{FAMILY}"));
+        ta.move_end();
+        let id = Renderable::from(ta).materialize(&mut scene, root);
+        let children = scene.children(id).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(scene.prop(children[0], "caret"), Some(&PropValue::Int(4)));
+    }
+
+    #[test]
+    fn split_line_never_cuts_a_cluster() {
+        let mut ta = Textarea::with_value(&format!("ab{FAMILY}c"));
+        ta.col = 2; // on the boundary before the emoji
+        ta.split_line();
+        assert_eq!(ta.lines, vec!["ab".to_string(), format!("{FAMILY}c")]);
+        assert_eq!(ta.row, 1);
+        assert_eq!(ta.col, 0);
     }
 }
