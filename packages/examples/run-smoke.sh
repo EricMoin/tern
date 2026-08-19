@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # run-smoke.sh — PTY smoke for the @tern/examples demos.
 #
-# Runs the four demos (react-demo, solid-demo, kitchen-sink-react,
-# kitchen-sink-solid) inside a macOS `script` pseudo-TTY, resizes the PTY
-# mid-session, then pipes 'q' in, and asserts each exits 0. A demo only
+# Runs the seven demos (react-demo, solid-demo, kitchen-sink-react,
+# kitchen-sink-solid, agent-transcript, file-browser, diff-review) inside a
+# macOS `script` pseudo-TTY, resizes the PTY mid-session, then pipes 'q' in,
+# and asserts each exits 0. A demo only
 # exits 0 when its scene rendered AND its scene assertions held AND the
 # event loop quit on 'q' — each demo asserts its scene, paints it, and
 # prints "ok: ..." lines (with a final "quit on 'q'" line) before exiting 0.
@@ -16,7 +17,7 @@
 # says so. Either way the runtime each demo used is reported below.
 #
 # Usage: bash packages/examples/run-smoke.sh
-# Exit: 0 when all four demos pass; 1 otherwise.
+# Exit: 0 when all seven demos pass; 1 otherwise.
 
 set -u
 
@@ -100,10 +101,13 @@ run_demo react-demo "$SCRIPT_DIR/react-demo.ts"
 run_demo solid-demo "$SCRIPT_DIR/solid-demo.ts"
 run_demo kitchen-sink-react "$SCRIPT_DIR/kitchen-sink-react.ts"
 run_demo kitchen-sink-solid "$SCRIPT_DIR/kitchen-sink-solid.ts"
+run_demo agent-transcript "$SCRIPT_DIR/agent-transcript.ts"
+run_demo file-browser "$SCRIPT_DIR/file-browser.ts"
+run_demo diff-review "$SCRIPT_DIR/diff-review.ts"
 
 echo "======================="
 if [ "$fail" -eq 0 ]; then
-  echo "run-smoke: PASS — all 4 demos (react-demo, solid-demo, kitchen-sink-react, kitchen-sink-solid) survived the pty resize (80x24 -> 111x31), rendered, asserted their scenes, and quit on 'q'"
+  echo "run-smoke: PASS — all 7 demos (react-demo, solid-demo, kitchen-sink-react, kitchen-sink-solid, agent-transcript, file-browser, diff-review) survived the pty resize (80x24 -> 111x31), rendered, asserted their scenes, and quit on 'q'"
   exit 0
 fi
 echo "run-smoke: FAIL — $fail demo(s) failed"
