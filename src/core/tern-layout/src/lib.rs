@@ -14,7 +14,7 @@
 //!
 //! | prop              | values                                                              | default |
 //! |-------------------|---------------------------------------------------------------------|---------|
-//! | `display`         | `Str("flex")` \| `Str("none")`                                      | `"flex"`|
+//! | `display`         | `Str("flex"\|"grid"\|"none")`                                       | `"flex"`|
 //! | `flex_direction`  | `Str("row"\|"column"\|"row-reverse"\|"column-reverse")`              | `"row"` |
 //! | `justify_content` | `Str("flex-start"\|"flex-end"\|"center"\|"space-between"\|"space-around"\|"space-evenly")` | unset |
 //! | `align_items`     | `Str("flex-start"\|"flex-end"\|"center"\|"stretch"\|"baseline")`     | unset (stretch) |
@@ -34,6 +34,9 @@
 //! | `flex_basis`      | `Int` \| `Float` (cells) — the item's initial main-axis size; flex grow/shrink resolves from it | auto   |
 //! | `position`        | `Str("relative"\|"absolute")`                                       | `"relative"` |
 //! | `top` / `right` / `bottom` / `left` | `Int` \| `Float` (cells, inset edges)                       | auto   |
+//! | `grid_template_columns` / `grid_template_rows` | `Str` — space-separated track tokens `<n>fr` (flex fraction), `<n>px` (cells), `<n>%` (percent), `auto`; unparseable tokens are skipped | empty (auto tracks) |
+//! | `grid_auto_flow`  | `Str("row"\|"column"\|"row-dense"\|"column-dense")`                | `"row"` |
+//! | `grid_row` / `grid_column` | `Int` (line index, positive from the start / negative from the end) \| `Str("span N")` (track span) — sets the start line, end stays auto (a one-track span) | auto |
 //! | `text`            | `Str` — content of a `Text` leaf                                     | —      |
 //! | `z_index`         | `Int` — paint order; consumed by the compositor, not the engine      | 0      |
 //! | `clip_x` / `clip_y` / `clip_width` / `clip_height` | `Int` (cells) — a clip rect restricting the node's subtree drawing to a bounded region; consumed by the compositor | unset (no clip) |
@@ -81,10 +84,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use taffy::geometry::{Rect as TaffyRect, Size as TaffySize};
+use taffy::geometry::{Line as TaffyLine, Rect as TaffyRect, Size as TaffySize};
 use taffy::style::{
-    AlignContent, AlignItems, AvailableSpace, Dimension, Display, FlexDirection, JustifyContent,
-    LengthPercentage, LengthPercentageAuto, Position, Style as TaffyStyle,
+    AlignContent, AlignItems, AvailableSpace, Dimension, Display, FlexDirection, GridAutoFlow,
+    GridPlacement, JustifyContent, LengthPercentage, LengthPercentageAuto,
+    NonRepeatedTrackSizingFunction, Position, Style as TaffyStyle, TrackSizingFunction,
+};
+use taffy::style_helpers::{
+    line as grid_line, span as grid_span, FromFlex, FromLength, FromPercent, TaffyAuto,
 };
 use taffy::tree::{Layout as TaffyLayout, NodeId as TaffyNodeId, TaffyTree};
 
@@ -1016,12 +1023,46 @@ fn props_to_style(props: &PropMap) -> TaffyStyle {
         prop_number(props, "margin_left"),
     );
 
+    // `display` switches the layout algorithm. `"none"` is additionally
+    // short-circuited earlier — the engine never builds a `display: none`
+    // node into the taffy tree (see `build_node`) — so this mapping is the
+    // defensive half of the same rule.
+    let display = match prop_str(props, "display") {
+        Some("grid") => Display::Grid,
+        Some("none") => Display::None,
+        _ => Display::Flex, // default
+    };
+
+    // Grid template tracks: space-separated `<n>fr` / `<n>px` / `<n>%` /
+    // `auto` tokens. Absent or unparseable strings yield an empty template,
+    // which taffy resolves as auto-sized implicit tracks (the CSS default).
+    let grid_template_columns = parse_grid_tracks(prop_str(props, "grid_template_columns"));
+    let grid_template_rows = parse_grid_tracks(prop_str(props, "grid_template_rows"));
+
+    let grid_auto_flow = match prop_str(props, "grid_auto_flow") {
+        Some("column") => GridAutoFlow::Column,
+        Some("row-dense") => GridAutoFlow::RowDense,
+        Some("column-dense") => GridAutoFlow::ColumnDense,
+        _ => GridAutoFlow::Row, // default
+    };
+
+    // Grid item placement: an integer line index or a `"span N"` string. Sets
+    // only the start line; the end stays `Auto`, which the placement
+    // algorithm resolves to a one-track span.
+    let grid_row = parse_grid_placement(props, "grid_row");
+    let grid_column = parse_grid_placement(props, "grid_column");
+
     TaffyStyle {
-        display: Display::Flex,
+        display,
         flex_direction,
         justify_content,
         align_items,
         align_content,
+        grid_template_columns,
+        grid_template_rows,
+        grid_auto_flow,
+        grid_row,
+        grid_column,
         gap: TaffySize {
             width: column_gap
                 .or(gap)
@@ -1143,6 +1184,90 @@ fn parse_percent(s: &str) -> Option<f32> {
     let num = s.strip_suffix('%')?;
     let value: f32 = num.parse().ok()?;
     Some(value / 100.0)
+}
+
+/// Parse a grid track template string into taffy track sizing functions.
+///
+/// The template is a space-separated list of track tokens (the string form
+/// the napi binding preserves — arrays/objects are dropped before the props
+/// reach the engine):
+///
+/// - `<n>fr` — a flex fraction: the track shares the container's free space
+///   proportionally (`1fr 2fr` splits it 1:2). taffy represents it as
+///   `min: auto, max: flex(n)`.
+/// - `<n>px` / bare `<n>` — a fixed length in cells.
+/// - `<n>%` — a percentage of the container's inner size (stored as a 0..1
+///   fraction, matching `LengthPercentage::Percent` semantics).
+/// - `auto` — content-sized (taffy's `Auto` sizing function).
+///
+/// Absent props, empty strings, and unparseable tokens all degrade
+/// panic-free: the offending token is skipped, and an empty template is left
+/// as-is (taffy resolves no explicit tracks as implicit auto tracks, the CSS
+/// default). No clamping is applied — negative or zero flex fractions pass
+/// through and taffy's own track sizing clamps geometry to non-negative.
+fn parse_grid_tracks(s: Option<&str>) -> Vec<TrackSizingFunction> {
+    s.map(|s| s.split_whitespace().filter_map(parse_grid_track).collect())
+        .unwrap_or_default()
+}
+
+/// Parse a single grid track token (see [`parse_grid_tracks`]); `None` for
+/// anything that is not a recognized track form.
+fn parse_grid_track(token: &str) -> Option<TrackSizingFunction> {
+    let t = token.trim();
+    if t == "auto" {
+        return Some(TrackSizingFunction::Single(
+            NonRepeatedTrackSizingFunction::AUTO,
+        ));
+    }
+    if let Some(num) = t.strip_suffix("fr") {
+        return Some(TrackSizingFunction::from_flex(num.trim().parse::<f32>().ok()?));
+    }
+    if let Some(num) = t.strip_suffix('%') {
+        let percent: f32 = num.trim().parse().ok()?;
+        return Some(TrackSizingFunction::from_percent(percent / 100.0));
+    }
+    if let Some(num) = t.strip_suffix("px") {
+        return Some(TrackSizingFunction::from_length(num.trim().parse::<f32>().ok()?));
+    }
+    // Bare number: a fixed length in cells (the JS docs advertise `10px 1fr`
+    // and bare `10` as equivalent fixed tracks).
+    t.parse::<f32>()
+        .ok()
+        .map(TrackSizingFunction::from_length)
+}
+
+/// Parse a grid item placement prop (`grid_row` / `grid_column`) into a taffy
+/// `Line<GridPlacement>`.
+///
+/// - `Int(n)` — a grid line index: positive counts from the start edge
+///   (line 1 is the first), negative from the end edge (line -1 is the last);
+///   0 is invalid and degrades to `Auto` (taffy treats it as auto placement).
+///   Only the start line is set; the end stays `Auto`, which the placement
+///   algorithm resolves to a one-track span.
+/// - `Str("span N")` — the item spans `N` tracks. Only the start span is set.
+///
+/// Absent props and any other value (e.g. a malformed string) yield
+/// `Line { Auto, Auto }` — the item is auto-placed by `grid_auto_flow`.
+fn parse_grid_placement(props: &PropMap, key: &str) -> TaffyLine<GridPlacement> {
+    match props.get(key) {
+        Some(PropValue::Int(i)) => {
+            let index = (*i).clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+            if index == 0 {
+                // 0 is not a valid grid line; taffy treats it as Auto.
+                TaffyLine { start: GridPlacement::Auto, end: GridPlacement::Auto }
+            } else {
+                grid_line::<TaffyLine<GridPlacement>>(index)
+            }
+        }
+        Some(PropValue::Str(s)) => {
+            let span = s.trim().strip_prefix("span").map(str::trim).and_then(|n| n.parse::<u16>().ok());
+            match span {
+                Some(n) => grid_span::<TaffyLine<GridPlacement>>(n),
+                None => TaffyLine { start: GridPlacement::Auto, end: GridPlacement::Auto },
+            }
+        }
+        _ => TaffyLine { start: GridPlacement::Auto, end: GridPlacement::Auto },
+    }
 }
 
 /// Read a boolean property.
@@ -2135,6 +2260,238 @@ mod tests {
         assert_eq!(parse_percent("50"), None);
         assert_eq!(parse_percent("50 %"), None);
         assert_eq!(parse_percent(""), None);
+    }
+
+    #[test]
+    fn props_to_style_maps_display_modes() {
+        // `display` picks the layout algorithm: "grid" switches the container
+        // to CSS grid, "none" hides it (the engine also skips such nodes
+        // before they reach taffy), and the default stays flex.
+        let grid = props_to_style(&PropMap::from([(
+            "display".to_string(),
+            PropValue::Str("grid".into()),
+        )]));
+        assert_eq!(grid.display, Display::Grid);
+
+        let none = props_to_style(&PropMap::from([(
+            "display".to_string(),
+            PropValue::Str("none".into()),
+        )]));
+        assert_eq!(none.display, Display::None);
+
+        assert_eq!(props_to_style(&PropMap::new()).display, Display::Flex);
+        assert_eq!(
+            props_to_style(&PropMap::from([(
+                "display".to_string(),
+                PropValue::Str("bogus".into()),
+            )]))
+            .display,
+            Display::Flex
+        );
+    }
+
+    #[test]
+    fn props_to_style_parses_grid_tracks() {
+        // Flex fractions: `1fr 2fr` -> two flex tracks.
+        let style = props_to_style(&PropMap::from([(
+            "grid_template_columns".to_string(),
+            PropValue::Str("1fr 2fr".into()),
+        )]));
+        assert_eq!(
+            style.grid_template_columns,
+            vec![TrackSizingFunction::from_flex(1.0), TrackSizingFunction::from_flex(2.0)]
+        );
+
+        // Mixed fixed/auto: `10px 1fr auto` -> length, flex, auto.
+        let style = props_to_style(&PropMap::from([(
+            "grid_template_rows".to_string(),
+            PropValue::Str("10px 1fr auto".into()),
+        )]));
+        assert_eq!(
+            style.grid_template_rows,
+            vec![
+                TrackSizingFunction::from_length(10.0),
+                TrackSizingFunction::from_flex(1.0),
+                TrackSizingFunction::Single(NonRepeatedTrackSizingFunction::AUTO),
+            ]
+        );
+
+        // Percent tracks store the 0..1 fraction (`50%` -> 0.5), and a bare
+        // number is a fixed length in cells.
+        let style = props_to_style(&PropMap::from([(
+            "grid_template_columns".to_string(),
+            PropValue::Str("50% 30".into()),
+        )]));
+        assert_eq!(
+            style.grid_template_columns,
+            vec![TrackSizingFunction::from_percent(0.5), TrackSizingFunction::from_length(30.0)]
+        );
+
+        // Absent / empty / garbage tokens degrade to an empty template (taffy
+        // falls back to implicit auto tracks), never a panic.
+        assert!(props_to_style(&PropMap::new()).grid_template_columns.is_empty());
+        assert!(props_to_style(&PropMap::from([(
+            "grid_template_columns".to_string(),
+            PropValue::Str("".into()),
+        )]))
+        .grid_template_columns
+        .is_empty());
+        let style = props_to_style(&PropMap::from([(
+            "grid_template_columns".to_string(),
+            PropValue::Str("1fr bogus @@ 2fr".into()),
+        )]));
+        assert_eq!(style.grid_template_columns, vec![TrackSizingFunction::from_flex(1.0), TrackSizingFunction::from_flex(2.0)]);
+    }
+
+    #[test]
+    fn props_to_style_maps_grid_auto_flow() {
+        let flow = |v: &str| {
+            props_to_style(&PropMap::from([("grid_auto_flow".to_string(), PropValue::Str(v.into()))]))
+                .grid_auto_flow
+        };
+        assert_eq!(flow("row"), GridAutoFlow::Row);
+        assert_eq!(flow("column"), GridAutoFlow::Column);
+        assert_eq!(flow("row-dense"), GridAutoFlow::RowDense);
+        assert_eq!(flow("column-dense"), GridAutoFlow::ColumnDense);
+        assert_eq!(flow("bogus"), GridAutoFlow::Row); // default
+        assert_eq!(props_to_style(&PropMap::new()).grid_auto_flow, GridAutoFlow::Row);
+    }
+
+    #[test]
+    fn props_to_style_maps_grid_placement() {
+        let auto = TaffyLine { start: GridPlacement::Auto, end: GridPlacement::Auto };
+
+        // An integer is a line index: positive from the start, negative from
+        // the end. Only the start is set; the end stays auto (one-track span).
+        let style = props_to_style(&PropMap::from([
+            ("grid_column".to_string(), PropValue::Int(2)),
+            ("grid_row".to_string(), PropValue::Int(-1)),
+        ]));
+        assert_eq!(style.grid_column, grid_line::<TaffyLine<GridPlacement>>(2));
+        assert_eq!(style.grid_row, grid_line::<TaffyLine<GridPlacement>>(-1));
+
+        // `"span N"` -> a track span.
+        let style = props_to_style(&PropMap::from([(
+            "grid_column".to_string(),
+            PropValue::Str("span 2".into()),
+        )]));
+        assert_eq!(style.grid_column, grid_span::<TaffyLine<GridPlacement>>(2));
+
+        // Zero is an invalid line -> auto placement; malformed strings and
+        // absent props also fall back to auto.
+        let style = props_to_style(&PropMap::from([("grid_row".to_string(), PropValue::Int(0))]));
+        assert_eq!(style.grid_row, auto);
+        let style = props_to_style(&PropMap::from([(
+            "grid_row".to_string(),
+            PropValue::Str("span".into()),
+        )]));
+        assert_eq!(style.grid_row, auto);
+        assert_eq!(props_to_style(&PropMap::new()).grid_column, auto);
+    }
+
+    #[test]
+    fn grid_two_by_two_places_children_into_cells() {
+        // A `display: grid` container with two `1fr` columns and two `1fr`
+        // rows splits the 100x50 viewport into four equal 50x25 cells; the
+        // four auto-placed children (no own size) stretch to fill their cell
+        // (the grid default alignment).
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        set_prop(&mut scene, root, "display", PropValue::Str("grid".into()));
+        set_prop(
+            &mut scene,
+            root,
+            "grid_template_columns",
+            PropValue::Str("1fr 1fr".into()),
+        );
+        set_prop(
+            &mut scene,
+            root,
+            "grid_template_rows",
+            PropValue::Str("1fr 1fr".into()),
+        );
+        let a = add_box(&mut scene, root);
+        let b = add_box(&mut scene, root);
+        let c = add_box(&mut scene, root);
+        let d = add_box(&mut scene, root);
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 50));
+        assert_eq!(rect_of(&out, root), Rect::new(0, 0, 100, 50));
+        assert_eq!(rect_of(&out, a), Rect::new(0, 0, 50, 25));
+        assert_eq!(rect_of(&out, b), Rect::new(50, 0, 50, 25));
+        assert_eq!(rect_of(&out, c), Rect::new(0, 25, 50, 25));
+        assert_eq!(rect_of(&out, d), Rect::new(50, 25, 50, 25));
+    }
+
+    #[test]
+    fn grid_explicit_placement_moves_children_to_cells() {
+        // `grid_row` / `grid_column` line indices place children in specific
+        // cells: positive counts from the start, negative from the end. On a
+        // 2-track axis the visible cells start at lines 1/2 (positive) or
+        // -3/-2 (negative); line -1 is the last *line*, so starting there
+        // with an auto end spans one track off the grid (CSS-correct).
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        set_prop(&mut scene, root, "display", PropValue::Str("grid".into()));
+        set_prop(
+            &mut scene,
+            root,
+            "grid_template_columns",
+            PropValue::Str("1fr 1fr".into()),
+        );
+        set_prop(
+            &mut scene,
+            root,
+            "grid_template_rows",
+            PropValue::Str("1fr 1fr".into()),
+        );
+        let top_left = add_box(&mut scene, root);
+        set_prop(&mut scene, top_left, "grid_row", PropValue::Int(1));
+        set_prop(&mut scene, top_left, "grid_column", PropValue::Int(1));
+        let top_right = add_box(&mut scene, root);
+        set_prop(&mut scene, top_right, "grid_row", PropValue::Int(1));
+        set_prop(&mut scene, top_right, "grid_column", PropValue::Int(2));
+        // Line -2 on a 2-track axis is the interior line: the item occupies
+        // the last row and the last column.
+        let bottom_right = add_box(&mut scene, root);
+        set_prop(&mut scene, bottom_right, "grid_row", PropValue::Int(-2));
+        set_prop(&mut scene, bottom_right, "grid_column", PropValue::Int(-2));
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 50));
+        assert_eq!(rect_of(&out, top_left), Rect::new(0, 0, 50, 25));
+        assert_eq!(rect_of(&out, top_right), Rect::new(50, 0, 50, 25));
+        assert_eq!(rect_of(&out, bottom_right), Rect::new(50, 25, 50, 25));
+    }
+
+    #[test]
+    fn grid_span_tracks_across_a_row() {
+        // `grid_column: "span 2"` stretches the child across both columns of
+        // the row it is placed in; an unplaced sibling auto-places into the
+        // next free cell.
+        let mut scene = new_scene();
+        let root = scene.root_id();
+        set_prop(&mut scene, root, "display", PropValue::Str("grid".into()));
+        set_prop(
+            &mut scene,
+            root,
+            "grid_template_columns",
+            PropValue::Str("1fr 1fr".into()),
+        );
+        set_prop(
+            &mut scene,
+            root,
+            "grid_template_rows",
+            PropValue::Str("1fr 1fr".into()),
+        );
+        let wide = add_box(&mut scene, root);
+        set_prop(&mut scene, wide, "grid_row", PropValue::Int(1));
+        set_prop(&mut scene, wide, "grid_column", PropValue::Str("span 2".into()));
+        let rest = add_box(&mut scene, root);
+        set_prop(&mut scene, rest, "grid_row", PropValue::Int(2));
+
+        let out = TaffyLayoutEngine::new().compute(&scene, Size::new(100, 50));
+        assert_eq!(rect_of(&out, wide), Rect::new(0, 0, 100, 25));
+        assert_eq!(rect_of(&out, rest), Rect::new(0, 25, 50, 25));
     }
 
 }
