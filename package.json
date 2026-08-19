@@ -12,7 +12,8 @@
   "scripts": {
     "check": "deno check packages/core/src/index.ts packages/react/src/index.ts packages/solid/src/index.ts packages/examples/src/index.ts",
     "build": "deno check packages/core/src/index.ts packages/react/src/index.ts packages/solid/src/index.ts packages/examples/src/index.ts",
-    "test": "deno test --allow-env=NODE_ENV packages/core/src packages/react/src packages/solid/src packages/examples/src"
+    "test": "deno test --allow-env=NODE_ENV packages/core/src packages/react/src packages/solid/src packages/examples/src",
+    "docs:api": "deno task docs:api"
   },
   "engines": {
     "node": ">=20"

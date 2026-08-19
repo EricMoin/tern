@@ -8,5 +8,8 @@ node_modules/
 # TypeScript build output (tsc -p tsconfig.build.json)
 /packages/*/dist/
 
+# Generated API reference site (deno task docs:api -> deno doc --html)
+/docs/api/
+
 # Native addon binaries (napi binding outputs)
 *.node
