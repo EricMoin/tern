@@ -60,6 +60,30 @@ impl Modifiers {
     }
 }
 
+/// The underline style of a text run, per the kitty extended SGR underline
+/// protocol (`\x1b[4:Nm`). `None` — the default — carries no style variant:
+/// the run underlines (if at all) through the legacy `Modifiers::UNDERLINE`
+/// bit, exactly as before the field existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum UnderlineStyle {
+    /// No underline style variant (the default). The legacy
+    /// [`Modifiers::UNDERLINE`] bit — when set — still paints a plain
+    /// underline.
+    #[default]
+    None,
+    /// A single (plain) underline — `\x1b[4:1m`, the extended spelling of
+    /// the legacy `\x1b[4m`.
+    Single,
+    /// A double underline — `\x1b[4:2m`.
+    Double,
+    /// A curly (squiggly) underline — `\x1b[4:3m`.
+    Curly,
+    /// A dotted underline — `\x1b[4:4m`.
+    Dotted,
+    /// A dashed underline — `\x1b[4:5m`.
+    Dashed,
+}
+
 /// Border glyph set used when drawing a box frame.
 ///
 /// The compositor picks the concrete glyphs; tern-core only carries the
@@ -100,6 +124,18 @@ pub struct Style {
     /// plain text. The field participates in style equality, so a hyperlink
     /// change splits terminal runs at the link boundary.
     pub hyperlink: Option<Box<str>>,
+    /// The underline style variant of the run's text. `None` — the default —
+    /// leaves the run to the legacy [`Modifiers::UNDERLINE`] bit; any other
+    /// variant paints the kitty extended SGR underline (`\x1b[4:Nm`) when the
+    /// terminal supports it, and falls back to a plain underline otherwise.
+    /// The field participates in style equality, so a variant change splits
+    /// terminal runs at the underline boundary.
+    pub underline_style: UnderlineStyle,
+    /// The color the run's underline is painted with (kitty extended SGR
+    /// `\x1b[58;...m`). `None` — the default — paints the underline in the
+    /// terminal's default color. The field participates in style equality,
+    /// so an underline color change splits terminal runs.
+    pub underline_color: Option<Color>,
 }
 
 impl Style {
@@ -112,6 +148,8 @@ impl Style {
             border_style: BorderStyle::None,
             border_color: Color::Default,
             hyperlink: None,
+            underline_style: UnderlineStyle::None,
+            underline_color: None,
         }
     }
 
@@ -161,6 +199,21 @@ impl Style {
         self.hyperlink = hyperlink;
         self
     }
+
+    /// Builder: set the underline style variant. `UnderlineStyle::None` (the
+    /// default) restores the legacy behavior — the underline, when any,
+    /// comes from the `Modifiers::UNDERLINE` bit.
+    pub const fn underline_style(mut self, underline_style: UnderlineStyle) -> Self {
+        self.underline_style = underline_style;
+        self
+    }
+
+    /// Builder: set the color the underline is painted with. `None` (the
+    /// default) leaves the underline in the terminal's current color.
+    pub const fn underline_color(mut self, underline_color: Option<Color>) -> Self {
+        self.underline_color = underline_color;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +248,8 @@ mod tests {
         assert_eq!(s.border_style, BorderStyle::None);
         assert_eq!(s.border_color, Color::Default); // unset by default
         assert!(s.hyperlink.is_none()); // unset by default
+        assert_eq!(s.underline_style, UnderlineStyle::None); // no variant by default
+        assert!(s.underline_color.is_none()); // no underline color by default
         assert!(s.modifiers.is_empty());
 
         let s2 = Style::new()
@@ -239,5 +294,77 @@ mod tests {
 
         let same_a = Style::new().hyperlink(Some("a".into()));
         assert_eq!(a, same_a, "equal hyperlinks are equal");
+    }
+
+    #[test]
+    fn underline_style_builder_round_trip() {
+        let s = Style::new().underline_style(UnderlineStyle::Curly);
+        assert_eq!(s.underline_style, UnderlineStyle::Curly);
+        // Field readback equals a literal-constructed style.
+        let literal = Style {
+            underline_style: UnderlineStyle::Curly,
+            ..Style::new()
+        };
+        assert_eq!(s, literal);
+        // Clone preserves the variant.
+        let cloned = s.clone();
+        assert_eq!(cloned.underline_style, UnderlineStyle::Curly);
+        // Every variant is constructible and distinguishable.
+        let variants = [
+            UnderlineStyle::None,
+            UnderlineStyle::Single,
+            UnderlineStyle::Double,
+            UnderlineStyle::Curly,
+            UnderlineStyle::Dotted,
+            UnderlineStyle::Dashed,
+        ];
+        for (i, v) in variants.iter().enumerate() {
+            for (j, w) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(v, w);
+                } else {
+                    assert_ne!(v, w);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn underline_color_builder_round_trip() {
+        let s = Style::new().underline_color(Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(s.underline_color, Some(Color::Rgb(255, 0, 0)));
+        // Field readback equals a literal-constructed style.
+        let literal = Style {
+            underline_color: Some(Color::Rgb(255, 0, 0)),
+            ..Style::new()
+        };
+        assert_eq!(s, literal);
+        // Clone preserves the color.
+        let cloned = s.clone();
+        assert_eq!(cloned.underline_color, Some(Color::Rgb(255, 0, 0)));
+        // None restores the default.
+        let cleared = Style::new().underline_color(None);
+        assert_eq!(cleared.underline_color, None);
+    }
+
+    #[test]
+    fn underline_fields_participate_in_equality() {
+        // Different variants split runs: curly differs from double, and any
+        // variant differs from the default (no variant).
+        let curly = Style::new().underline_style(UnderlineStyle::Curly);
+        let double = Style::new().underline_style(UnderlineStyle::Double);
+        assert_ne!(curly, double, "different variants differ");
+        assert_ne!(curly, Style::new(), "variant vs none differ");
+
+        // Equal variants are equal.
+        let curly_again = Style::new().underline_style(UnderlineStyle::Curly);
+        assert_eq!(curly, curly_again, "equal variants are equal");
+
+        // An underline color differs from none, and from another color.
+        let red = Style::new().underline_color(Some(Color::Rgb(255, 0, 0)));
+        let green = Style::new().underline_color(Some(Color::Rgb(0, 255, 0)));
+        assert_ne!(red, Style::new(), "colored underline vs none differ");
+        assert_ne!(red, green, "different underline colors differ");
+        assert_eq!(red, Style::new().underline_color(Some(Color::Rgb(255, 0, 0))));
     }
 }

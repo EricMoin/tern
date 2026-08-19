@@ -151,6 +151,59 @@ fn render_to_buffer_styled_surfaces_hyperlink_on_linked_run() {
 }
 
 #[test]
+fn render_to_buffer_styled_surfaces_underline_variants_and_color() {
+    // A run whose cells carry an underline style variant reports the variant
+    // keyword as `underline_style`, and a run whose cells carry an underline
+    // color reports it as `underline_color` — the values the engine threads
+    // from the `underline_style` / `underline_color` style keys into
+    // `Style::underline_style` / `Style::underline_color`. The variants
+    // participate in style equality, so the double/curly/dotted runs split
+    // from each other and from the default-styled border exactly like a
+    // colored or bold run does.
+    let mut scene = Scene::new();
+    let root = scene.root_id();
+    scene
+        .add_text(
+            root,
+            "abc",
+            Style::new().underline_style(UnderlineStyle::Double),
+        )
+        .expect("add double-underlined text");
+    scene
+        .add_text(
+            root,
+            "def",
+            Style::new().underline_style(UnderlineStyle::Curly),
+        )
+        .expect("add curly-underlined text");
+    scene
+        .add_text(
+            root,
+            "ghi",
+            Style::new().underline_style(UnderlineStyle::Dotted),
+        )
+        .expect("add dotted-underlined text");
+    scene
+        .add_text(
+            root,
+            "!",
+            Style::new().underline_color(Some(_Color::Rgb(255, 0, 0))),
+        )
+        .expect("add colored-underline text");
+
+    let runs = paint_scene_runs_with_selection(&scene, Size::new(10, 1), None);
+    assert_eq!(
+        runs,
+        vec![vec![
+            underline_run("abc", "double"),
+            underline_run("def", "curly"),
+            underline_run("ghi", "dotted"),
+            underline_color_run("!", "#ff0000"),
+        ]]
+    );
+}
+
+#[test]
 fn render_to_buffer_styled_text_reconstructs_plain_rows() {
     // The styled snapshot must never change the painted text:
     // concatenating each row's run texts reproduces the

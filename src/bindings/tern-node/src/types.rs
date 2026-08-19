@@ -72,7 +72,12 @@ pub struct HighlightSpanJs {
 /// unstyled run carries just `text`. A run whose cells carry a hyperlink
 /// reports the link target as `hyperlink` — the value the engine threads
 /// from the `href` style key into `Style::hyperlink` (see
-/// [`apply_style_key`](crate::convert::apply_style_key)).
+/// [`apply_style_key`](crate::convert::apply_style_key)). A run whose cells
+/// carry an extended underline reports `underline_style` (the kitty
+/// `\x1b[4:Nm` variant keyword) and `underline_color` — the values the
+/// engine threads from the `underline_style` / `underline_color` style
+/// keys into `Style::underline_style` / `Style::underline_color`; both are
+/// present only when set.
 #[napi(object)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct StyleRunJs {
@@ -85,6 +90,13 @@ pub struct StyleRunJs {
     /// The hyperlink target (a URL) the run's cells paint as an OSC 8
     /// hyperlink, present only when the cells carry one.
     pub hyperlink: Option<String>,
+    /// The underline style variant the run's cells paint (`"single"`,
+    /// `"double"`, `"curly"`, `"dotted"`, or `"dashed"`), present only when
+    /// the cells carry one.
+    pub underline_style: Option<String>,
+    /// The color the run's underline is painted with, present only when the
+    /// cells carry one.
+    pub underline_color: Option<String>,
     /// Whether the run is bold.
     pub bold: Option<bool>,
     /// Whether the run is dim.

@@ -28,6 +28,8 @@ fn plain_run(text: &str) -> StyleRunJs {
         fg: None,
         bg: None,
         hyperlink: None,
+        underline_style: None,
+        underline_color: None,
         bold: None,
         dim: None,
         italic: None,
@@ -45,6 +47,8 @@ fn bold_red_run(text: &str) -> StyleRunJs {
         fg: Some("#ff0000".to_string()),
         bg: None,
         hyperlink: None,
+        underline_style: None,
+        underline_color: None,
         bold: Some(true),
         dim: None,
         italic: None,
@@ -62,6 +66,8 @@ fn red_border_run(text: &str) -> StyleRunJs {
         fg: Some("#ff0000".to_string()),
         bg: None,
         hyperlink: None,
+        underline_style: None,
+        underline_color: None,
         bold: None,
         dim: None,
         italic: None,
@@ -79,6 +85,46 @@ fn linked_run(text: &str) -> StyleRunJs {
         fg: None,
         bg: None,
         hyperlink: Some("https://example.com".to_string()),
+        underline_style: None,
+        underline_color: None,
+        bold: None,
+        dim: None,
+        italic: None,
+        underline: None,
+        reversed: None,
+        strikethrough: None,
+    }
+}
+
+/// A run carrying the given underline style keyword (`"double"`, `"curly"`,
+/// `"dotted"`, ...) — the style key the underline golden text's cells paint.
+fn underline_run(text: &str, underline_style: &str) -> StyleRunJs {
+    StyleRunJs {
+        text: text.to_string(),
+        fg: None,
+        bg: None,
+        hyperlink: None,
+        underline_style: Some(underline_style.to_string()),
+        underline_color: None,
+        bold: None,
+        dim: None,
+        italic: None,
+        underline: None,
+        reversed: None,
+        strikethrough: None,
+    }
+}
+
+/// A run carrying an underline color `"#rrggbb"` — the colored-underline
+/// golden text's cells paint their underline with.
+fn underline_color_run(text: &str, underline_color: &str) -> StyleRunJs {
+    StyleRunJs {
+        text: text.to_string(),
+        fg: None,
+        bg: None,
+        hyperlink: None,
+        underline_style: None,
+        underline_color: Some(underline_color.to_string()),
         bold: None,
         dim: None,
         italic: None,

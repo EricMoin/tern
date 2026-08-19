@@ -180,19 +180,21 @@ pub(crate) fn buffer_rows(buffer: &Buffer) -> Vec<String> {
 }
 
 /// The exposed style of a painted cell — the fields [`StyleRunJs`] carries:
-/// fg, bg, the hyperlink target, and the six surfaced modifiers. Two
-/// adjacent cells merge into one run exactly when their `RunStyle` keys are
-/// equal; border style and the unsurfaced blink/hidden modifiers do not
-/// split runs, so an uncolored box's border cells stay one run with its
-/// surrounding default-styled blanks. A set `border_color` paints the
-/// border glyphs with that color as their foreground (see `paint_box`), so
-/// a colored border surfaces as its own `fg`-carrying run — the styled
-/// snapshot reports it through `fg`.
+/// fg, bg, the hyperlink target, the extended underline variant/color, and
+/// the six surfaced modifiers. Two adjacent cells merge into one run exactly
+/// when their `RunStyle` keys are equal; border style and the unsurfaced
+/// blink/hidden modifiers do not split runs, so an uncolored box's border
+/// cells stay one run with its surrounding default-styled blanks. A set
+/// `border_color` paints the border glyphs with that color as their
+/// foreground (see `paint_box`), so a colored border surfaces as its own
+/// `fg`-carrying run — the styled snapshot reports it through `fg`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RunStyle {
     fg: Color,
     bg: Color,
     hyperlink: Option<Box<str>>,
+    underline_style: Option<UnderlineStyle>,
+    underline_color: Option<Color>,
     bold: bool,
     dim: bool,
     italic: bool,
@@ -208,6 +210,9 @@ impl RunStyle {
             fg: style.fg,
             bg: style.bg,
             hyperlink: style.hyperlink,
+            underline_style: (style.underline_style != UnderlineStyle::None)
+                .then_some(style.underline_style),
+            underline_color: style.underline_color,
             bold: style.modifiers.contains(Modifiers::BOLD),
             dim: style.modifiers.contains(Modifiers::DIM),
             italic: style.modifiers.contains(Modifiers::ITALIC),
@@ -225,6 +230,8 @@ impl RunStyle {
             fg: color_to_string(self.fg),
             bg: color_to_string(self.bg),
             hyperlink: self.hyperlink.map(|h| h.into_string()),
+            underline_style: self.underline_style.map(underline_style_str),
+            underline_color: self.underline_color.and_then(color_to_string),
             bold: self.bold.then_some(true),
             dim: self.dim.then_some(true),
             italic: self.italic.then_some(true),
@@ -233,6 +240,22 @@ impl RunStyle {
             strikethrough: self.strikethrough.then_some(true),
         }
     }
+}
+
+/// The JS-facing keyword of an underline style variant — the inverse of
+/// [`parse_underline_style`](crate::convert::parse_underline_style).
+/// `None` never surfaces through [`RunStyle::to_run`] (the key is present
+/// only when set), but the match must be total.
+fn underline_style_str(style: UnderlineStyle) -> String {
+    match style {
+        UnderlineStyle::None => "none",
+        UnderlineStyle::Single => "single",
+        UnderlineStyle::Double => "double",
+        UnderlineStyle::Curly => "curly",
+        UnderlineStyle::Dotted => "dotted",
+        UnderlineStyle::Dashed => "dashed",
+    }
+    .to_string()
 }
 
 /// The JS-facing string form of a color: `"#rrggbb"` for truecolor,

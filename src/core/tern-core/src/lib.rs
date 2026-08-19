@@ -37,4 +37,4 @@ pub use cursor::{Cursor, CursorShape};
 pub use layout::LayoutEngine;
 pub use rect::{Rect, Size};
 pub use scene::{NodeId, NodeKind, PropMap, PropValue, Scene, SceneNode, Span};
-pub use style::{BorderStyle, Modifiers, Style};
+pub use style::{BorderStyle, Modifiers, Style, UnderlineStyle};

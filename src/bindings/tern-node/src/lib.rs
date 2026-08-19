@@ -65,7 +65,7 @@ use tern_core::buffer::{diff, Buffer};
 use tern_core::cell::CellUpdate;
 use tern_core::rect::Rect;
 use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene, Span};
-use tern_core::style::{BorderStyle, Modifiers, Style};
+use tern_core::style::{BorderStyle, Modifiers, Style, UnderlineStyle};
 use tern_core::{Color, Cursor, Size};
 use tern_terminal::backend::Backend;
 #[cfg(feature = "poll-fallback")]
