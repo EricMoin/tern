@@ -53,19 +53,110 @@ pub fn highlight(language: String, source: String) -> Result<Vec<HighlightSpanJs
     };
     Ok(tern_highlight::highlight(lang, &source)
         .into_iter()
-        .map(|span| HighlightSpanJs {
-            text: span.text,
-            fg: span
-                .style
-                .fg
-                .rgb()
-                .map(|(r, g, b)| format!("#{r:02x}{g:02x}{b:02x}")),
-            bold: span.style.modifiers.contains(Modifiers::BOLD),
-            italic: span.style.modifiers.contains(Modifiers::ITALIC),
-            dim: span.style.modifiers.contains(Modifiers::DIM),
-            underline: span.style.modifiers.contains(Modifiers::UNDERLINE),
-        })
+        .map(span_to_highlight_js)
         .collect())
+}
+
+/// Map a tern [`Span`] onto the JS highlight span shape: the `fg` as a
+/// `"#rrggbb"` hex string and the boolean modifier keys. The style-key shape
+/// mirrors the `append_span` convention, so a JS consumer can feed the span
+/// straight into a `streaming_text` node.
+pub(crate) fn span_to_highlight_js(span: Span) -> HighlightSpanJs {
+    HighlightSpanJs {
+        text: span.text,
+        fg: span
+            .style
+            .fg
+            .rgb()
+            .map(|(r, g, b)| format!("#{r:02x}{g:02x}{b:02x}")),
+        bold: span.style.modifiers.contains(Modifiers::BOLD),
+        italic: span.style.modifiers.contains(Modifiers::ITALIC),
+        dim: span.style.modifiers.contains(Modifiers::DIM),
+        underline: span.style.modifiers.contains(Modifiers::UNDERLINE),
+    }
+}
+
+/// An incremental token highlighter: buffers the accumulated source and
+/// re-parses only the tail on each [`append`](Self::append), reusing the
+/// previous tree so tree-sitter skips the untouched head. The one-shot
+/// [`highlight`] re-parses the whole source per call; this class exists for
+/// streaming consumers (a growing Markdown fence) where only the tail
+/// changes between renders.
+///
+/// Shared state lives behind `Arc<Mutex<_>>`, the binding's standard pattern
+/// (see [`NodeHandle`](crate::NodeHandle)): the class instance stays
+/// `Send + Sync` and every method is safe to call from the JS thread.
+#[napi]
+pub struct IncrementalHighlighter {
+    inner: Arc<Mutex<IncrementalHighlighterInner>>,
+}
+
+/// The engine plus the wrapper's bookkeeping. `appended` tracks whether a
+/// non-empty append has happened since construction or the last
+/// [`reset`](IncrementalHighlighter::reset) — `changed` is `None` before the
+/// first append, when there is no previous parse to change.
+pub(crate) struct IncrementalHighlighterInner {
+    engine: tern_highlight::IncrementalHighlighter,
+    appended: bool,
+}
+
+#[napi]
+impl IncrementalHighlighter {
+    /// Build a highlighter for `language` (a Markdown fence info string,
+    /// exactly like [`highlight`]). Errors on unknown languages or when the
+    /// grammar fails to load.
+    #[napi(constructor)]
+    pub fn new(language: String) -> Result<Self> {
+        let Some(lang) = tern_highlight::Language::from_fence_name(&language) else {
+            return Err(Error::from_reason(format!(
+                "unknown highlight language {language:?}"
+            )));
+        };
+        let Some(engine) = tern_highlight::IncrementalHighlighter::new(lang) else {
+            return Err(Error::from_reason(format!(
+                "failed to load the {language:?} highlight grammar"
+            )));
+        };
+        Ok(Self {
+            inner: Arc::new(Mutex::new(IncrementalHighlighterInner {
+                engine,
+                appended: false,
+            })),
+        })
+    }
+
+    /// Append `chunk` to the buffered source and return the complete span
+    /// stream over the accumulated text, plus the byte range the incremental
+    /// re-parse reworked (`None` before the first append). An empty chunk is
+    /// a no-op: no spans, no changed range.
+    #[napi]
+    pub fn append(&self, chunk: String) -> HighlightAppendJs {
+        let mut inner = self.inner.lock().expect("incremental highlighter poisoned");
+        let spans = inner.engine.append(&chunk);
+        let changed = if !inner.appended || chunk.is_empty() {
+            None
+        } else {
+            let (start, end) = inner.engine.last_changed_span();
+            Some([start as u32, end as u32])
+        };
+        if !chunk.is_empty() {
+            inner.appended = true;
+        }
+        HighlightAppendJs {
+            spans: spans.into_iter().map(span_to_highlight_js).collect(),
+            changed,
+        }
+    }
+
+    /// Drop the buffered source and the parse tree; the next
+    /// [`append`](Self::append) is a full parse from scratch (and reports no
+    /// changed range, like any first append).
+    #[napi]
+    pub fn reset(&self) {
+        let mut inner = self.inner.lock().expect("incremental highlighter poisoned");
+        inner.engine.reset();
+        inner.appended = false;
+    }
 }
 
 /// Split a JS props object into a tern style (style keys) and a tern property

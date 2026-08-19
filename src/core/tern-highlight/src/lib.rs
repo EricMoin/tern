@@ -25,8 +25,20 @@
 //! with equal style merge, so the concatenated span texts reconstruct the
 //! source exactly. Overlapping captures (e.g. `@comment.todo` inside
 //! `@comment`) resolve to the most specific — smallest — covering capture.
+//!
+//! [`IncrementalHighlighter`] (Phase 9) is the streaming variant: it buffers
+//! the source, keeps the previous parse tree, and re-parses only the tail on
+//! each [`append`](IncrementalHighlighter::append). The grammar's highlight
+//! queries are compiled once in
+//! [`new`](IncrementalHighlighter::new) and reused for every append, and
+//! [`last_changed_span`](IncrementalHighlighter::last_changed_span) reports
+//! the byte span the last incremental parse actually reworked (the
+//! "instrumented node count" proxy).
 
-use tree_sitter::{Language as TsLanguage, Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{
+    InputEdit, Language as TsLanguage, Node, Parser, Point, Query, QueryCursor,
+    StreamingIterator, Tree,
+};
 use tree_sitter_language::LanguageFn;
 
 use tern_core::scene::Span;
@@ -180,22 +192,29 @@ pub fn highlight(language: Language, source: &str) -> Vec<Span> {
     segments_from_captures(source, &captures)
 }
 
-/// Parse `source` with `language`'s grammar and collect the styled captures.
-/// `None` when the grammar fails to load, the parse fails, or a highlight
-/// query fails to compile (all should be impossible with the bundled
-/// grammars — the error tolerance keeps the engine safe).
-fn parse_captures(language: Language, source: &str) -> Option<Vec<Capture>> {
-    let ts_language: TsLanguage = language.grammar().into();
-    let mut parser = Parser::new();
-    parser.set_language(&ts_language).ok()?;
-    let tree = parser.parse(source, None)?;
-    let root = tree.root_node();
+/// Compile `language`'s highlight queries, in the grammar's application order.
+///
+/// This is the hoisted query-compilation step: the one-shot [`parse_captures`]
+/// compiles on every call, while [`IncrementalHighlighter`] compiles once in
+/// [`IncrementalHighlighter::new`] and reuses the same `Query`s for every
+/// append. `None` when a query fails to compile.
+fn compile_queries(language: Language, ts_language: &TsLanguage) -> Option<Vec<Query>> {
+    language
+        .highlights_queries()
+        .iter()
+        .map(|query_source| Query::new(ts_language, query_source).ok())
+        .collect()
+}
 
+/// Run the compiled `queries` over `root` and collect the styled captures.
+///
+/// Unstyled captures (punctuation / unknown names) are dropped — they map to
+/// the default style and `segments_from_captures` fills their gaps.
+fn collect_captures(queries: &[Query], root: Node, source: &str) -> Vec<Capture> {
     let mut captures = Vec::new();
-    for query_source in language.highlights_queries() {
-        let query = Query::new(&ts_language, query_source).ok()?;
+    for query in queries {
         let mut cursor = QueryCursor::new();
-        let mut stream = cursor.captures(&query, root, source.as_bytes());
+        let mut stream = cursor.captures(query, root, source.as_bytes());
         while let Some((mat, index)) = stream.next() {
             let capture = mat.captures[*index];
             let name = query.capture_names()[capture.index as usize];
@@ -207,7 +226,173 @@ fn parse_captures(language: Language, source: &str) -> Option<Vec<Capture>> {
             captures.push((node.start_byte(), node.end_byte(), style));
         }
     }
-    Some(captures)
+    captures
+}
+
+/// Parse `source` with `language`'s grammar and collect the styled captures.
+/// `None` when the grammar fails to load, the parse fails, or a highlight
+/// query fails to compile (all should be impossible with the bundled
+/// grammars — the error tolerance keeps the engine safe).
+fn parse_captures(language: Language, source: &str) -> Option<Vec<Capture>> {
+    let ts_language: TsLanguage = language.grammar().into();
+    let mut parser = Parser::new();
+    parser.set_language(&ts_language).ok()?;
+    let tree = parser.parse(source, None)?;
+    let queries = compile_queries(language, &ts_language)?;
+    Some(collect_captures(&queries, tree.root_node(), source))
+}
+
+/// An incremental token highlighter.
+///
+/// Buffers the accumulated source and re-parses only the tail on each append,
+/// reusing the previous tree so tree-sitter skips the untouched head. The
+/// highlight queries are compiled once here — the one-shot [`highlight`] path
+/// recompiles them per call. Each [`append`](Self::append) returns the
+/// complete span stream for the accumulated text, with the same coverage
+/// contract as [`highlight`].
+pub struct IncrementalHighlighter {
+    /// The language being highlighted (also the parser's grammar).
+    language: Language,
+    /// The parser, kept across appends so incremental parses can reuse state.
+    parser: Parser,
+    /// The most recent parse tree; `None` before the first append or after
+    /// [`reset`](Self::reset).
+    tree: Option<Tree>,
+    /// The accumulated source, in sync with `tree`.
+    source: String,
+    /// `language`'s highlight queries, compiled once in
+    /// [`new`](Self::new).
+    queries: Vec<Query>,
+    /// The byte span the last incremental parse reworked — the union of the
+    /// changed ranges between the pre-append and post-append trees.
+    /// `(0, 0)` before the first append or after `reset`.
+    last_changed: (usize, usize),
+}
+
+impl IncrementalHighlighter {
+    /// Build a highlighter for `language`. `None` when the grammar fails to
+    /// load or a highlight query fails to compile (mirrors [`parse_captures`]).
+    pub fn new(language: Language) -> Option<Self> {
+        let ts_language: TsLanguage = language.grammar().into();
+        let mut parser = Parser::new();
+        parser.set_language(&ts_language).ok()?;
+        let queries = compile_queries(language, &ts_language)?;
+        Some(Self {
+            language,
+            parser,
+            tree: None,
+            source: String::new(),
+            queries,
+            last_changed: (0, 0),
+        })
+    }
+
+    /// Append `chunk` to the buffered source and return the complete span
+    /// stream for the accumulated text (gaps get the default style, equal-style
+    /// neighbors merge, concatenation reconstructs the source).
+    ///
+    /// The parse is incremental: the previous tree is edited to reflect the
+    /// append and passed as the old tree, so tree-sitter re-parses only the
+    /// tail. An empty chunk is a no-op returning an empty stream.
+    pub fn append(&mut self, chunk: &str) -> Vec<Span> {
+        if chunk.is_empty() {
+            return Vec::new();
+        }
+        let old_len = self.source.len();
+        let old_end = self
+            .tree
+            .as_ref()
+            .map(|tree| tree.root_node().end_position())
+            .unwrap_or(Point::new(0, 0));
+        self.source.push_str(chunk);
+        let new_len = self.source.len();
+
+        // Shift the old tree's ranges to the appended text so the parser can
+        // reuse its untouched head (tree-sitter requires an edited old tree
+        // matching the new text).
+        if let Some(tree) = self.tree.as_mut() {
+            let mut row = old_end.row;
+            let mut column = old_end.column;
+            for byte in chunk.bytes() {
+                if byte == b'\n' {
+                    row += 1;
+                    column = 0;
+                } else {
+                    column += 1;
+                }
+            }
+            tree.edit(&InputEdit {
+                start_byte: old_len,
+                old_end_byte: old_len,
+                new_end_byte: new_len,
+                start_position: old_end,
+                old_end_position: old_end,
+                new_end_position: Point::new(row, column),
+            });
+        }
+
+        // Incremental parse against the (edited) previous tree. The callback
+        // returns the text starting at the requested byte offset — the same
+        // slicing `Parser::parse` uses internally.
+        let Some(new_tree) = self.parser.parse_with_options(
+            &mut |byte, _point| {
+                let src = self.source.as_str();
+                if byte < src.len() {
+                    &src[byte..]
+                } else {
+                    ""
+                }
+            },
+            self.tree.as_ref(),
+            None,
+        ) else {
+            // Parse failure (unreachable with the bundled grammars): drop the
+            // stale tree and fall back to a full one-shot parse.
+            self.tree = None;
+            let Some(captures) = parse_captures(self.language, &self.source) else {
+                return Vec::new();
+            };
+            self.last_changed = (0, new_len);
+            return segments_from_captures(&self.source, &captures);
+        };
+
+        // The reworked span: the union of the changed ranges between the
+        // edited old tree and the new tree — the whole source on the first
+        // append, when there is no old tree to reuse.
+        self.last_changed = match self.tree.as_ref() {
+            Some(old) => {
+                let ranges: Vec<(usize, usize)> = old
+                    .changed_ranges(&new_tree)
+                    .map(|r| (r.start_byte, r.end_byte))
+                    .collect();
+                (
+                    ranges.iter().map(|&(start, _)| start).min().unwrap_or(old_len),
+                    ranges.iter().map(|&(_, end)| end).max().unwrap_or(new_len),
+                )
+            }
+            None => (0, new_len),
+        };
+
+        let root = new_tree.root_node();
+        let captures = collect_captures(&self.queries, root, &self.source);
+        self.tree = Some(new_tree);
+        segments_from_captures(&self.source, &captures)
+    }
+
+    /// Drop the buffered source and the parse tree; the next
+    /// [`append`](Self::append) is a full parse from scratch.
+    pub fn reset(&mut self) {
+        self.tree = None;
+        self.source.clear();
+        self.last_changed = (0, 0);
+    }
+
+    /// The byte span the last incremental parse actually reworked — the union
+    /// of `old_tree.changed_ranges(new_tree)`, the "instrumented node count"
+    /// proxy. `(0, 0)` before the first append or after [`reset`](Self::reset).
+    pub fn last_changed_span(&self) -> (usize, usize) {
+        self.last_changed
+    }
 }
 
 /// Fold styled captures into a complete, merged span stream over `source`.
@@ -561,5 +746,101 @@ mod tests {
         pin(&mut expected, 3, "}", default.clone());
 
         assert_eq!(buffer, expected);
+    }
+
+    // -----------------------------------------------------------------------
+    // Incremental highlighter: tail-only re-parse, span parity with the
+    // one-shot path, and the no-reuse contrast.
+    // -----------------------------------------------------------------------
+
+    /// A large, well-formed Rust source (2048 complete top-level items) for
+    /// exercising incremental re-parsing. Ends on a clean item boundary so an
+    /// appended chunk re-parses only the tail.
+    fn big_rust_fence() -> String {
+        let mut src = String::with_capacity(64 * 2048);
+        src.push_str("// generated fence\n");
+        for i in 0..2048 {
+            src.push_str(&format!("fn f{i:04}() -> u32 {{ {i} }}\n"));
+        }
+        src
+    }
+
+    #[test]
+    fn incremental_append_reworks_only_the_tail() {
+        let mut hl = IncrementalHighlighter::new(Language::Rust).expect("rust grammar/query load");
+        let fence = big_rust_fence();
+        hl.append(&fence);
+
+        let tail = "fn tail() -> u32 { 0 }\n";
+        hl.append(tail);
+
+        let (start, end) = hl.last_changed_span();
+        let changed = end - start;
+        assert!(
+            changed <= tail.len() + 64,
+            "incremental parse reworked {changed} bytes ({start}..{end}), \
+             expected at most {} (tail) + 64 (token-boundary slack)",
+            tail.len()
+        );
+    }
+
+    #[test]
+    fn incremental_spans_are_byte_identical_to_full_highlight() {
+        let fence = big_rust_fence();
+        let tail = "fn tail() -> u32 { 0 }\n";
+        let full = format!("{fence}{tail}");
+
+        let mut hl = IncrementalHighlighter::new(Language::Rust).expect("rust grammar/query load");
+        // Feed the fence in line-group chunks, then the tail — several
+        // incremental parses before the final comparison.
+        for group in fence.lines().collect::<Vec<_>>().chunks(512) {
+            let mut part = String::new();
+            for line in group {
+                part.push_str(line);
+                part.push('\n');
+            }
+            hl.append(&part);
+        }
+        let incremental = hl.append(tail);
+
+        let one_shot = highlight(Language::Rust, &full);
+        assert_eq!(
+            incremental.len(),
+            one_shot.len(),
+            "span counts differ ({} vs {})",
+            incremental.len(),
+            one_shot.len()
+        );
+        for (i, (inc, one)) in incremental.iter().zip(one_shot.iter()).enumerate() {
+            assert_eq!(inc.text, one.text, "span {i} text differs");
+            assert_eq!(inc.style, one.style, "span {i} style differs");
+        }
+        assert_eq!(
+            concat(&incremental),
+            full,
+            "incremental stream must reconstruct the source"
+        );
+    }
+
+    #[test]
+    fn fresh_one_shot_parse_marks_the_whole_source_changed() {
+        let mut hl = IncrementalHighlighter::new(Language::Rust).expect("rust grammar/query load");
+        let fence = big_rust_fence();
+        hl.append(&fence);
+        // No prior tree to reuse: the whole source is the changed span,
+        // contrasting with the tail-only rework of the incremental case.
+        assert_eq!(hl.last_changed_span(), (0, fence.len()));
+    }
+
+    #[test]
+    fn incremental_reset_starts_a_fresh_full_parse() {
+        let mut hl = IncrementalHighlighter::new(Language::Rust).expect("rust grammar/query load");
+        hl.append(&big_rust_fence());
+        hl.reset();
+        assert_eq!(hl.last_changed_span(), (0, 0));
+        let fence = "fn reset() {}\n";
+        let spans = hl.append(fence);
+        assert_eq!(concat(&spans), fence);
+        assert_eq!(hl.last_changed_span(), (0, fence.len()));
     }
 }

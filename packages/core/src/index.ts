@@ -180,6 +180,7 @@ import type {
   TuiRendererOptions,
 } from "@tern-tui/node";
 import { loadAddon } from "./addon.ts";
+import type { NativeIncrementalHighlighter, TernAddon } from "./addon.ts";
 
 /**
  * The scene node kinds. `box`/`text`/`streaming_text` are materialized by the
@@ -4776,10 +4777,10 @@ export function closeModal(modal: Node, manager: FocusManager = focusManager): v
 }
 
 // ---------------------------------------------------------------------------
-// Syntax highlighting (roadmap Phase 4)
+// Syntax highlighting (roadmap Phase 4 / Phase 9)
 //
-// `highlightCode` token-highlights a code string in a Markdown fence
-// language through the napi binding's `highlight` (tree-sitter in the Rust
+// `highlightCode` token-highlights a code string in a Markdown fence language
+// through the napi binding's `highlight` (tree-sitter in the Rust
 // `tern-highlight` crate). It returns a complete span stream — every byte of
 // the source is covered, adjacent same-style runs merge — whose `text`
 // concatenation reconstructs the input exactly, so the spans are ready for
@@ -4788,6 +4789,14 @@ export function closeModal(modal: Node, manager: FocusManager = focusManager): v
 // `deno test`, a browser host) or the language is unknown, it returns `[]`
 // and callers fall back to unstyled rendering. The engine logic stays in Rust
 // (constitution) — JS only maps the returned tokens onto scene styles.
+//
+// `incrementalHighlight` (Phase 9) is the streaming variant for a growing
+// fence: it keeps one native `IncrementalHighlighter` per language (module-
+// level cache) and, when the previous code is a prefix of the new code (a
+// pure append — the typical streaming re-render), hands only the appended
+// tail to the engine, which re-parses just that tail. Re-renders with
+// unchanged fence text make ZERO native calls (the cached span stream is
+// returned as-is); an edit that breaks the prefix re-highlights from scratch.
 // ---------------------------------------------------------------------------
 
 /** The Markdown fence languages `highlightCode` recognizes (aliases map to
@@ -4808,6 +4817,19 @@ const HIGHLIGHT_LANGUAGES = new Set([
   "zsh",
 ]);
 
+/** Map one native highlight span onto a scene `Span`: the `fg` hex string and
+ * the boolean modifier keys become style props ready for `Node.appendSpan` or
+ * a `Text` leaf. */
+function spanFromRaw(raw: HighlightSpanJs): Span {
+  const style: NodeProps = {};
+  if (raw.fg !== undefined && raw.fg !== null) style.fg = raw.fg;
+  if (raw.bold) style.bold = true;
+  if (raw.italic) style.italic = true;
+  if (raw.dim) style.dim = true;
+  if (raw.underline) style.underline = true;
+  return { text: raw.text, style };
+}
+
 /**
  * Token-highlight `code` in `language` (a Markdown fence info string such as
  * `"rust"`, `"ts"`, `"json"`, `"bash"`). Returns a complete span stream whose
@@ -4822,19 +4844,97 @@ export function highlightCode(language: string, code: string): Span[] {
   try {
     const addon = loadAddon();
     if (typeof addon.highlight !== "function") return [];
-    return addon.highlight(lang, code).map((raw: HighlightSpanJs): Span => {
-      const style: NodeProps = {};
-      if (raw.fg !== undefined && raw.fg !== null) style.fg = raw.fg;
-      if (raw.bold) style.bold = true;
-      if (raw.italic) style.italic = true;
-      if (raw.dim) style.dim = true;
-      if (raw.underline) style.underline = true;
-      return { text: raw.text, style };
-    });
+    return addon.highlight(lang, code).map(spanFromRaw);
   } catch {
     // The addon is not available (no --allow-ffi, browser host) — unstyled.
     return [];
   }
+}
+
+/** One cached highlighter per fence language: the native instance plus the
+ * code it last highlighted and the mapped span stream it produced. */
+interface HighlightCacheEntry {
+  instance: NativeIncrementalHighlighter;
+  prevCode: string;
+  spans: Span[];
+}
+
+/** The module-level per-language cache of incremental highlighters. */
+const highlightCache = new Map<string, HighlightCacheEntry>();
+
+/**
+ * The streaming variant of {@link highlightCode} for a growing code fence:
+ * re-highlights `code` in `language` through a cached native
+ * `IncrementalHighlighter` so only the appended tail is re-parsed.
+ *
+ * The cache holds ONE highlighter per language. When the cached highlighter's
+ * previous code is a prefix of `code` (a pure append), only the new tail
+ * `code.slice(prev.length)` is handed to the engine and the stored result is
+ * replaced with the engine's full stream; when `code` equals the previous
+ * code (an unchanged re-render) the cached stream is returned without any
+ * native call; otherwise the highlighter is reset and the whole source is
+ * re-appended (a non-append edit cannot reuse the head). The span contract
+ * matches {@link highlightCode} exactly — a complete stream whose
+ * concatenation reconstructs `code`, with the same fallbacks (`[]` when the
+ * addon or the language is unavailable, and a plain one-shot re-highlight
+ * when the binding predates the incremental surface).
+ */
+export function incrementalHighlight(language: string, code: string): Span[] {
+  const lang = language.trim().toLowerCase();
+  if (!HIGHLIGHT_LANGUAGES.has(lang) || code === "") return [];
+  let addon: TernAddon;
+  try {
+    addon = loadAddon();
+  } catch {
+    return []; // the addon is unavailable — callers fall back to unstyled
+  }
+  if (typeof addon.IncrementalHighlighter !== "function") {
+    // A binding (or fake) without the incremental surface: one-shot path.
+    return highlightCode(language, code);
+  }
+  try {
+    let entry = highlightCache.get(lang);
+    if (entry === undefined) {
+      entry = {
+        instance: new addon.IncrementalHighlighter(lang),
+        prevCode: "",
+        spans: [],
+      };
+      highlightCache.set(lang, entry);
+    }
+    if (code === entry.prevCode) {
+      // An unchanged re-render: reuse the cached stream, zero native calls.
+      return entry.spans;
+    }
+    if (code.startsWith(entry.prevCode)) {
+      // A pure append: re-parse only the tail.
+      const result = entry.instance.append(code.slice(entry.prevCode.length));
+      entry.prevCode = code;
+      entry.spans = result.spans.map(spanFromRaw);
+      return entry.spans;
+    }
+    // Not a pure append (earlier text was edited): re-highlight from scratch.
+    entry.instance.reset();
+    const result = entry.instance.append(code);
+    entry.prevCode = code;
+    entry.spans = result.spans.map(spanFromRaw);
+    return entry.spans;
+  } catch {
+    // Defensive: any native failure degrades to the one-shot path instead of
+    // poisoning the cache.
+    highlightCache.delete(lang);
+    return highlightCode(language, code);
+  }
+}
+
+/**
+ * Drop the cached incremental highlighters (per-language). The cache is
+ * module-level and persists across renders, so a test that swaps the addon
+ * (or a consumer that changes the binding) resets it through this seam —
+ * the same test seam role as {@link setAddonForTesting}.
+ */
+export function resetIncrementalHighlightCache(): void {
+  highlightCache.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -5154,7 +5254,11 @@ function buildMarkdownBlock(block: MarkdownBlock, width: number | null): Node {
       // available) one plain text leaf per line. Fence marker lines are
       // consumed — a half-open fence renders exactly like a closed one
       // (best-effort streaming).
-      const spans = highlightCode(block.lang, block.lines.join("\n"));
+      //
+      // Highlighting goes through the incremental path: a growing fence
+      // (each render appends newly streamed lines) re-parses only its tail,
+      // and an unchanged re-render makes zero native calls.
+      const spans = incrementalHighlight(block.lang, block.lines.join("\n"));
       if (spans.length === 0) {
         return Box(
           { flex_direction: "column", bg: MARKDOWN_FENCE_BG },

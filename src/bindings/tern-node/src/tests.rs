@@ -8,6 +8,7 @@ mod render;
 mod events;
 mod lifecycle;
 mod selection;
+mod highlight;
 
 /// A root handle materialized over a fresh scene, for handle tests.
 fn root_handle(scene: &Arc<Mutex<Scene>>) -> NodeHandle {

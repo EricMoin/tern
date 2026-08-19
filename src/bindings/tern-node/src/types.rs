@@ -61,6 +61,30 @@ pub struct HighlightSpanJs {
     pub underline: bool,
 }
 
+/// The result of one [`IncrementalHighlighter::append`]: the *complete* span
+/// stream over the accumulated source (every byte covered, gaps unstyled,
+/// equal-style neighbors merged — concatenating the span texts reconstructs
+/// the source exactly) plus the byte range the incremental re-parse actually
+/// reworked.
+///
+/// `changed` is the `[start, end)` byte span the engine's
+/// `last_changed_span` reported for the append — the union of tree-sitter's
+/// changed ranges between the pre- and post-append trees, so a pure tail
+/// append reports a range within the appended chunk. It is `None` before the
+/// first append (or after a `reset`), when there was no previous parse to
+/// change. This DTO is output-only (`object_from_js = false`): it is
+/// returned to JS, never accepted as an argument — which also lets the
+/// `changed` range be a fixed `[u32; 2]` pair rather than a `Vec`.
+#[napi(object, object_from_js = false)]
+#[derive(Debug)]
+pub struct HighlightAppendJs {
+    /// The complete span stream over the accumulated source.
+    pub spans: Vec<HighlightSpanJs>,
+    /// The `[start, end)` byte range the incremental parse reworked, `None`
+    /// before the first append (no previous state to change).
+    pub changed: Option<[u32; 2]>,
+}
+
 /// One styled run in a [`TuiRenderer::render_to_buffer_styled`] snapshot row:
 /// the run's text plus the style keys its cells share. Adjacent cells with
 /// identical style merge into one run, so concatenating a row's run texts
