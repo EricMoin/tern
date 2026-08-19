@@ -52,7 +52,9 @@ import {
   type ReactNode,
 } from "react";
 import {
+  BarChart as CoreBarChart,
   Box,
+  Chart as CoreChart,
   DiffView as CoreDiffView,
   Input as CoreInput,
   Modal as CoreModal,
@@ -60,6 +62,7 @@ import {
   Progress as CoreProgress,
   ScrollView as CoreScrollView,
   Select as CoreSelect,
+  Sparkline as CoreSparkline,
   Spinner as CoreSpinner,
   StatusBar as CoreStatusBar,
   StreamingText,
@@ -69,6 +72,8 @@ import {
   Textarea as CoreTextarea,
   Tree as CoreTree,
   focusManager,
+  type BarChartProps,
+  type ChartProps,
   type DiffViewProps,
   type FocusManager,
   type KeyEvent,
@@ -80,6 +85,7 @@ import {
   type Renderer,
   type ScrollViewProps,
   type SelectProps,
+  type SparklineProps,
   type SpinnerProps,
   type TableProps,
   type TabsProps,
@@ -407,6 +413,19 @@ export const hostConfig: HostConfig = {
         return (props as ModalProps).content === undefined
           ? CoreModal(nodeProps as ModalProps)
           : CoreModal({ ...nodeProps, content: (props as ModalProps).content } as ModalProps);
+      case "bar_chart":
+        // The series + scale are JS bookkeeping the core factory consumes;
+        // `BarChartProps` requires `data` while `NodeProps` is an open record.
+        return CoreBarChart(nodeProps as BarChartProps);
+      case "chart":
+        // The series + scale are JS bookkeeping the core factory consumes;
+        // `ChartProps` requires `data` while `NodeProps` is an open record.
+        return CoreChart(nodeProps as ChartProps);
+      case "sparkline":
+        // The series + scale are JS bookkeeping the core factory consumes;
+        // `SparklineProps` requires `data` while `NodeProps` is an open
+        // record.
+        return CoreSparkline(nodeProps as SparklineProps);
       default:
         throw new Error(`@tern-tui/react: unknown host element type "${type}"`);
     }

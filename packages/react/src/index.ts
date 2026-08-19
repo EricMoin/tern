@@ -10,7 +10,8 @@
  *   explicit `<Text text="..." />` element.
  * - The roadmap host components `<Input>` / `<Spinner>` / `<StatusBar>` /
  *   `<Panels>` / `<DiffView>` / `<Select>` / `<ScrollView>` / `<Table>` /
- *   `<Tabs>` / `<Progress>` / `<Modal>`
+ *   `<Tabs>` / `<Progress>` / `<Modal>` / `<BarChart>` / `<Chart>` /
+ *   `<Sparkline>`
  *   materialize the core factories of the same name. `<Spinner>` runs its
  *   tick timer while mounted (cleared on unmount); `<Input>` / `<Select>` /
  *   `<Tabs>`
@@ -363,6 +364,9 @@ const HOST_TREE: string = "tree";
 const HOST_TABS: string = "tabs";
 const HOST_PROGRESS: string = "progress";
 const HOST_MODAL: string = "modal";
+const HOST_BAR_CHART: string = "bar_chart";
+const HOST_CHART: string = "chart";
+const HOST_SPARKLINE: string = "sparkline";
 
 /** The state reported by `<Input>` callbacks after a routed key. */
 export interface InputState {
@@ -1113,6 +1117,120 @@ export function Progress(props: ProgressProps): ReactElement<ProgressProps> {
   return createElement(HOST_PROGRESS, {
     ...(resolveTheme(theme, { ...props, component: "progress" }) as ProgressProps),
   });
+}
+
+/**
+ * Props for `<BarChart>`: the tern node props plus the bar series and the
+ * chart geometry, forwarded verbatim to the core `BarChart` factory (`data`
+ * and the scale keys are JS bookkeeping consumed there and never reach the
+ * scene props).
+ */
+export interface BarChartProps extends TernNodeProps {
+  /** The bar values, one per bar, in display order (left to right). */
+  data: number[];
+  /** The chart's fixed width in cells (default: the natural bars width). */
+  width?: number;
+  /** The chart height in cells (default 5) — eighth-block sub-heights per
+   *  bar, or whole cells in `full_block` mode. */
+  height?: number;
+  /** The value scale minimum (default 0 — the baseline). */
+  min?: number;
+  /** The value scale maximum (default `max(data)`). */
+  max?: number;
+  /** Cells per bar column (default 1). */
+  bar_width?: number;
+  /** Cells between adjacent bars (default 1). */
+  gap?: number;
+  /** Compose a `─` baseline axis row beneath the bars, spanning the fixed
+   *  width (default `false`). */
+  show_axis?: boolean;
+  /** Use whole-cell `█` columns instead of the eighth-block sub-cell glyphs
+   *  (default `false`). */
+  full_block?: boolean;
+}
+
+/**
+ * The `<BarChart>` host component: a flex column of bar-row text leaves —
+ * one column per value painted bottom-up with the eighth-block glyphs
+ * (▁▂▃▄▅▆▇█) for sub-cell bar heights, or whole-cell `█` columns with
+ * `full_block`, all sharing the bottom baseline, plus an optional `─` axis
+ * row spanning the fixed `width` (core `BarChart` factory). The `bar_chart`
+ * host tag is mapped in `./reconciler.ts`. Takes no React children.
+ */
+export function BarChart(props: BarChartProps): ReactElement<BarChartProps> {
+  const theme = useTheme();
+  return createElement(HOST_BAR_CHART, resolveTheme(theme, props) as BarChartProps);
+}
+
+/**
+ * Props for `<Chart>`: the tern node props plus the line series and the
+ * chart geometry, forwarded verbatim to the core `Chart` factory (`data` and
+ * the scale keys are JS bookkeeping consumed there and never reach the scene
+ * props).
+ */
+export interface ChartProps extends TernNodeProps {
+  /** The data points, in x order; the polyline through them is drawn. */
+  data: number[];
+  /** The chart's fixed width in cells (default
+   *  `max(2, ceil(data.length / 2))`). */
+  width?: number;
+  /** The chart height in cells (default 5) — braille resolution is 4
+   *  sub-rows per cell. */
+  height?: number;
+  /** The value scale minimum (default `min(data)`). */
+  min?: number;
+  /** The value scale maximum (default `max(data)`). */
+  max?: number;
+  /** Compose a `─` baseline axis row beneath the plot, spanning the fixed
+   *  width (default `false`). */
+  show_axis?: boolean;
+}
+
+/**
+ * The `<Chart>` host component: a braille line chart — the polyline through
+ * `data` rasterized onto the canvas sub-cell dot matrix (x spans the fixed
+ * width, the value scale spans the height) and rendered as Unicode braille
+ * via the canvas rasterizer (core `Chart` factory), plus an optional `─`
+ * axis row spanning the fixed width. The `chart` host tag is mapped in
+ * `./reconciler.ts`. Takes no React children.
+ */
+export function Chart(props: ChartProps): ReactElement<ChartProps> {
+  const theme = useTheme();
+  return createElement(HOST_CHART, resolveTheme(theme, props) as ChartProps);
+}
+
+/**
+ * Props for `<Sparkline>`: the tern node props plus the series and the
+ * chart geometry, forwarded verbatim to the core `Sparkline` factory (`data`
+ * and the scale keys are JS bookkeeping consumed there and never reach the
+ * scene props).
+ */
+export interface SparklineProps extends TernNodeProps {
+  /** The data points, in x order; the last `width` points are shown. */
+  data: number[];
+  /** The sparkline's fixed width in cells (default `data.length`). */
+  width?: number;
+  /** The sparkline height in cells (default 1). */
+  height?: number;
+  /** The value scale minimum (default `min(data)`). */
+  min?: number;
+  /** The value scale maximum (default `max(data)`). */
+  max?: number;
+  /** Rasterize the sparkline as Unicode braille via the canvas rasterizer
+   *  (default `false` — eighth-block glyphs). */
+  use_braille?: boolean;
+}
+
+/**
+ * The `<Sparkline>` host component: one glyph per value at the series' own
+ * scale — eighth-block glyphs by default, or braille via the canvas
+ * rasterizer with `use_braille` — anchored to the bottom baseline at a fixed
+ * `width` (core `Sparkline` factory). The `sparkline` host tag is mapped in
+ * `./reconciler.ts`. Takes no React children.
+ */
+export function Sparkline(props: SparklineProps): ReactElement<SparklineProps> {
+  const theme = useTheme();
+  return createElement(HOST_SPARKLINE, resolveTheme(theme, props) as SparklineProps);
 }
 
 // ---------------------------------------------------------------------------

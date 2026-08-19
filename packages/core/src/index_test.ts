@@ -16,12 +16,16 @@
  */
 
 import {
+  BarChart,
   Box,
+  Canvas,
+  Chart,
   DIFF_ADD_FG,
   DIFF_DEL_FG,
   DiffView,
   FocusManager,
   Input,
+  Keymap,
   MODAL_BACKDROP_BG,
   MODAL_Z_INDEX,
   Modal,
@@ -39,6 +43,7 @@ import {
   STREAM_AFFORDANCE_CHAR,
   ScrollView,
   Select,
+  Sparkline,
   Spinner,
   StatusBar,
   StreamingText,
@@ -53,6 +58,8 @@ import {
   THEME_COMPONENTS,
   THEME_ROLES,
   activateTab,
+  brailleCell,
+  brailleRows,
   closeTab,
   collapsePanel,
   closeModal,
@@ -72,6 +79,7 @@ import {
   focusPanel,
   framesEqual,
   isStreamFollowing,
+  keymap,
   measureText,
   mergeTheme,
   name,
@@ -113,6 +121,7 @@ import {
   wrapLineWithOffsets,
 } from "./index.ts";
 import type {
+  KeyCombo,
   NodeProps,
   ProgressProps,
   SelectOption,
@@ -402,6 +411,11 @@ const fakeAddon = {
  * degrades into per-code-unit fragments. A caret-carrying leaf paints its
  * caret cell as the underlying character (the real compositor reverses the
  * cell's style, which `buffer_rows` renders as the same symbol).
+ *
+ * A box paints its text children as a flex column — child `i` on content row
+ * `i` (plus `padding`) — so a multi-leaf composition (the canvas element's
+ * braille rows) stacks like the real compositor; a single-child box keeps
+ * the original origin-row geometry.
  */
 function paintSceneRows(
   root: FakeNodeHandle,
@@ -422,30 +436,37 @@ function paintSceneRows(
     for (let x = 0; x < w; x++) {
       let ch = " ";
       for (const child of root.children) {
-        const textChild = child.children[0];
-        const text = typeof textChild?.props.text === "string" ? textChild.props.text : "";
+        // A box paints its text children as a flex column: child `ti` paints
+        // content row `pad + ti` (borderless: row `ti`), so a multi-leaf
+        // composition — the canvas element's braille rows, a bare flex column
+        // — stacks like the real compositor. A single-child box (every legacy
+        // golden) paints exactly as before (row `pad` / row 0).
         const pad = typeof child.props.padding === "number" ? child.props.padding : 0;
-        const runs = fakeClusterRuns(text);
-        const innerWidth = runs.reduce((sum, run) => sum + run.width, 0);
-        const bw = innerWidth + 2 * pad;
-        const bh = 1 + 2 * pad;
-        if (x < bw && y < bh) {
-          const g = glyphs[String(child.props.border_style ?? "none")];
-          let c = " ";
-          if (g !== undefined) {
-            if (y === 0) c = x === 0 ? g[0] : x === bw - 1 ? g[1] : g[4];
-            else if (y === bh - 1) c = x === 0 ? g[2] : x === bw - 1 ? g[3] : g[4];
-            else c = x === 0 || x === bw - 1 ? g[5] : " ";
+        child.children.forEach((textChild, ti) => {
+          const text = typeof textChild?.props.text === "string" ? textChild.props.text : "";
+          const runs = fakeClusterRuns(text);
+          const innerWidth = runs.reduce((sum, run) => sum + run.width, 0);
+          const bw = innerWidth + 2 * pad;
+          const bh = child.children.length + 2 * pad;
+          const contentRow = pad + ti;
+          if (x < bw && y < bh) {
+            const g = glyphs[String(child.props.border_style ?? "none")];
+            let c = " ";
+            if (g !== undefined) {
+              if (y === 0) c = x === 0 ? g[0] : x === bw - 1 ? g[1] : g[4];
+              else if (y === bh - 1) c = x === 0 ? g[2] : x === bw - 1 ? g[3] : g[4];
+              else c = x === 0 || x === bw - 1 ? g[5] : " ";
+            }
+            if (g !== undefined && y === contentRow && x >= pad && x < pad + innerWidth) {
+              c = clusterTextAt(runs, x - pad);
+            } else if (g === undefined && y === ti && x < innerWidth) {
+              // A borderless leaf (bare text / textarea / input / canvas)
+              // paints its text children's clusters from the origin.
+              c = clusterTextAt(runs, x);
+            }
+            if (c !== " ") ch = c;
           }
-          if (g !== undefined && y === pad && x >= pad && x < pad + innerWidth) {
-            c = clusterTextAt(runs, x - pad);
-          } else if (g === undefined && y === 0 && x < innerWidth) {
-            // A borderless leaf (bare text / textarea / input) paints its
-            // first text child's clusters from the origin.
-            c = clusterTextAt(runs, x);
-          }
-          if (c !== " ") ch = c;
-        }
+        });
       }
       row += ch;
     }
@@ -566,40 +587,46 @@ function paintSceneRuns(
       let ch = " ";
       let style: FakeCellStyle | null = null;
       for (const child of root.children) {
-        const textChild = child.children[0];
-        const text = typeof textChild?.props.text === "string" ? textChild.props.text : "";
+        // The styled twin of `paintSceneRows`' stacking: text child `ti`
+        // paints content row `pad + ti` (borderless: row `ti`), so a
+        // multi-leaf composition stacks like the real compositor; a
+        // single-child box keeps the original geometry.
         const pad = typeof child.props.padding === "number" ? child.props.padding : 0;
-        const runs = fakeClusterRuns(text);
-        const innerWidth = runs.reduce((sum, run) => sum + run.width, 0);
-        const bw = innerWidth + 2 * pad;
-        const bh = 1 + 2 * pad;
-        if (x < bw && y < bh) {
-          const g = glyphs[String(child.props.border_style ?? "none")];
-          let c = " ";
-          if (g !== undefined) {
-            if (y === 0) c = x === 0 ? g[0] : x === bw - 1 ? g[1] : g[4];
-            else if (y === bh - 1) c = x === 0 ? g[2] : x === bw - 1 ? g[3] : g[4];
-            else c = x === 0 || x === bw - 1 ? g[5] : " ";
+        child.children.forEach((textChild, ti) => {
+          const text = typeof textChild?.props.text === "string" ? textChild.props.text : "";
+          const runs = fakeClusterRuns(text);
+          const innerWidth = runs.reduce((sum, run) => sum + run.width, 0);
+          const bw = innerWidth + 2 * pad;
+          const bh = child.children.length + 2 * pad;
+          const contentRow = pad + ti;
+          if (x < bw && y < bh) {
+            const g = glyphs[String(child.props.border_style ?? "none")];
+            let c = " ";
+            if (g !== undefined) {
+              if (y === 0) c = x === 0 ? g[0] : x === bw - 1 ? g[1] : g[4];
+              else if (y === bh - 1) c = x === 0 ? g[2] : x === bw - 1 ? g[3] : g[4];
+              else c = x === 0 || x === bw - 1 ? g[5] : " ";
+            }
+            if (g !== undefined && c !== " " && !(y === contentRow && x >= pad && x < pad + innerWidth)) {
+              // A `border_color` on the box paints its border glyphs with that
+              // color as their fg (the real compositor swaps the cell style's
+              // fg — see paint_box), so the styled runs report it; interior and
+              // content cells keep their own styles.
+              const borderColor = child.props.border_color;
+              if (typeof borderColor === "string") style = { fg: borderColor };
+            }
+            if (g !== undefined && y === contentRow && x >= pad && x < pad + innerWidth) {
+              c = clusterTextAt(runs, x - pad);
+              style = leafStyle(textChild);
+            } else if (g === undefined && y === ti && x < innerWidth) {
+              // A borderless leaf (bare text / textarea / input / canvas)
+              // paints its text children's clusters from the origin, styled.
+              c = clusterTextAt(runs, x);
+              style = leafStyle(textChild);
+            }
+            if (c !== " ") ch = c;
           }
-          if (g !== undefined && c !== " " && !(y === pad && x >= pad && x < pad + innerWidth)) {
-            // A `border_color` on the box paints its border glyphs with that
-            // color as their fg (the real compositor swaps the cell style's
-            // fg — see paint_box), so the styled runs report it; interior and
-            // content cells keep their own styles.
-            const borderColor = child.props.border_color;
-            if (typeof borderColor === "string") style = { fg: borderColor };
-          }
-          if (g !== undefined && y === pad && x >= pad && x < pad + innerWidth) {
-            c = clusterTextAt(runs, x - pad);
-            style = leafStyle(textChild);
-          } else if (g === undefined && y === 0 && x < innerWidth) {
-            // A borderless leaf (bare text / textarea / input) paints its
-            // first text child's clusters from the origin, styled.
-            c = clusterTextAt(runs, x);
-            style = leafStyle(textChild);
-          }
-          if (c !== " ") ch = c;
-        }
+        });
       }
       cells.push({ ch, style });
     }
@@ -1078,6 +1105,75 @@ Deno.test("percentage size props pass through as strings and snapshot headlessly
     const frame = renderer.snapshotFrame(100, 10);
     if (frame.length !== 10) {
       throw new Error(`snapshotFrame must paint 10 rows, got ${frame.length}`);
+    }
+  });
+});
+
+Deno.test("grid props pass through to the scene props verbatim", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const grid = Box({
+      display: "grid",
+      grid_template_columns: "1fr 2fr",
+      grid_template_rows: "auto 1fr",
+      grid_auto_flow: "row-dense",
+    });
+    const item = Box({ grid_row: 2, grid_column: "span 2" });
+    renderer.root.addChild(grid);
+    grid.addChild(item);
+    const gridHandle = fakeHandleOf(grid);
+    const itemHandle = fakeHandleOf(item);
+    if (gridHandle === null || itemHandle === null) {
+      throw new Error("attached nodes must have native handles");
+    }
+    // The grid props cross the JS -> native boundary verbatim: the binding's
+    // json_to_prop_value maps strings to PropValue::Str and numbers to
+    // PropValue::Int, and tern-layout's props_to_style reads them by exactly
+    // these keys (display / grid_template_columns / grid_template_rows /
+    // grid_auto_flow / grid_row / grid_column).
+    if (
+      gridHandle.props.display !== "grid" ||
+      gridHandle.props.grid_template_columns !== "1fr 2fr" ||
+      gridHandle.props.grid_template_rows !== "auto 1fr" ||
+      gridHandle.props.grid_auto_flow !== "row-dense"
+    ) {
+      throw new Error(
+        `grid container props must reach the native handle, got ${JSON.stringify(gridHandle.props)}`,
+      );
+    }
+    if (itemHandle.props.grid_row !== 2 || itemHandle.props.grid_column !== "span 2") {
+      throw new Error(
+        `grid item placement must reach the native handle, got ${JSON.stringify(itemHandle.props)}`,
+      );
+    }
+    if (
+      grid.props.display !== "grid" ||
+      grid.props.grid_template_columns !== "1fr 2fr" ||
+      grid.props.grid_template_rows !== "auto 1fr" ||
+      grid.props.grid_auto_flow !== "row-dense" ||
+      item.props.grid_row !== 2 ||
+      item.props.grid_column !== "span 2"
+    ) {
+      throw new Error("node.props must mirror the grid props");
+    }
+    // A grid-prop setProps goes through the single-key path (the other keys
+    // are kept, so no key is removed and no full-map set_props).
+    item.setProps({ grid_row: 3, grid_column: "span 2" });
+    if (itemHandle.propWrites.length !== 1 || itemHandle.propWrites[0]![1] !== 3) {
+      throw new Error(
+        `expected one set_prop("grid_row", 3), got ${JSON.stringify(itemHandle.propWrites)}`,
+      );
+    }
+    if (itemHandle.fullWrites !== 0) {
+      throw new Error("no removals -> no full-map set_props");
+    }
+    // Re-read through the declared prop type: the earlier `grid_row !== 2`
+    // check narrows the readonly `props` getter chain to the literal `2`
+    // (CFA is not invalidated by the `setProps` call), so compare the
+    // annotated value instead of the narrowed access.
+    const updatedRow: number | `span ${number}` = item.props.grid_row;
+    if (updatedRow !== 3 || item.props.grid_column !== "span 2") {
+      throw new Error("node.props must mirror the grid update");
     }
   });
 });
@@ -5892,6 +5988,134 @@ Deno.test("FocusManager focus/blur are idempotent and notify only on change", ()
 });
 
 // ---------------------------------------------------------------------------
+// Global keymap (shortcuts ahead of focus routing)
+// ---------------------------------------------------------------------------
+
+Deno.test("Keymap matches combos by name and exact modifiers", () => {
+  const km = new Keymap();
+  const hits: Array<{ combo: string; event: KeyEvent }> = [];
+  const unsub = km.register({ name: "k", ctrl: true }, (event) => {
+    hits.push({ combo: "ctrl+k", event });
+  });
+  // A printable combo matches a "char" event by character.
+  const ctrlK: KeyEvent = { name: "char", char: "k", ctrl: true, alt: false, shift: false };
+  if (km.dispatch(ctrlK) !== true) throw new Error("ctrl+k must dispatch");
+  if (hits.length !== 1 || hits[0]?.combo !== "ctrl+k") {
+    throw new Error(`ctrl+k hits = ${hits.length}`);
+  }
+  if (hits[0]?.event !== ctrlK) throw new Error("handler must receive the event verbatim");
+  // Plain k (ctrl released) must not match.
+  if (km.dispatch({ ...keyBase, name: "char", char: "k" }) !== false) {
+    throw new Error("plain k must not dispatch ctrl+k");
+  }
+  // ctrl+shift+k must not match (shift must be released — exact modifiers).
+  if (km.dispatch({ name: "char", char: "k", ctrl: true, alt: false, shift: true }) !== false) {
+    throw new Error("ctrl+shift+k must not dispatch ctrl+k");
+  }
+  // A named (non-char) key never matches a different combo's name.
+  if (km.dispatch({ ...keyBase, name: "enter" }) !== false) {
+    throw new Error("enter must not dispatch ctrl+k");
+  }
+  if (hits.length !== 1) throw new Error(`non-matching keys must not fire (${hits.length})`);
+  // Unsubscribing removes the registration.
+  unsub();
+  if (km.dispatch(ctrlK) !== false) throw new Error("unregistered ctrl+k must not dispatch");
+});
+
+Deno.test("Keymap matches named keys, super/meta flags, and replaces on re-register", () => {
+  const km = new Keymap();
+  // Reads through functions: TS narrows a let captured in a closure to the
+  // last checked literal, which would flag the follow-up comparisons as
+  // unintentional (the same discipline as the `pasteCount` helper).
+  let enterHits = 0;
+  const enterCount = () => enterHits;
+  km.register({ name: "enter" }, () => enterHits++);
+  if (km.dispatch({ ...keyBase, name: "enter" }) !== true) throw new Error("enter must dispatch");
+  if (km.dispatch({ name: "enter", ctrl: true, alt: false, shift: false }) !== false) {
+    throw new Error("ctrl+enter must not dispatch enter");
+  }
+  if (enterCount() !== 1) throw new Error(`enter hits = ${enterCount()}`);
+  // super / meta flags are matched exactly.
+  let superHits = 0;
+  const superCount = () => superHits;
+  km.register({ name: "s", super: true }, () => superHits++);
+  if (km.dispatch({ ...keyBase, name: "char", char: "s", super: true }) !== true) {
+    throw new Error("super+s must dispatch");
+  }
+  if (km.dispatch({ ...keyBase, name: "char", char: "s" }) !== false) {
+    throw new Error("plain s must not dispatch super+s");
+  }
+  if (superCount() !== 1) throw new Error(`super hits = ${superCount()}`);
+  // Re-registering the same combo replaces the earlier handler; the old
+  // unsubscribe must not clobber the replacement.
+  const replaced = km.register({ name: "enter" }, () => enterHits += 10);
+  if (km.dispatch({ ...keyBase, name: "enter" }) !== true) throw new Error("enter (replaced) must dispatch");
+  if (enterCount() !== 11) throw new Error(`replaced enter hits = ${enterCount()}`);
+  replaced();
+  if (km.dispatch({ ...keyBase, name: "enter" }) !== false) throw new Error("enter must be removed");
+});
+
+Deno.test("Keymap ctrl+k fires ahead of focus routing; unclaimed keys reach the focused element", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.startEventStream();
+    const manager = new FocusManager();
+    // Reads through functions: the counters are mutated inside event
+    // handlers, so direct comparisons would be flagged by TS narrowing.
+    let shortcutHits = 0;
+    let elementAHits = 0;
+    let elementBHits = 0;
+    let treeHits = 0;
+    const shortcutCount = () => shortcutHits;
+    const elementACount = () => elementAHits;
+    const elementBCount = () => elementBHits;
+    const treeCount = () => treeHits;
+    const unregister = keymap.register({ name: "k", ctrl: true }, () => shortcutHits++);
+    // The wiring useInput / subscribeInput build: each key routes through
+    // the manager; only unclaimed keys reach the tree-level handler.
+    renderer.onKey((event) => {
+      if (manager.routeKey(event)) return;
+      treeHits++;
+    });
+    const ctrlK: KeyEvent = { name: "char", char: "k", ctrl: true, alt: false, shift: false };
+    const plainA: KeyEvent = { name: "char", char: "a", ctrl: false, alt: false, shift: false };
+    try {
+      // Nothing focused: the registered combo still fires.
+      pushEvent({ type: "key", key: ctrlK });
+      if (shortcutCount() !== 1 || treeCount() !== 0) {
+        throw new Error(`unfocused ctrl+k: shortcut = ${shortcutCount()}, tree = ${treeCount()}`);
+      }
+      // An unclaimed key with nothing focused falls through to the tree.
+      pushEvent({ type: "key", key: plainA });
+      if (treeCount() !== 1) throw new Error(`unfocused plain a: tree = ${treeCount()}`);
+      // Focus on a registered element: ctrl+k still fires the shortcut and is
+      // NOT delivered to the focused element's handler.
+      manager.register({ id: "a", node: Text({ text: "a" }), onKey: () => elementAHits++ });
+      manager.register({ id: "b", node: Text({ text: "b" }), onKey: () => elementBHits++ });
+      if (manager.focus("a") !== true) throw new Error("focus(a) must succeed");
+      pushEvent({ type: "key", key: ctrlK });
+      if (shortcutCount() !== 2 || elementACount() !== 0) {
+        throw new Error(`focused ctrl+k: shortcut = ${shortcutCount()}, element a = ${elementACount()}`);
+      }
+      // An unclaimed key reaches the focused element's handler (not swallowed
+      // by the keymap, and the tree handler stays skipped).
+      pushEvent({ type: "key", key: plainA });
+      if (elementACount() !== 1 || treeCount() !== 1) {
+        throw new Error(`focused plain a: element a = ${elementACount()}, tree = ${treeCount()}`);
+      }
+      // Any registered element: focus b and ctrl+k still fires the shortcut.
+      if (manager.focus("b") !== true) throw new Error("focus(b) must succeed");
+      pushEvent({ type: "key", key: ctrlK });
+      if (shortcutCount() !== 3 || elementBCount() !== 0) {
+        throw new Error(`focused-b ctrl+k: shortcut = ${shortcutCount()}, element b = ${elementBCount()}`);
+      }
+    } finally {
+      unregister();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Roadmap elements: Modal
 // ---------------------------------------------------------------------------
 
@@ -7258,6 +7482,343 @@ Deno.test("selectWordAt applies the word range or leaves the selection untouched
       throw new Error("whitespace must yield null");
     }
     assertSelection({ col1: 6, row1: 0, col2: 10, row2: 0 });
+    renderer.destroy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Canvas / braille
+// ---------------------------------------------------------------------------
+
+Deno.test("brailleCell maps the 2x4 sub-cell dots to their U+2800 bits (the Rust DOT_BITS layout)", () => {
+  // The exact mirror of the Rust canvas renderable's dot->bit map
+  // (`DOT_BITS`, src/core/tern-components/src/canvas.rs): sub-cell (0, r) is
+  // dot r+1 -> bit 0x01 << r, sub-cell (1, r) is dot r+5 -> bit 0x10 << r —
+  // so the JS composition and the native renderable rasterize identical
+  // glyphs, glyph for glyph.
+  const one = (x: number, y: number): string[] => {
+    const rows = ["0000", "0000", "0000", "0000"];
+    rows[y] = rows[y]!.slice(0, x) + "1" + rows[y]!.slice(x + 1);
+    return rows;
+  };
+  // Left sub-column: dots 1..4 -> 0x01, 0x02, 0x04, 0x08.
+  if (brailleCell(one(0, 0), 0, 0) !== "\u2801") throw new Error(`(0,0) = ${brailleCell(one(0, 0), 0, 0)}`);
+  if (brailleCell(one(0, 1), 0, 0) !== "\u2802") throw new Error(`(0,1) = ${brailleCell(one(0, 1), 0, 0)}`);
+  if (brailleCell(one(0, 2), 0, 0) !== "\u2804") throw new Error(`(0,2) = ${brailleCell(one(0, 2), 0, 0)}`);
+  if (brailleCell(one(0, 3), 0, 0) !== "\u2808") throw new Error(`(0,3) = ${brailleCell(one(0, 3), 0, 0)}`);
+  // Right sub-column: dots 5..8 -> 0x10, 0x20, 0x40, 0x80.
+  if (brailleCell(one(1, 0), 0, 0) !== "\u2810") throw new Error(`(1,0) = ${brailleCell(one(1, 0), 0, 0)}`);
+  if (brailleCell(one(1, 1), 0, 0) !== "\u2820") throw new Error(`(1,1) = ${brailleCell(one(1, 1), 0, 0)}`);
+  if (brailleCell(one(1, 2), 0, 0) !== "\u2840") throw new Error(`(1,2) = ${brailleCell(one(1, 2), 0, 0)}`);
+  if (brailleCell(one(1, 3), 0, 0) !== "\u2880") throw new Error(`(1,3) = ${brailleCell(one(1, 3), 0, 0)}`);
+  // All eight dots: every bit set -> U+28FF.
+  if (brailleCell(["11", "11", "11", "11"], 0, 0) !== "\u28ff") {
+    throw new Error(`full = ${brailleCell(["11", "11", "11", "11"], 0, 0)}`);
+  }
+  // A sub-cell past the matrix (a partial cell edge) reads as off.
+  if (brailleCell(["1"], 0, 0) !== "\u2801") throw new Error(`partial = ${brailleCell(["1"], 0, 0)}`);
+});
+
+Deno.test("brailleRows rasterizes a dot matrix into braille rows", () => {
+  // The same pattern the Rust renderable's golden uses
+  // (src/core/tern-components/src/canvas.rs `rasterized_rows_for_known_pattern`):
+  // a 2x2-cell canvas (4 sub-cell columns x 8 sub-cell rows) with dots on the
+  // sub-cell diagonal (x, x) for x in 0..4 plus one at (0, 7):
+  //   cell (0,0): dots 1 + 6 = 0x21 -> '⠡'
+  //   cell (1,0): dots 3 + 8 = 0x84 -> '⢄'
+  //   cell (0,1): dot 4        = 0x08 -> '⠈'
+  //   cell (1,1): empty        = 0x00 -> '⠀'
+  const rows = brailleRows([
+    "1000", // sub-row 0: dot (0, 0)
+    "0100", // sub-row 1: dot (1, 1)
+    "0010", // sub-row 2: dot (2, 2)
+    "0001", // sub-row 3: dot (3, 3)
+    "0000", // sub-rows 4-6: blank
+    "0000",
+    "0000",
+    "1000", // sub-row 7: dot (0, 7)
+  ]);
+  if (rows.length !== 2) throw new Error(`rows = ${JSON.stringify(rows)}`);
+  if (rows[0] !== "\u2821\u2884") throw new Error(`row0 = ${JSON.stringify(rows[0])}`); // ⠡⢄
+  if (rows[1] !== "\u2808\u2800") throw new Error(`row1 = ${JSON.stringify(rows[1])}`); // ⠈⠀
+  // A 1-sub-column x 4-sub-row canvas: only the left column's dots (bits
+  // 0..3) -> U+280F.
+  const left = brailleRows(["1", "1", "1", "1"]);
+  if (left.length !== 1 || left[0] !== "\u280f") {
+    throw new Error(`left column = ${JSON.stringify(left)}`);
+  }
+  // An empty matrix rasterizes to no rows.
+  if (brailleRows([]).length !== 0) throw new Error("empty matrix must yield no rows");
+});
+
+Deno.test("Canvas composes a flex-column box of braille text leaves (dots stay JS bookkeeping)", () => {
+  const canvas = Canvas({ dots: ["10", "01", "00", "00"], fg: "#ff0000" });
+  if (canvas.type !== "canvas") throw new Error(`type = ${canvas.type}`);
+  if (canvas.props.flex_direction !== "column") {
+    throw new Error(`flex_direction = ${canvas.props.flex_direction}`);
+  }
+  // The sub-cell matrix is JS bookkeeping — it never reaches the scene props
+  // (mirroring Tree's `nodes` / Panels' `panels`).
+  if ("dots" in canvas.props) throw new Error("dots must not reach the scene props");
+  // 2 sub-columns x 4 sub-rows rasterize to one braille cell: dots 1 + 6.
+  if (canvas.children.length !== 1) throw new Error(`children = ${canvas.children.length}`);
+  const leaf = canvas.children[0];
+  if (leaf?.type !== "text") throw new Error(`leaf type = ${leaf?.type}`);
+  if (leaf.props.text !== "\u2821") throw new Error(`leaf text = ${JSON.stringify(leaf.props.text)}`);
+  // The canvas fg paints the braille leaves (mirroring the renderable's row
+  // style).
+  if (leaf.props.fg !== "#ff0000") throw new Error(`leaf fg = ${leaf.props.fg}`);
+});
+
+Deno.test("Canvas golden snapshot rasterizes the same braille as the Rust renderable", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    // The exact pattern of the Rust renderable's golden
+    // (src/core/tern-components/src/canvas.rs `rasterized_rows_for_known_pattern`):
+    // a 2x2-cell canvas — 4 sub-cell columns x 8 sub-cell rows — with dots on
+    // the sub-cell diagonal plus one at (0, 7), rasterizing to
+    //   ⠡⢄
+    //   ⠈⠀
+    // so the JS composition and the native renderable agree glyph for glyph.
+    renderer.root.addChild(
+      Canvas({
+        dots: [
+          "1000",
+          "0100",
+          "0010",
+          "0001",
+          "0000",
+          "0000",
+          "0000",
+          "1000",
+        ],
+      }),
+    );
+    const frame = renderer.snapshotFrame(2, 2);
+    const expected = ["\u2821\u2884", "\u2808\u2800"]; // ⠡⢄ / ⠈⠀
+    if (!framesEqual(frame, expected)) {
+      throw new Error(`unexpected canvas rows: ${JSON.stringify(frame)}`);
+    }
+    // The styled snapshot paints the same rows (the binding's documented
+    // invariant: a row's run texts reconstruct its plain row string).
+    const styled = renderer.snapshotStyled(2, 2);
+    const reconstructed = styled.map((row) => row.map((run) => run.text).join(""));
+    if (!framesEqual(reconstructed, expected)) {
+      throw new Error(`styled rows = ${JSON.stringify(reconstructed)}`);
+    }
+    // The canvas materializes as box + text ONLY — no new napi node kind
+    // leaks for the canvas element (constitution).
+    if (createdNodes.length !== 3) {
+      throw new Error(`created nodes = ${JSON.stringify(createdNodes)}`);
+    }
+    for (const node of createdNodes) {
+      if (node.type !== "box" && node.type !== "text") {
+        throw new Error(`canvas leaked a native kind: ${node.type}`);
+      }
+    }
+    if (
+      createdNodes[0]?.type !== "box" ||
+      createdNodes[1]?.type !== "text" ||
+      createdNodes[2]?.type !== "text"
+    ) {
+      throw new Error(`created nodes = ${JSON.stringify(createdNodes)}`);
+    }
+    renderer.destroy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Data viz: BarChart / Chart / Sparkline
+// ---------------------------------------------------------------------------
+
+Deno.test("BarChart composes bottom-aligned eighth-block bar columns (data stays JS bookkeeping)", () => {
+  const chart = BarChart({
+    data: [3, 1, 4, 2],
+    height: 3,
+    max: 4,
+    gap: 1,
+    width: 7,
+    show_axis: true,
+    fg: "#ff0000",
+  });
+  if (chart.type !== "bar_chart") throw new Error(`type = ${chart.type}`);
+  if (chart.props.flex_direction !== "column") {
+    throw new Error(`flex_direction = ${chart.props.flex_direction}`);
+  }
+  // The fixed width stamps the root box; the series + scale are JS
+  // bookkeeping — they never reach the scene props (mirroring Canvas' `dots`).
+  if (chart.props.width !== 7) throw new Error(`width = ${chart.props.width}`);
+  for (const key of ["data", "height", "min", "max", "gap", "bar_width", "show_axis", "full_block"]) {
+    if (key in chart.props) throw new Error(`${key} must not reach the scene props`);
+  }
+  // 3 bar rows (top to bottom) + the axis row.
+  if (chart.children.length !== 4) throw new Error(`children = ${chart.children.length}`);
+  const texts = chart.children.map((leaf) => (leaf as Node).props.text as string);
+  // Bars [3,1,4,2] / max 4 / height 3 -> 24 eighths per bar: [18, 6, 24, 12].
+  // Row 2 (top): bar0 partial ▂ (2/8), bar1 empty, bar2 full █, bar3 empty.
+  if (texts[0] !== "▂   █  ") throw new Error(`top row = ${JSON.stringify(texts[0])}`);
+  // Row 1: bar0 full, bar1 empty, bar2 full, bar3 partial ▄ (4/8).
+  if (texts[1] !== "█   █ ▄") throw new Error(`mid row = ${JSON.stringify(texts[1])}`);
+  // Row 0 (bottom): every bar reaches the shared baseline — bar1 is ▆ (6/8).
+  if (texts[2] !== "█ ▆ █ █") throw new Error(`bottom row = ${JSON.stringify(texts[2])}`);
+  // The axis row spans the fixed width.
+  if (texts[3] !== "───────") throw new Error(`axis row = ${JSON.stringify(texts[3])}`);
+  for (const leaf of chart.children) {
+    if (leaf.type !== "text") throw new Error(`leaf type = ${leaf.type}`);
+    // The chart fg paints the glyph leaves (mirroring Canvas' row style).
+    if ((leaf as Node).props.fg !== "#ff0000") throw new Error(`leaf fg = ${(leaf as Node).props.fg}`);
+  }
+});
+
+Deno.test("BarChart golden snapshot: bar heights + the axis row span the fixed width", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(
+      BarChart({ data: [3, 1, 4, 2], height: 3, max: 4, gap: 1, width: 7, show_axis: true }),
+    );
+    const frame = renderer.snapshotFrame(7, 4);
+    const expected = ["▂   █  ", "█   █ ▄", "█ ▆ █ █", "───────"];
+    if (!framesEqual(frame, expected)) {
+      throw new Error(`unexpected bar chart rows: ${JSON.stringify(frame)}`);
+    }
+    // Bar heights read off the frame: bar2 (max) is a full 3-cell █ column,
+    // bar1 (1/4) is a single bottom ▆, bar3 (2/4) is ▄ + █ — all sharing the
+    // bottom baseline row (`█ ▆ █ █`), with the axis row beneath spanning the
+    // full fixed width (axis alignment).
+    if (!framesEqual([frame[2]!], ["█ ▆ █ █"])) {
+      throw new Error(`baseline row = ${JSON.stringify(frame[2])}`);
+    }
+    if (!framesEqual([frame[3]!], ["───────"])) {
+      throw new Error(`axis row = ${JSON.stringify(frame[3])}`);
+    }
+    // The chart materializes as box + text ONLY — no new napi node kind leaks
+    // for the bar_chart element (constitution).
+    for (const node of createdNodes) {
+      if (node.type !== "box" && node.type !== "text") {
+        throw new Error(`bar_chart leaked a native kind: ${node.type}`);
+      }
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("BarChart full_block mode paints whole-cell columns; natural width derives from the bars", () => {
+  const chart = BarChart({ data: [1, 0.5, 1], height: 3, full_block: true });
+  // Natural width: 3 bars x 1 cell + 2 gaps = 5.
+  if (chart.props.width !== 5) throw new Error(`width = ${chart.props.width}`);
+  const texts = chart.children.map((leaf) => (leaf as Node).props.text as string);
+  // Cells [3, 2, 3]: rows 2/1/0 — bar0 and bar2 full columns, bar1 two cells.
+  if (!framesEqual(texts, ["█   █", "█ █ █", "█ █ █"])) {
+    throw new Error(`full_block rows = ${JSON.stringify(texts)}`);
+  }
+});
+
+Deno.test("BarChart bar_width repeats each glyph across the bar column", () => {
+  const chart = BarChart({ data: [1, 0.5], height: 1, max: 1, bar_width: 2 });
+  const text = (chart.children[0] as Node).props.text as string;
+  if (text !== "██ ▄▄") throw new Error(`bar_width rows = ${JSON.stringify(text)}`);
+});
+
+Deno.test("Chart composes braille rows via the canvas rasterizer (data stays JS bookkeeping)", () => {
+  const chart = Chart({
+    data: [0, 3, 3, 0],
+    height: 2,
+    width: 4,
+    min: 0,
+    max: 3,
+    show_axis: true,
+    bg: "#000000",
+  });
+  if (chart.type !== "chart") throw new Error(`type = ${chart.type}`);
+  if (chart.props.flex_direction !== "column") {
+    throw new Error(`flex_direction = ${chart.props.flex_direction}`);
+  }
+  if (chart.props.width !== 4) throw new Error(`width = ${chart.props.width}`);
+  for (const key of ["data", "height", "min", "max", "show_axis"]) {
+    if (key in chart.props) throw new Error(`${key} must not reach the scene props`);
+  }
+  // 2 braille rows (8 sub-rows / 4) + the axis row.
+  if (chart.children.length !== 3) throw new Error(`children = ${chart.children.length}`);
+  const texts = chart.children.map((leaf) => (leaf as Node).props.text as string);
+  if (!framesEqual(texts.slice(0, 2), ["⣀⠓⠱⠌", "⠼⠀⠀⣃"])) {
+    throw new Error(`braille rows = ${JSON.stringify(texts.slice(0, 2))}`);
+  }
+  if (texts[2] !== "────") throw new Error(`axis row = ${JSON.stringify(texts[2])}`);
+  for (const leaf of chart.children) {
+    if (leaf.type !== "text") throw new Error(`leaf type = ${leaf.type}`);
+    // The chart bg paints the braille leaves (mirroring Canvas' row style).
+    if ((leaf as Node).props.bg !== "#000000") throw new Error(`leaf bg = ${(leaf as Node).props.bg}`);
+  }
+});
+
+Deno.test("Chart golden snapshot: the braille line spans the fixed width; the axis row aligns beneath", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    renderer.root.addChild(
+      Chart({ data: [0, 3, 3, 0], height: 2, width: 4, min: 0, max: 3, show_axis: true }),
+    );
+    const frame = renderer.snapshotFrame(4, 3);
+    const expected = ["⣀⠓⠱⠌", "⠼⠀⠀⣃", "────"];
+    if (!framesEqual(frame, expected)) {
+      throw new Error(`unexpected chart rows: ${JSON.stringify(frame)}`);
+    }
+    // The plot rows are exactly the fixed width (4 cells — every braille row
+    // is `width` codepoints wide), and the axis row beneath spans it exactly.
+    if (frame[0]!.length !== 4 || frame[1]!.length !== 4 || frame[2]!.length !== 4) {
+      throw new Error(`row widths = ${frame.map((r) => r.length).join(",")}`);
+    }
+    for (const node of createdNodes) {
+      if (node.type !== "box" && node.type !== "text") {
+        throw new Error(`chart leaked a native kind: ${node.type}`);
+      }
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("Sparkline block golden: one eighth-block glyph per point at the fixed width", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    // Series [1,3,2,4] at its own scale (min 1, max 4): norms 0, 2/3, 1/3, 1
+    // -> eighths clamped to at least 1: [1, 5, 3, 8] -> ▁, ▅, ▃, █.
+    renderer.root.addChild(Sparkline({ data: [1, 3, 2, 4] }));
+    const frame = renderer.snapshotFrame(4, 1);
+    if (!framesEqual(frame, ["▁▅▃█"])) {
+      throw new Error(`unexpected sparkline rows: ${JSON.stringify(frame)}`);
+    }
+    // A longer series shows its last `width` points; a shorter one pads at
+    // the right — the glyphs stay anchored to the fixed-width baseline.
+    renderer.root.addChild(Sparkline({ data: [1, 3, 2, 4], width: 6 }));
+    const padded = renderer.snapshotFrame(6, 1);
+    if (!framesEqual(padded, ["▁▅▃█  "])) {
+      throw new Error(`padded rows = ${JSON.stringify(padded)}`);
+    }
+    for (const node of createdNodes) {
+      if (node.type !== "box" && node.type !== "text") {
+        throw new Error(`sparkline leaked a native kind: ${node.type}`);
+      }
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("Sparkline braille golden: dots rasterize through the canvas rasterizer (two per cell)", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    // Series [1,3,2,4] at its own scale: dots at sub-rows 3, 1, 2, 0 (from
+    // the bottom baseline) in successive sub-columns — cell 0 holds points
+    // 0+1 (⠨ = dots 1 + 6), cell 1 holds points 2+3 (⠔ = dots 3 + 5).
+    renderer.root.addChild(Sparkline({ data: [1, 3, 2, 4], use_braille: true }));
+    const frame = renderer.snapshotFrame(4, 1);
+    if (!framesEqual(frame, ["⠨⠔⠀⠀"])) {
+      throw new Error(`unexpected braille sparkline rows: ${JSON.stringify(frame)}`);
+    }
+    // The fixed-width window: the last `width` points only.
+    renderer.root.addChild(Sparkline({ data: [1, 3, 2, 4], width: 2, use_braille: true }));
+    const windowed = renderer.snapshotFrame(2, 1);
+    if (!framesEqual(windowed, ["⠔⠀"])) {
+      throw new Error(`windowed rows = ${JSON.stringify(windowed)}`);
+    }
     renderer.destroy();
   });
 });

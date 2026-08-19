@@ -36,7 +36,8 @@
  * updates actually reach the scene ops.
  *
  * The roadmap element factories (`Input`/`Textarea`/`Spinner`/`StatusBar`/
- * `Panels`/`DiffView`/`Select`/`ScrollView`/`Table`/`Tabs`/`Progress`/`Modal`)
+ * `Panels`/`DiffView`/`Select`/`ScrollView`/`Table`/`Tabs`/`Progress`/`Modal`/
+ * `BarChart`/`Chart`/`Sparkline`)
  * materialize
  * the @tern-tui/core factories of the same name, matching what the `@tern-tui/react`
  * host components map to (feature parity): same props -> same scene node
@@ -85,7 +86,9 @@ import {
 // @deno-types="../../../node_modules/solid-js/types/index.d.ts"
 import { createSignal } from "solid-js";
 import {
+  BarChart as TernBarChart,
   Box as TernBox,
+  Chart as TernChart,
   DiffView as TernDiffView,
   Input as TernInput,
   Modal as TernModal,
@@ -93,6 +96,7 @@ import {
   Progress as TernProgress,
   ScrollView as TernScrollView,
   Select as TernSelect,
+  Sparkline as TernSparkline,
   Spinner as TernSpinner,
   StatusBar as TernStatusBar,
   StreamingText as TernStreamingText,
@@ -124,6 +128,8 @@ import {
   useFocus,
   wheelScroll,
   type DiffViewProps,
+  type BarChartProps,
+  type ChartProps,
   type FocusHandle,
   type FocusHandler,
   type InputProps,
@@ -139,6 +145,7 @@ import {
   type ResizeHandler,
   type ScrollViewProps,
   type SelectProps,
+  type SparklineProps,
   type Span,
   type SpinnerProps,
   type StatusBarProps,
@@ -161,6 +168,8 @@ export const version = "0.2.0";
 // consumers can type elements, props, focus handles and input handlers without
 // importing @tern-tui/core directly (the same surface @tern-tui/react re-exports).
 export type {
+  BarChartProps,
+  ChartProps,
   DiffLine,
   DiffViewProps,
   FocusHandle,
@@ -185,6 +194,7 @@ export type {
   SelectState,
   SelectionRange,
   Span,
+  SparklineProps,
   SpinnerProps,
   StatusBarProps,
   StatusBarSegment,
@@ -386,9 +396,21 @@ const options: RendererOptions<Node> = {
       case "modal":
         // No required props; the default yields a closed, empty overlay.
         return TernModal({});
+      case "bar_chart":
+        // `data` is the one required prop of the core factory; an empty
+        // series yields a valid, empty chart.
+        return TernBarChart({ data: [] });
+      case "chart":
+        // `data` is the one required prop of the core factory; an empty
+        // series yields a valid, empty plot.
+        return TernChart({ data: [] });
+      case "sparkline":
+        // `data` is the one required prop of the core factory; an empty
+        // series yields a valid, empty sparkline.
+        return TernSparkline({ data: [] });
       default:
         throw new Error(
-          `@tern-tui/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "textarea", "spinner", "status_bar", "panels", "diff", "select", "scroll_view", "table", "tree", "tabs", "progress", or "modal")`,
+          `@tern-tui/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "textarea", "spinner", "status_bar", "panels", "diff", "select", "scroll_view", "table", "tree", "tabs", "progress", "modal", "bar_chart", "chart", or "sparkline")`,
         );
     }
   },
@@ -993,6 +1015,44 @@ export function Tree(props: TreeProps): Node {
  */
 export function Progress(props: ProgressProps = {}): Node {
   return TernProgress(resolveTheme(getTheme(), { ...props, component: "progress" }) as ProgressProps);
+}
+
+/**
+ * Create a `bar_chart` scene node: the core `BarChart` factory materialized
+ * with `props` — a flex column of bar-row text leaves, one column per value
+ * painted bottom-up with the eighth-block glyphs (▁▂▃▄▅▆▇█) for sub-cell bar
+ * heights, or whole-cell `█` columns with `full_block`, all sharing the
+ * bottom baseline, plus an optional `─` axis row spanning the fixed `width`
+ * (`show_axis`). The series + scale keys are consumed by the core factory —
+ * they never reach the scene props.
+ */
+export function BarChart(props: BarChartProps): Node {
+  return TernBarChart(resolveTheme(getTheme(), props) as BarChartProps);
+}
+
+/**
+ * Create a `chart` scene node: the core `Chart` factory materialized with
+ * `props` — a braille line chart: the polyline through `data` rasterized
+ * onto the canvas sub-cell dot matrix (x spans the fixed width, the value
+ * scale spans the height) and rendered as Unicode braille via the canvas
+ * rasterizer, plus an optional `─` axis row spanning the fixed width
+ * (`show_axis`). The series + scale keys are consumed by the core factory —
+ * they never reach the scene props.
+ */
+export function Chart(props: ChartProps): Node {
+  return TernChart(resolveTheme(getTheme(), props) as ChartProps);
+}
+
+/**
+ * Create a `sparkline` scene node: the core `Sparkline` factory materialized
+ * with `props` — one glyph per value at the series' own scale, anchored to
+ * the bottom baseline at a fixed `width` (the last `width` points; a shorter
+ * series pads at the right): eighth-block glyphs by default, or braille via
+ * the canvas rasterizer with `use_braille`. The series + scale keys are
+ * consumed by the core factory — they never reach the scene props.
+ */
+export function Sparkline(props: SparklineProps): Node {
+  return TernSparkline(resolveTheme(getTheme(), props) as SparklineProps);
 }
 
 /**
