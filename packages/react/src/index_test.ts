@@ -397,6 +397,8 @@ Deno.test("createInstance maps tree to the core Tree factory; treeKey drives it"
         { label: "package.json" },
       ],
       clip_height: 5,
+      focusId: "tree",
+      onChange: () => {},
     } as never,
     container,
     {},
@@ -406,6 +408,11 @@ Deno.test("createInstance maps tree to the core Tree factory; treeKey drives it"
   // The node model + expand bookkeeping is JS state, never scene props.
   if ("nodes" in tree.props || "expanded" in tree.props || "indent" in tree.props) {
     throw new Error("nodes/expanded/indent must not reach the scene props");
+  }
+  // The callback + focus wiring is component-consumed (mirroring <Tabs>),
+  // never scene props — a leaked function would break the native serialization.
+  if ("onChange" in tree.props || "focusId" in tree.props || "focusManager" in tree.props) {
+    throw new Error("onChange/focusId/focusManager must not reach the scene props");
   }
   // Collapsed: one leaf per top-level node (2), not the nested child.
   const collapsedRows = tree.children.length;

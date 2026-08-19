@@ -247,10 +247,18 @@ const MODAL_PROPS = new Set(["content"]);
 const TABS_PROPS = new Set(["onChange", "onClose", "focusId", "focusManager"]);
 
 /**
+ * Component-consumed props of `<Tree>` that must never reach a scene node:
+ * the callback and the focus wiring (mirroring `<Tabs>`). The `nodes` model
+ * and the `expanded` / `indent` bookkeeping flow through to the core
+ * factory, which consumes them itself (they never reach the scene props).
+ */
+const TREE_PROPS = new Set(["onChange", "focusId", "focusManager"]);
+
+/**
  * Strip the React-only props (and the component-level `<StreamingText>`,
- * `<Input>` / `<Spinner>` / `<Select>` / `<Modal>` props), leaving the tern
- * node props (style + layout keys) that the core factories and
- * `Node.setProps` understand.
+ * `<Input>` / `<Spinner>` / `<Select>` / `<Modal>` / `<Tabs>` / `<Tree>`
+ * props), leaving the tern node props (style + layout keys) that the core
+ * factories and `Node.setProps` understand.
  */
 export function toNodeProps(props: TernProps, type?: string): NodeProps {
   const out: NodeProps = {};
@@ -263,6 +271,7 @@ export function toNodeProps(props: TernProps, type?: string): NodeProps {
     if (type === "select" && SELECT_PROPS.has(key)) continue;
     if (type === "modal" && MODAL_PROPS.has(key)) continue;
     if (type === "tabs" && TABS_PROPS.has(key)) continue;
+    if (type === "tree" && TREE_PROPS.has(key)) continue;
     out[key] = value;
   }
   return out;
