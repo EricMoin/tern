@@ -765,13 +765,13 @@ frame, not from a document model.
   renderer's selection API: a `down_left` anchors a session (a second press
   on a nearby cell within `SELECTION_DOUBLE_CLICK_MS` ms — 500 — is a
   double-click and selects the word), each `drag_left` extends the rect, and
-  any `up_*` release ends the session — clear-on-release, the highlight is
-  transient and lives only while the button is held (persistent selection
-  after release is future work).
+  any `up_*` release ends the session — the overlay persists after release
+  (persistent selection): `Esc` or a bare click outside the selection rect
+  clears it.
 - **Clipboard.** `copySelection(renderer)` copies the active selection text
-  to the system clipboard (OSC 52). With clear-on-release the copy must
-  happen during the gesture — the host wiring does copy-on-release (copy
-  before `endSelection`), and `selectionKey` maps `ctrl+shift+c` to it
+  to the system clipboard (OSC 52). The selection stays valid after release
+  (the native side reads the last painted frame), so the copy may happen at
+  any time after the gesture; `selectionKey` maps `ctrl+shift+c` to it
   (plain `ctrl+c` stays the app's exit convention).
 
 **API sketch (JS):**
@@ -786,11 +786,13 @@ useSelection();
 const dispose = subscribeSelection(renderer);
 ```
 
-**Acceptance:** a press-drag-release gesture paints the overlay while held
-and clears it on release; a double-click selects the word under the pointer;
-release copies the selected text to the clipboard; the selection text
-extracts the exact painted cells (multi-row, cluster-aware); `ctrl+shift+c`
-copies the active selection and plain `ctrl+c` is never consumed.
+**Acceptance:** a press-drag-release gesture paints the overlay and keeps it
+up after release; `Esc` or a bare click outside the selection clears it; a
+double-click selects the word under the pointer; `copySelection` /
+`selectionText` stay valid after release and return the selected text; the
+selection text extracts the exact painted cells (multi-row, cluster-aware);
+`ctrl+shift+c` copies the active selection and plain `ctrl+c` is never
+consumed.
 
 **Shipped:** native selection overlay on the compositor (`set_selection` /
 `clear_selection` / `selection_text` / `selection_word_range` on the
@@ -799,6 +801,9 @@ tern-node renderer, surfaced as `Renderer.setSelection` / `clearSelection` /
 (`startSelection` / `dragSelection` / `endSelection` / `copySelection` /
 `selectWordAt` / `selectionKey` / `SELECTION_DOUBLE_CLICK_MS`), and the host
 wiring `useSelection` (`@tern/react`) / `subscribeSelection` (`@tern/solid`).
+The overlay persists after `endSelection` — `Esc` or a bare click outside the
+selection rect clears it, and `copySelection` / `selectionText` stay valid
+against the last painted frame between gestures.
 
 ---
 
@@ -996,6 +1001,8 @@ slice fast path of `Buffer::diff_from` uses `PartialEq` slice comparison and
 does not depend on `Copy`; `Buffer::resize` now `clone_from_slice`s instead
 of `copy_from_slice`.
 
-The editing components (`Input`, `Textarea`, `StatusBar`) still measure
-cursor/segment positions character-by-character; cluster-aware cursor
-movement is future work (see `roadmap.md`).
+Cluster-aware cursor movement is shipped: the editing components (`Input`,
+`Textarea`) now step and measure cursor/segment positions by grapheme cluster
+via `tern_core::clusters` — move/delete/word-jump land on cluster boundaries,
+backspace/delete remove whole clusters, and `display_col` sums cluster width
+(see Phase 8 of [roadmap.md](roadmap.md)).
