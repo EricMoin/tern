@@ -1373,10 +1373,13 @@ Deno.test("StreamingText appends spans from an async iterable in order", async (
     throw new Error("span style must be forwarded to appendSpan");
   }
   // Component-consumed props must never reach the scene node; tern props must.
-  if ("stream" in node.props || "autoScroll" in node.props || "wrap" in node.props) {
+  // `wrap` IS a scene prop — the compositor honors `wrap: false` (single-row
+  // paint, trimmed at the right edge), so it flows through like `width`.
+  if ("stream" in node.props || "autoScroll" in node.props) {
     throw new Error(`component props leaked into node props: ${JSON.stringify(node.props)}`);
   }
   if (node.props.width !== 30) throw new Error(`tern props lost: width = ${node.props.width}`);
+  if (node.props.wrap !== false) throw new Error(`tern props lost: wrap = ${node.props.wrap}`);
 });
 
 Deno.test("unmounting a StreamingText cancels the iteration (no appends after unmount)", async () => {
