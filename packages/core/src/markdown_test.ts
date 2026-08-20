@@ -350,6 +350,111 @@ Deno.test("an unclosed link is literal text", () => {
   if (leaf.props.underline === true) throw new Error("unclosed link must not be underlined");
 });
 
+Deno.test("links stamp the OSC 8 href style key (clickable in supporting terminals)", () => {
+  const view = MarkdownView({ source: "[docs](https://tern.dev)" });
+  const leaf = view.children[0];
+  if (leaf?.type !== "text" || textOf(leaf) !== "docs") {
+    throw new Error(`link leaf = ${JSON.stringify(leaf?.props)}`);
+  }
+  // The camelCase `hyperlink` alias lands on the node as the snake_case
+  // `href` style key — the engine's OSC 8 hyperlink surface.
+  if (leaf.props.href !== "https://tern.dev") {
+    throw new Error(`href = ${JSON.stringify(leaf.props.href)}`);
+  }
+  // Two adjacent links with different targets never merge (the hyperlink
+  // participates in span-style equality).
+  const pair = MarkdownView({ source: "[a](https://one.dev)[b](https://two.dev)" });
+  const pairRow = pair.children[0];
+  if (pairRow?.type !== "box" || pairRow.children.length !== 2) {
+    throw new Error(
+      `pair row = ${JSON.stringify(pairRow?.children.map((s) => s.props))}`,
+    );
+  }
+  const [first, second] = pairRow.children;
+  if (first?.props.href !== "https://one.dev" || second?.props.href !== "https://two.dev") {
+    throw new Error(
+      `pair hrefs = ${JSON.stringify([first?.props.href, second?.props.href])}`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Task lists
+// ---------------------------------------------------------------------------
+
+Deno.test("task list items render the checkbox glyph; unchecked and checked variants", () => {
+  const view = MarkdownView({ source: "- [ ] open\n- [x] done\n* [X] also done" });
+  const first = view.children[0];
+  const second = view.children[1];
+  const third = view.children[2];
+  if (textOf(first) !== "[ ] open") {
+    throw new Error(`unchecked = ${JSON.stringify(textOf(first))}`);
+  }
+  if (textOf(second) !== "[x] done") {
+    throw new Error(`checked = ${JSON.stringify(textOf(second))}`);
+  }
+  if (textOf(third) !== "[x] also done") {
+    throw new Error(`X marker = ${JSON.stringify(textOf(third))}`);
+  }
+  // A task marker inside an ordered list keeps its number marker.
+  const ordered = MarkdownView({ source: "1. [x] ship it" });
+  if (textOf(ordered.children[0]) !== "1. [x] ship it") {
+    throw new Error(`ordered = ${JSON.stringify(textOf(ordered.children[0]))}`);
+  }
+  // A bracket pair that is not a task marker stays literal list text.
+  const plain = MarkdownView({ source: "- [not a task]" });
+  if (textOf(plain.children[0]) !== "• [not a task]") {
+    throw new Error(`plain = ${JSON.stringify(textOf(plain.children[0]))}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Pipe tables
+// ---------------------------------------------------------------------------
+
+Deno.test("a pipe table composes a Table node with header + body rows", () => {
+  const view = MarkdownView({
+    source: [
+      "| Name | Score |",
+      "|------|------:|",
+      "| Ada  |    92 |",
+      "| Grace|    88 |",
+    ].join("\n"),
+  });
+  const table = view.children[0];
+  if (table?.type !== "table") throw new Error(`type = ${table?.type}`);
+  // The column model is JS bookkeeping — the widths/alignment never reach
+  // the scene props (the Table pattern).
+  if ("columns" in (table.props ?? {})) {
+    throw new Error("columns must not reach the scene props");
+  }
+  // The sticky header row above the content region: per-column padded cells.
+  const headerRow = table.children[0];
+  const headerCells = headerRow?.children.map((cell) => cell.props.text) ?? [];
+  // "Name" (4) vs "Ada"/"Grace" (4/5) => width 6; "Score" (5) vs "92" (2)
+  // => width 6, right-aligned per the `--:` separator.
+  if (headerCells.join("|") !== `${"Name".padEnd(6)}|${"Score".padStart(6)}`) {
+    throw new Error(`header = ${JSON.stringify(headerCells)}`);
+  }
+  // One row leaf per body row, the right column right-aligned per `--:`.
+  const content = table.children[1];
+  if (content?.children.length !== 2) {
+    throw new Error(`body rows = ${content?.children.length}`);
+  }
+  const firstRow = content?.children[0]?.children.map((cell) => cell.props.text) ?? [];
+  if (firstRow.join("|") !== `${"Ada".padEnd(6)}|${String(92).padStart(6)}`) {
+    throw new Error(`row 0 = ${JSON.stringify(firstRow)}`);
+  }
+});
+
+Deno.test("a line with a pipe but no separator row is a paragraph", () => {
+  const view = MarkdownView({ source: "a | b" });
+  const block = view.children[0];
+  if (block?.type !== "text" || textOf(block) !== "a | b") {
+    throw new Error(`block = ${JSON.stringify(block?.props)}`);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Inline styles within block styles
 // ---------------------------------------------------------------------------

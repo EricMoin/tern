@@ -11309,3 +11309,80 @@ Deno.test("Sparkline braille golden: dots rasterize through the canvas rasterize
     renderer.destroy();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Code fence language routing (roadmap M3.7 — tree-sitter grammar expansion)
+// ---------------------------------------------------------------------------
+
+Deno.test("highlightCode routes the new grammar fence names through the addon", () => {
+  const calls: Array<[string, string]> = [];
+  const routingFakeAddon = {
+    TuiRenderer: class {},
+    NodeHandle: class {},
+    create_node: () => ({} as never),
+    highlight: (language: string, source: string): HighlightSpanJs[] => {
+      calls.push([language, source]);
+      return [{
+        text: source,
+        bold: false,
+        italic: false,
+        dim: false,
+        underline: false,
+      }];
+    },
+  } as unknown as TernAddon;
+  setAddonForTesting(routingFakeAddon);
+  try {
+    // Every new grammar fence name (and its alias) reaches the native addon
+    // unchanged, and the echoed span stream reconstructs the source.
+    for (
+      const name of [
+        "python",
+        "py",
+        "go",
+        "toml",
+        "yaml",
+        "yml",
+        "c",
+        "cpp",
+        "c++",
+        "cxx",
+      ]
+    ) {
+      calls.length = 0;
+      const spans = highlightCode(name, "x = 1");
+      if (calls.length !== 1) {
+        throw new Error(`${name}: addon calls = ${calls.length}`);
+      }
+      const [routed, source] = calls[0]!;
+      if (routed !== name) throw new Error(`${name}: routed as ${routed}`);
+      if (spans.map((s) => s.text).join("") !== "x = 1") {
+        throw new Error(
+          `${name}: concat = ${spans.map((s) => s.text).join("")}`,
+        );
+      }
+      if (source !== "x = 1") throw new Error(`${name}: source = ${source}`);
+    }
+    // The "golang" alias and case-insensitive fence info strings route too.
+    for (
+      const [given, expected] of [["golang", "golang"], [
+        "Python",
+        "python",
+      ]] as const
+    ) {
+      calls.length = 0;
+      highlightCode(given, "x");
+      const routed = calls[0]?.[0];
+      if (calls.length !== 1 || routed !== expected) {
+        throw new Error(`${given} routed as ${JSON.stringify(calls)}`);
+      }
+    }
+    // Unrecognized names still never reach the addon (markdown is not a
+    // grammar in this expansion — see the M3.7 research note).
+    calls.length = 0;
+    highlightCode("markdown", "x");
+    if (calls.length !== 0) throw new Error("markdown reached the addon");
+  } finally {
+    setAddonForTesting(null);
+  }
+});
