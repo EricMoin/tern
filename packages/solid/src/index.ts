@@ -707,7 +707,7 @@ export function Textarea(props: TextareaProps = {}): Node {
   // `TEXTAREA_PROPS` stripping): they must never reach the core factory, or
   // they would leak onto the scene node's props.
   const { focusId, focusManager: manager, onChange, onSubmit, ...nodeProps } = props;
-  const node = TernTextarea(resolveTheme(getTheme(), { ...nodeProps, component: "textarea" }));
+  const node = TernTextarea(resolveTheme(getTheme(), { ...nodeProps, component: "textarea" }) as TextareaProps);
   if (focusId !== undefined) {
     const handle = useFocus(focusId, node, (event) => {
       const before = node.props as TextareaProps;
@@ -743,7 +743,7 @@ export function Textarea(props: TextareaProps = {}): Node {
  * leaf at element-creation time. Advance it with `tick` on an interval.
  */
 export function Spinner(props: SpinnerProps = {}): Node {
-  return TernSpinner(resolveTheme(getTheme(), { ...props, component: "spinner" }));
+  return TernSpinner(resolveTheme(getTheme(), { ...props, component: "spinner" }) as SpinnerProps);
 }
 
 /**
