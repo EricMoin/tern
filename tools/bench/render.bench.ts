@@ -32,7 +32,10 @@
  *     diff covers (nearly) the whole 4800-cell viewport and the mutated
  *     node's bounds span the viewport, so the dirty union trips the
  *     full-repaint threshold — the large-dirty path the one-cell scenarios
- *     never exercise (the perf.md round-3 caveat).
+ *     never exercise (the perf.md round-3 caveat). Since M2.1 the frame
+ *     flushes through the terminal-native scroll path when the diff is a
+ *     clean one-row shift; the flushed bytes per frame (`last_flush_bytes`)
+ *     quantify the OPTIMIZED stream.
  *   scenario 5 — alternating full screens: N = 500 frames, each flipping the
  *     visibility of two full-screen `streaming_text` leaves (40 rows of a
  *     repeated character each, so every cell differs), so the diff is the
@@ -342,12 +345,23 @@ async function scenario3(
  * viewport — the dirty union trips the >half-viewport full-repaint
  * threshold. The mutation (one `setProps` key) stays outside the timer, like
  * scenarios 0 and 2; the timer covers only the render.
+ *
+ * Since M2.1, a frame whose diff is exactly a vertical scroll of a full-width
+ * row band flushes through the terminal-native scroll path (one DECSTBM +
+ * SU scroll command plus the newly exposed row — `flush_scroll`, gated on the
+ * probe-derived `scrollRegion` capability) instead of repainting every
+ * changed cell. Per frame the flushed bytes are read from the native
+ * `last_flush_bytes` counter (fed by the backend queue — the same seam
+ * scenario 5 reads) and averaged into a bytes-per-frame number: the ANSI
+ * byte cost of the OPTIMIZED scroll frame, the M2 acceptance-1 target (≥60%
+ * drop vs the round-4 full-repaint flush).
  */
 function scenario4(
   renderer: ReturnType<typeof createRenderer>,
   rootBox: Node,
-): { mean: number; p50: number; fps: number } {
+): { mean: number; p50: number; fps: number; bytesPerFrame: number } {
   const perFrameMs: number[] = new Array(SCROLL_N);
+  let flushedBytes = 0;
   for (let i = 0; i < SCROLL_N; i++) {
     // One-row viewport scroll: `scroll_y` pans the content up by one row
     // each frame (cycling 0..SCROLL_RANGE-1).
@@ -355,15 +369,18 @@ function scenario4(
     const t0 = performance.now();
     renderer.render();
     perFrameMs[i] = performance.now() - t0;
+    flushedBytes += renderer.lastFlushBytes;
   }
   const { mean, p50, fps } = summarize(perFrameMs);
+  const bytesPerFrame = flushedBytes / SCROLL_N;
   console.log(
     `render.bench: scenario 4 — viewport scroll (${SCROLL_N} frames, one-row shift, full-repaint threshold)`,
   );
   console.log(`  mean: ${mean.toFixed(3)} ms/frame`);
   console.log(`  p50:  ${p50.toFixed(3)} ms/frame`);
   console.log(`  fps:  ${fps.toFixed(1)}`);
-  return { mean, p50, fps };
+  console.log(`  bytes per frame: ${bytesPerFrame.toFixed(0)} (mean ANSI bytes flushed per frame)`);
+  return { mean, p50, fps, bytesPerFrame };
 }
 
 /**
@@ -485,7 +502,8 @@ async function main(): Promise<void> {
       `render.bench: summary — round-trip p50 ${s0.p50.toFixed(3)} ms | no-change p50 ${s1.p50.toFixed(3)} ms | ` +
         `single-cell p50 ${s2.p50.toFixed(3)} ms | burst ratio ${s3.ratio.toFixed(2)} ` +
         `(${s3.expected} native render(s) per ${BURST_SIZE}-call burst) | ` +
-        `scroll p50 ${s4.p50.toFixed(3)} ms | full-screen p50 ${s5.p50.toFixed(3)} ms ` +
+        `scroll p50 ${s4.p50.toFixed(3)} ms (${s4.bytesPerFrame.toFixed(0)} bytes/frame) | ` +
+        `full-screen p50 ${s5.p50.toFixed(3)} ms ` +
         `(${s5.bytesPerFrame.toFixed(0)} bytes/frame)`,
     );
   } finally {

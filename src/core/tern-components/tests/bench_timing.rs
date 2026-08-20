@@ -19,12 +19,18 @@
 //!   content cycles a single digit, keeping the string and layout the same
 //!   width) before painting. Today the compositor repaints the whole scene,
 //!   so this is the per-frame cost an incremental layout would cut.
-//! - `bench_scroll_churn_frame` — the round-4 large-dirty target: every
-//!   iteration pans the whole content by one row (`scroll_y`), so the diff
-//!   covers (nearly) the whole viewport and the dirty union trips the
-//!   full-repaint threshold. Times the frame AND records the flushed bytes
-//!   per frame into the sink — the large-dirty scenario the one-cell benches
-//!   never exercise.
+//! - `bench_scroll_churn_frame` — the round-4 large-dirty target, upgraded
+//!   in round 5 to exercise the scroll-region fast path: every iteration
+//!   pans the whole content by one row (`scroll_y`), the frame diff is
+//!   recognized as a vertical scroll of a full-width row band, and the flush
+//!   routes through the terminal-native scroll path (`detect_vertical_scroll`
+//!   + `flush_scroll_to`: one DECSTBM + SU/SD scroll command plus the newly
+//!   exposed row) instead of repainting every changed cell. Times the frame
+//!   AND records the flushed bytes per frame into the sink — so the
+//!   `bytes/frame` number quantifies the OPTIMIZED stream, the M2 acceptance-1
+//!   target (≥60% byte drop vs the round-4 full-repaint flush). Frames whose
+//!   diff is not a clean one-row scroll (e.g. the cycle wrap) fall back to
+//!   `flush_diff_to`, exactly like the renderer's render path.
 //!
 //! Both tests are `#[ignore]`d so `cargo test --workspace` skips them by
 //! default; run them explicitly with:
@@ -37,13 +43,16 @@
 
 use std::time::Instant;
 
-use tern_components::Compositor;
+use tern_components::{
+    Compositor, detect_vertical_scroll, exposed_band_updates,
+};
 use tern_core::buffer::Buffer;
 use tern_core::color::Color;
-use tern_core::rect::Size;
+use tern_core::rect::{Rect, Size};
 use tern_core::scene::{NodeKind, PropValue, Scene, Span};
 use tern_core::style::{BorderStyle, Style};
 use tern_core::NodeId;
+use tern_terminal::backend::{ScrollOp, flush_scroll_to};
 use tern_terminal::flush_diff_to;
 
 /// The benchmark viewport: 120 columns x 40 rows (4800 cells per frame).
@@ -56,21 +65,31 @@ const ITERATIONS: usize = 2000;
 /// `StreamingText` node with ~50 styled spans, and a `Text` leaf with a
 /// `caret` Int prop. ~1000 scene nodes total.
 ///
+/// `border` selects the root box's frame: the static and single-cell benches
+/// keep the rounded border (their round-1/2 continuity), while the scroll
+/// bench runs borderless — the box's border ring paints *under* its children
+/// (content overlaps the ring), so a bordered pane's rows are not a clean
+/// cell-for-cell shift and the scroll detector would refuse them; a real
+/// scrollable content pane (ScrollView/Table content, the TS scenario-4 pane)
+/// is borderless, and only a borderless pane produces the faithful one-row
+/// shift the terminal-native scroll path detects.
+///
 /// Returns the scene plus the id of the first text leaf — the single-cell
 /// mutation target of the incremental-layout bench.
-fn synthetic_scene() -> (Scene, NodeId) {
+fn synthetic_scene(border: bool) -> (Scene, NodeId) {
     let mut scene = Scene::new();
     let root = scene.root_id();
 
     // Root box fills the viewport and stacks its children in a column, so the
     // 200 rows lay out top-to-bottom (overflowing the 40-row viewport, as a
     // real long document would).
+    let root_box_style = if border {
+        Style::new().border_style(BorderStyle::Rounded)
+    } else {
+        Style::new()
+    };
     let root_box = scene
-        .add_child(
-            root,
-            NodeKind::Box,
-            Style::new().border_style(BorderStyle::Rounded),
-        )
+        .add_child(root, NodeKind::Box, root_box_style)
         .expect("root box");
     scene.set_prop(root_box, "width", PropValue::Int(VIEWPORT.width as i64));
     scene.set_prop(root_box, "height", PropValue::Int(VIEWPORT.height as i64));
@@ -204,7 +223,7 @@ fn bench_paint_diff_flush_frame() {
     // The round-1 canonical baseline: the scene is static, so after the
     // first iteration the diff is empty and the flush hits the empty-diff
     // fast path; the number is dominated by layout + paint.
-    let (scene, _leaf) = synthetic_scene();
+    let (scene, _leaf) = synthetic_scene(true);
     let cells_per_frame = VIEWPORT.width as f64 * VIEWPORT.height as f64;
     let mut compositor = Compositor::new();
     // The sink the backend flushes into; reused across iterations.
@@ -251,7 +270,7 @@ fn bench_paint_single_cell_change_frame() {
     // the string — and thus the layout — the same width) before painting.
     // Today the compositor repaints the whole scene, so this is the per-frame
     // cost an incremental layout would cut.
-    let (mut scene, leaf) = synthetic_scene();
+    let (mut scene, leaf) = synthetic_scene(true);
     let cells_per_frame = VIEWPORT.width as f64 * VIEWPORT.height as f64;
     let mut compositor = Compositor::new();
     let mut sink: Vec<u8> = Vec::with_capacity(64 * 1024);
@@ -295,18 +314,24 @@ fn bench_paint_single_cell_change_frame() {
 #[test]
 #[ignore = "performance benchmark — run explicitly with -- --ignored --nocapture"]
 fn bench_scroll_churn_frame() {
-    // The round-4 large-dirty target: every iteration shifts the whole
+    // The round-5 scroll-region target: every iteration shifts the whole
     // content by one row — the root box's `scroll_y` pans its ~200
     // overflowing rows up by one inside the 40-row viewport (cycling within
     // the range that keeps every visible row filled) — so the diff covers
-    // (nearly) the whole 4800-cell viewport and the mutated node's bounds
-    // (the root box spans the full viewport) push the dirty union past the
-    // half-viewport threshold: the full-repaint path the one-cell benches
-    // never exercise. Time AND flushed bytes per frame are recorded into the
-    // Vec<u8> sink (the exact seam the real backend writes through), so the
-    // block quantifies both the time and the ANSI byte cost of a
-    // large-dirty frame.
-    let (mut scene, _leaf) = synthetic_scene();
+    // (nearly) the whole 4800-cell viewport. The frame is then flushed
+    // through the terminal-native scroll path, mirroring the renderer's
+    // render() wiring: the changed-row band is scanned for a vertical
+    // scroll shift (`detect_vertical_scroll`); a detected one-row shift
+    // routes to `flush_scroll_to` (one DECSTBM + SU scroll command plus the
+    // newly exposed bottom row — the round-5 optimization), and any other
+    // frame falls back to `flush_diff_to`. Time AND flushed bytes per frame
+    // are recorded into the Vec<u8> sink (the exact seam the real backend
+    // writes through), so the block quantifies both the time and the ANSI
+    // byte cost of the OPTIMIZED large-dirty frame — the M2 acceptance-1
+    // target (≥60% byte drop vs the round-4 4904 B full-repaint flush).
+    // The pane is borderless (see `synthetic_scene`): the one-row pan is then
+    // a faithful cell-for-cell shift, the shape the detector requires.
+    let (mut scene, _leaf) = synthetic_scene(false);
     let cells_per_frame = VIEWPORT.width as f64 * VIEWPORT.height as f64;
     let mut compositor = Compositor::new();
     let mut sink: Vec<u8> = Vec::with_capacity(256 * 1024);
@@ -315,6 +340,10 @@ fn bench_scroll_churn_frame() {
     let mut per_frame_ms: Vec<f64> = Vec::with_capacity(ITERATIONS);
     let mut bytes_per_frame: Vec<usize> = Vec::with_capacity(ITERATIONS);
     let mut last_flush_pos = None;
+    // How many frames took the scroll-region fast path (vs the diff-flush
+    // fallback): the cycle wrap (159 -> 0) and any frame the detector cannot
+    // explain as a scroll land in the fallback, exactly like the renderer.
+    let mut scroll_path_frames = 0usize;
     // The root box — the root's first child — is the overflowing content
     // pane the scroll pans (200 nested boxes + stream + caret ≈ 204 rows).
     let root_box = scene.children(scene.root_id()).expect("root has children")[0];
@@ -329,8 +358,52 @@ fn bench_scroll_churn_frame() {
         let buffer = compositor.paint_scene(&scene, VIEWPORT);
         let updates = buffer.diff_from(&prev);
         sink.clear();
-        flush_diff_to(&mut sink, &updates, (0, 0), &mut last_flush_pos)
-            .expect("flush into a Vec<u8> sink");
+        // The scroll-region fast path, wired exactly like the renderer's
+        // render() (src/bindings/tern-node/src/renderer.rs): the changed-row
+        // band is the update rows expanded to the full viewport width
+        // (DECSTBM scrolls whole rows). A detected shift with a non-empty
+        // exposed band flushes through `flush_scroll_to` — one scroll command
+        // plus the newly exposed rows — and everything else falls back to the
+        // regular diff flush.
+        let scroll_flush = if updates.is_empty() {
+            None
+        } else {
+            let min_y = updates.iter().map(|u| u.y).min().expect("non-empty updates");
+            let max_y = updates.iter().map(|u| u.y).max().expect("non-empty updates");
+            let band = Rect::new(
+                0,
+                min_y as i32,
+                VIEWPORT.width as u32,
+                (max_y - min_y) as u32 + 1,
+            );
+            detect_vertical_scroll(&prev, &buffer, band, VIEWPORT.width as u16).and_then(|shift| {
+                let exposed = exposed_band_updates(&updates, &shift);
+                if exposed.is_empty() {
+                    // Nothing new to repaint — keep the diff flush.
+                    return None;
+                }
+                Some((
+                    ScrollOp {
+                        top: shift.region.y as u16,
+                        bottom: (shift.region.bottom() - 1) as u16,
+                        rows: shift.rows as u16,
+                        up: shift.up,
+                    },
+                    exposed,
+                ))
+            })
+        };
+        match scroll_flush {
+            Some((op, exposed)) => {
+                scroll_path_frames += 1;
+                flush_scroll_to(&mut sink, &op, &exposed, (0, 0), &mut last_flush_pos)
+                    .expect("scroll flush into a Vec<u8> sink");
+            }
+            None => {
+                flush_diff_to(&mut sink, &updates, (0, 0), &mut last_flush_pos)
+                    .expect("flush into a Vec<u8> sink");
+            }
+        }
         bytes_per_frame.push(sink.len());
         prev = buffer;
         per_frame_ms.push(t0.elapsed().as_secs_f64() * 1e3);
@@ -346,6 +419,9 @@ fn bench_scroll_churn_frame() {
         total_secs,
         Some(&bytes_per_frame),
     );
+    // The scroll-path hit rate, for the record: one frame per 160-frame
+    // cycle is the wrap (159 -> 0) and lands in the diff-flush fallback.
+    println!("scroll-path frames: {scroll_path_frames}/{ITERATIONS}");
     assert_sane(&prev, &per_frame_ms);
 }
 
