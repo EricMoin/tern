@@ -120,6 +120,9 @@ Input/Textarea design notes in this document).
 | [Theme system](#theme-system--soft-wrap) | ✅ Shipped | — |
 | [Soft wrap (`wrap` prop)](#theme-system--soft-wrap) | ✅ Shipped | — |
 | [Terminal capabilities](#event-model) | ✅ Shipped | — (interactive probe M1.1 + tiered mouse M1.3 + signal lifecycle M1.4) |
+| [Checkbox / Radio / Toggle](#checkbox--radio--toggle) | ✅ Shipped | — |
+| [Menu](#menu) | ✅ Shipped | — |
+| [HelpPanel](#helppanel) | ✅ Shipped | — |
 
 ---
 
@@ -222,15 +225,30 @@ half-open while tokens are still arriving. The view must render best-effort
   append; keep parse state between appends so a closing ```` ``` ```` reflows
   correctly.
 - **Block styles:** headings, lists, blockquotes, horizontal rules, code
-  fences, paragraphs. Rendered as styled spans over `Text`/`Box`.
-- **Inline styles:** `**bold**`, `` `code` ``, `[links](url)`, `*italic*`.
+  fences, paragraphs, **tables** (a pipe table renders as a local `Table`
+  node — one column header row + one row leaf per body row, aligned with
+  the existing per-column padding) and **task lists** (a `[x]` / `[ ]`
+  checkbox glyph prefix on list items).
+- **Inline styles:** `**bold**`, `` `code` ``, `*italic*`, and
+  `[links](url)` — a link paints as an **OSC 8 clickable hyperlink**
+  (`href` style key → the engine's `Style::hyperlink`, surfaced on
+  `StyleRunJs.hyperlink`), so a terminal with OSC 8 support makes the link
+  clickable; the label renders as before.
 - **Syntax highlighting** inside code fences via tree-sitter (roadmap
-  Phase 4 — shipped): the `tern-highlight` crate maps tree-sitter captures
-  to style spans (keywords, strings, comments, types) over the whole fence;
-  `@tern-tui/core`'s `highlightCode` feeds them into the fence's leaves (a
-  fence with a recognized language renders one styled leaf per line with
-  token colors, falling back to the single fence style for unknown
-  languages or when the native addon is unavailable).
+  Phase 4 — shipped; M3.7): the `tern-highlight` crate maps tree-sitter
+  captures to style spans (keywords, strings, comments, types) over the
+  whole fence; `@tern-tui/core`'s `highlightCode` feeds them into the
+  fence's leaves (a fence with a recognized language renders one styled
+  leaf per line with token colors, falling back to the single fence style
+  for unknown languages or when the native addon is unavailable).
+  `tern-highlight` now ships **12 grammars** — Rust, TypeScript, TSX,
+  JavaScript, JSON, shell, plus the M3.7 expansion Python, Go, TOML, YAML,
+  C and C++ — each with its own highlight query (aliases like `rs`, `ts`,
+  `jsx`, `sh`, `py`, `golang`, `yml`, `c++` map to the same grammar).
+  **Markdown is deliberately not among them:** the only published
+  `tree-sitter-markdown` crate pins tree-sitter 0.19 and ships no
+  highlight query, so it cannot join the 0.26 runtime — deferred until a
+  usable crate exists.
 - **Layout:** reuses tern-layout over block-level boxes; code blocks get a
   distinct background and optional box border.
 
@@ -250,15 +268,18 @@ correctly at the end); inline/block styles match a golden buffer test.
 **Shipped:** `MarkdownView` in `@tern-tui/core` builds the `markdown` element — a
 flex column of block nodes rendering the `source` (headings bold, H1
 underlined; paragraphs; bulleted/ordered lists; dimmed block quotes; `─`
-horizontal rules; and code fences as a `bg` box with one leaf per line,
-tree-sitter-highlighted for recognized languages) with `**bold**` /
+horizontal rules; pipe **tables** as a local `Table` node — header row +
+one row leaf per body row, per-column padded; **task lists** with `[x]` /
+`[ ]` glyph prefixes; and code fences as a `bg` box with one leaf per line,
+tree-sitter-highlighted for the 12 recognized languages) with `**bold**` /
 `*italic*` / `` `code` `` / `[links](url)` inline styles parsed into
-per-span `Text` leaves. Parsing is best-effort and streaming-friendly: a
-half-open code fence renders its collected lines as the fenced block, and an
-unclosed inline marker styles the rest of its line. The `source` key is
-consumed (JS bookkeeping — never a scene prop); the `width` prop soft-wraps
-plain lines. No new napi node kind: the `markdown` element materializes as a
-`box` (constitution).
+per-span `Text` leaves — a link stamps the engine's OSC 8 `href` style so
+supporting terminals paint it clickable. Parsing is best-effort and
+streaming-friendly: a half-open code fence renders its collected lines as
+the fenced block, and an unclosed inline marker styles the rest of its
+line. The `source` key is consumed (JS bookkeeping — never a scene prop);
+the `width` prop soft-wraps plain lines. No new napi node kind: the
+`markdown` element materializes as a `box` (constitution).
 
 ---
 
@@ -970,6 +991,191 @@ props); `value`/`max` (or `ratio`) live on the root box's props, and
 rebuild. `<Progress>` in `@tern-tui/react` and `Progress` in `@tern-tui/solid`
 materialize the factory with the `progress` component preset resolved onto
 the frame's props.
+
+---
+
+## Checkbox / Radio / Toggle
+
+**Purpose:** form primitives — boolean toggles and single-choice lists for
+tool-approval prompts, settings panels, model pickers, and yes/no gates in
+agent UIs.
+
+**Core problem:** a focused form control must paint its interactive state
+distinctly (checked / on / selected), flip on a key press, and never leak
+its model — the label or the option list is JS bookkeeping, the state lives
+on the root box's props, and the theme drives the focused look.
+
+**Design:**
+
+- **Checkbox** — a `[x]` / `[ ]` glyph (`CHECKBOX_CHECKED_GLYPH` /
+  `CHECKBOX_UNCHECKED_GLYPH`) plus the label in one text leaf; `checked` /
+  `focused` live on the root box's props (the `checkbox` element
+  materializes as a `box` — no new napi node kind).
+- **Toggle** — an `●` / `○` glyph (`TOGGLE_ON_GLYPH` / `TOGGLE_OFF_GLYPH`)
+  plus the label; `on` / `focused` on the root props (the `toggle` element,
+  also a `box`).
+- **Radio** — one row per option (the `radio` element, a flex column), the
+  selected row `(•)`-prefixed (`RADIO_SELECTED_GLYPH`), the focused row
+  painted with the theme's `primary` palette colors and reversed; a single
+  `selected` index on the root props.
+- **Keyboard driving.** `checkboxKey` / `toggleKey` map `space` / `enter`
+  to the flip; `radioKey` moves the focus with `up` / `down` (clamped at
+  the ends) and commits the selection with `space`.
+- **Labels/options are JS bookkeeping** — never scene props, mirroring
+  `Select`'s `options` / `Tabs`' `tabSpecs`.
+
+**API sketch (JS):**
+
+```ts
+// Core factories (usable directly from @tern-tui/react / @tern-tui/solid
+// scenes, like MarkdownView — no dedicated host tag).
+const autoApply = Checkbox({ label: "Auto-apply", checked: true });
+checkboxKey(autoApply, { name: "char", char: " " });   // flip
+
+const wrap = Toggle({ label: "Soft wrap", on: true });
+toggleKey(wrap, { name: "enter" });                    // flip
+
+const lang = Radio({
+  options: [{ value: "rust", label: "Rust" }, { value: "go" }],
+  selected: 0,
+});
+radioKey(lang, { name: "down" });                      // move focus
+radioKey(lang, { name: "char", char: " " });           // commit selection
+```
+
+**Acceptance:** golden buffer tests for the checked/on/selected glyphs and
+the focused (primary + reversed) style; interaction tests: `space` /
+`enter` flip the box and the toggle, radio arrows move the focus clamped at
+the ends, `space` commits the selection.
+
+**Shipped:** `Checkbox` / `Toggle` / `Radio` in `@tern-tui/core` compose the
+glyph row(s) — one text leaf per row, the label / options consumed by the
+factory — driven by `checkboxKey` / `toggleKey` / `radioKey`, with the
+interactive state on the root box's props. Like `MarkdownView`, the three
+are core factories usable directly from `@tern-tui/react` / `@tern-tui/solid`
+scenes (no dedicated host tag). Composition + keyboard-interaction tests
+land in `index_test.ts`, and the kitchen-sink demos render all three.
+
+---
+
+## Menu
+
+**Purpose:** a popup menu of commands — action menus, "run with…" pickers,
+nested submenus — as a floating overlay (or an inline list) driven by
+keyboard and mouse.
+
+**Core problem:** a menu overlays in-flow content (paint z-order), isolates
+its focus while open, and must render a *hierarchical* item model — open
+submenus add rows — without pushing the item model into the scene props.
+
+**Design:**
+
+- **Item model.** `items` is a recursive `MenuItem[]` — `label`, optional
+  stable `id`, optional `children` (a non-empty `children` array is a
+  submenu branch, an empty one a leaf). The model is JS bookkeeping (never
+  scene props, mirroring `Tree`'s `nodes`).
+- **Overlay.** `floating` stamps the root box's `z_index` prop so the menu
+  paints above in-flow content (pass `MENU_Z_INDEX` = 100 for a full
+  overlay); a closed menu is hidden (`hidden` + `display: none` — the
+  Modal pattern), and `openMenu` / `closeMenu` toggle it.
+- **Submenu rendering.** `submenu: "inline"` (default) renders open submenu
+  items as indented rows within the menu column (tree-style); `"flyout"`
+  renders each open submenu as its own overlay layer with its own
+  `z_index`.
+- **Keyboard driving.** `menuKey` moves the highlight (`up` / `down`,
+  clamped to the visible rows), `right` opens the highlighted branch's
+  submenu, `left` closes to the parent, `enter` activates a leaf (dismiss)
+  or opens a branch, `escape` dismisses. `menuHover` / `menuClick` drive
+  the mouse path.
+- **Focus isolation.** `openMenu` records the active focus id and moves
+  focus to the menu's first registered focusable; `closeMenu` restores the
+  recorded id (or blurs) — the Modal pattern.
+
+**API sketch (JS):**
+
+```tsx
+const menu = Menu({
+  items: [
+    { label: "Copy", id: "copy" },
+    {
+      label: "Insert",
+      id: "insert",
+      children: [{ label: "Code block", id: "code" }, { label: "Table", id: "table" }],
+    },
+  ],
+  floating: true,
+  z_index: MENU_Z_INDEX,
+});
+openMenu(menu);
+menuKey(menu, { name: "down" });          // highlight the next visible item
+menuKey(menu, { name: "enter" });         // activate a leaf / open a branch
+```
+
+**Acceptance:** golden buffer test: a floating menu paints above in-flow
+content with the correct z-order and its open submenu rows indented; focus
+isolation tests: `openMenu` moves focus into the menu, `closeMenu` restores
+the previously-active focus (referencing the Modal/Select floating tests).
+
+**Shipped:** `Menu` in `@tern-tui/core` builds the `menu` element — a flex
+column of one leaf per *visible* item (the highlighted row reversed; open
+inline submenus as indented rows, flyout submenus as overlay layers), the
+item model and render mode consumed by the factory. `openMenu` / `closeMenu`
+toggle visibility and move focus through the `FocusManager`; `menuKey` /
+`menuHover` / `menuClick` drive it. `<Menu>` in `@tern-tui/react` and `Menu`
+in `@tern-tui/solid` (with `disposeMenuFocus` / `subscribeMenuMouse`) wire
+`focusId` + `onSelect` / `onDismiss` and the mouse path — the full
+three-end alignment. Composition, floating z-order, submenu, focus
+isolation, and key/mouse interaction tests land in `index_test.ts`, and the
+kitchen-sink demos render a menu.
+
+---
+
+## HelpPanel
+
+**Purpose:** a key-help overlay rendered from a `Keymap`'s registrations —
+bubbletea `Help` parity for agent UIs that publish keyboard shortcuts.
+
+**Core problem:** the overlay must derive its rows from the keymap's
+described entries — the key hint right-aligned in a column as wide as the
+widest hint, the description dimmed after a two-cell gap — and stay a plain
+`box` composition (no new node kind).
+
+**Design:**
+
+- **Source of truth.** The panel renders the entries of a `Keymap`
+  (defaulting to the module-level `keymap` consulted by every
+  `FocusManager`); entries registered *without* a description are skipped
+  (dispatch-only shortcuts, bubbletea's empty-desc skip).
+- **Row shape.** One row per described entry: the combo hint rendered
+  `mod1+mod2+key` (modifiers first — `ctrl+k`, `shift+enter`, `f1`),
+  right-aligned in the widest-hint column, then the dimmed description with
+  a two-cell `margin_left` gap.
+- **Optional title.** A `title` renders as a plain bold row above the
+  entries.
+- **Consumed props.** `keymap` / `title` are consumed by the factory — the
+  overlay is rendered at creation time, so they never reach the scene
+  props; remaining props style the root box (the `help` component preset
+  resolves onto it).
+
+**API sketch (JS):**
+
+```tsx
+const km = new Keymap();
+km.register({ name: "k", ctrl: true }, () => {}, "open command palette");
+km.register({ name: "q", ctrl: true }, () => {}, "quit");
+const help = HelpPanel({ keymap: km, title: "Keybindings" });
+```
+
+**Acceptance:** the overlay lists exactly the described entries with the key
+column aligned to the widest hint, dispatch-only entries skipped, the title
+row on top, and the `keymap` / `title` props absent from the scene node.
+
+**Shipped:** `HelpPanel` in `@tern-tui/core` creates the `help` element — a
+flex column `box` of text leaves (title row, then one key/description row
+per described entry), materializing as a plain `box` with text children
+(no new napi node kind). The `Keymap` class gains the `description` field
+surfaced here. Composition tests land in `index_test.ts`, and the
+kitchen-sink demos render a help panel from a small keymap.
 
 ---
 
