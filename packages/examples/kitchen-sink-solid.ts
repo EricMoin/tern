@@ -7,8 +7,11 @@
  * region + track/thumb scrollbar, driven by `scrollTo`), `StreamingText`
  * auto-scroll (fed by `subscribeStream`, which pumps `syncStreamTail`),
  * `DiffView`, `Select` (driven by `selectKey`), a determinate `Spinner`, a
- * `StatusBar`, a framed `Progress` gauge (driven by `setProgress`), and a
- * custom theme via `setTheme` (`role` / `component`
+ * `StatusBar`, a framed `Progress` gauge (driven by `setProgress`), a
+ * `Tabs` bar, the M3 surface — `Checkbox` / `Toggle` / `Radio` (driven by
+ * `checkboxKey` / `toggleKey` / `radioKey`), a floating `Menu` (driven by
+ * `openMenu` / `menuKey`), and a `HelpPanel` rendered from a small `Keymap`
+ * — and a custom theme via `setTheme` (`role` / `component`
  * hints resolved onto plain node props at element-creation time).
  *
  * Every widget is asserted against its scene node after driving it: a
@@ -24,7 +27,19 @@
 
 import {
   MARKDOWN_FENCE_BG,
+  MARKDOWN_LINK_FG,
   MarkdownView,
+  Checkbox,
+  Toggle,
+  Radio,
+  HelpPanel,
+  Keymap,
+  checkboxKey,
+  toggleKey,
+  radioKey,
+  CHECKBOX_CHECKED_GLYPH,
+  TOGGLE_ON_GLYPH,
+  RADIO_SELECTED_GLYPH,
   createRenderer,
   SCROLLBAR_THUMB_CHAR,
   type MouseEventJs,
@@ -34,8 +49,10 @@ import {
   Box,
   DiffView,
   Input,
+  Menu,
   Modal,
   MODAL_Z_INDEX,
+  MENU_Z_INDEX,
   Panels,
   Progress,
   ScrollView,
@@ -47,6 +64,7 @@ import {
   Tabs,
   Text,
   Textarea,
+  closeMenu,
   closeModal,
   dragPanels,
   editKey,
@@ -55,6 +73,8 @@ import {
   focusAt,
   focusManager,
   isStreamFollowing,
+  menuKey,
+  openMenu,
   openModal,
   render as solidRender,
   scrollTo,
@@ -125,9 +145,12 @@ const SELECT_OPTIONS = [
 
 /**
  * The Markdown source of the `MarkdownView` demo node: a heading, a
- * paragraph mixing inline styles, and a rust code fence (the fence exercises
+ * paragraph mixing inline styles, a rust code fence (the fence exercises
  * the tree-sitter `highlightCode` path when the native addon is available;
- * without the addon it falls back to the single fence style).
+ * without the addon it falls back to the single fence style), a pipe table
+ * (renders through the roadmap `Table` element), a task list (each item a
+ * checkbox-glyph row) and a link (its span carries the OSC-8 `href` style
+ * key) — the deepened M3 surface.
  */
 const MARKDOWN_SOURCE = [
   "# Agent output",
@@ -139,6 +162,15 @@ const MARKDOWN_SOURCE = [
   "    let x = 1;",
   "}",
   "```",
+  "",
+  "| Name | Role |",
+  "|------|------|",
+  "| Ada  | dev  |",
+  "",
+  "- [x] shipped task",
+  "- [ ] pending task",
+  "",
+  "See [tern docs](https://tern.dev) for details.",
 ].join("\n");
 
 /** The columns of the `Table`: a left-aligned name, a left-aligned role and
@@ -175,6 +207,33 @@ const TABS_SPECS = [
   { label: "files", content: [Text({ text: "file list" })] },
   { label: "git", content: [Text({ text: "git status" })] },
 ];
+
+/**
+ * The items of the `Menu` demo: two leaves plus a submenu branch (the
+ * branch opens with `menuKey` right / enter, closes with left / escape).
+ */
+const MENU_ITEMS = [
+  { label: "Copy", id: "copy" },
+  {
+    label: "Insert",
+    id: "insert",
+    children: [
+      { label: "Code block", id: "code" },
+      { label: "Table", id: "table" },
+    ],
+  },
+  { label: "Paste", id: "paste" },
+];
+
+/**
+ * A small keymap with described entries, rendered by the `HelpPanel` demo
+ * node (the module-level `keymap` is consulted by every `FocusManager`, so
+ * the demo's own `Keymap` keeps the panel self-contained).
+ */
+const demoKeymap = new Keymap();
+demoKeymap.register({ name: "k", ctrl: true }, () => {}, "open command palette");
+demoKeymap.register({ name: "p", ctrl: true }, () => {}, "quick switch file");
+demoKeymap.register({ name: "q", ctrl: true }, () => {}); // dispatch-only: skipped
 
 // ---------------------------------------------------------------------------
 // Runtime setup (Deno-first, node fallback)
@@ -305,11 +364,44 @@ setTheme({
 box.addChild(Box({ role: "primary" }));
 box.addChild(Box({ component: "input" }));
 
+// M3 components: the form primitives and the help panel are core factories
+// used directly (like MarkdownView above); the Menu is the solid factory
+// with the floating overlay mode. The checkbox / toggle / radio are driven
+// below with their core key helpers, the menu with openMenu/closeMenu +
+// menuKey.
+const checkboxNode = Checkbox({ label: "Dark mode", checked: true });
+box.addChild(checkboxNode);
+const toggleNode = Toggle({ label: "Wrap", on: true });
+box.addChild(toggleNode);
+const radioNode = Radio({
+  options: [
+    { value: "rust", label: "Rust" },
+    { value: "go", label: "Go" },
+  ],
+  selected: 0,
+});
+box.addChild(radioNode);
+const menuNode = Menu({
+  items: MENU_ITEMS,
+  floating: true,
+  z_index: MENU_Z_INDEX,
+});
+box.addChild(menuNode);
+const helpPanelNode = HelpPanel({ keymap: demoKeymap, title: "Keybindings" });
+box.addChild(helpPanelNode);
+
 // Modal: a full-bleed overlay (dimmed backdrop + centered content box) stamped
 // with a high z_index. Mounted as a scene-root sibling of the app box, so its
 // absolute insets resolve against the full terminal. 'm' toggles it through
 // openModal/closeModal (which move focus into/out of the overlay).
 const modal = Modal({ open: false, content: [modalBody] });
+
+// An OSC 8 hyperlink: the `hyperlink` prop on a `Text` node translates to
+// the `href` style key the engine paints as an OSC 8 sequence (the same
+// translation the markdown link span's affordance underlines; the prop is
+// asserted against the scene node below). Mounted as a root sibling like the
+// modal, so the box children count stays stable.
+const osc8Node = Text({ text: "tern.dev", hyperlink: "https://tern.dev" });
 
 /** The modal's open state for the 'm' key toggle (the assertions above leave
  * it closed, matching this initial state). */
@@ -318,6 +410,7 @@ let modalOpen = false;
 // Mount the scene through the solid renderer's universal `render()`.
 const dispose = solidRender(() => box, renderer.root);
 renderer.root.addChild(modal);
+renderer.root.addChild(osc8Node);
 renderer.render();
 
 // Feed the streaming node through the solid streaming API: the pump appends
@@ -354,7 +447,7 @@ function mouse(kind: string, column: number, row: number): MouseEventJs {
 
 const rootBox: Node | undefined = renderer.root.children[0];
 const kids: readonly Node[] = rootBox?.children ?? [];
-const [panels, scrollView, streamNode2, diff, select2, table2, textarea2, spinner, statusBar, tabs2, progress2, markdownNode2, themedPrimary, themedInput] = kids;
+const [panels, scrollView, streamNode2, diff, select2, table2, textarea2, spinner, statusBar, tabs2, progress2, markdownNode2, themedPrimary, themedInput, checkboxNode2, toggleNode2, radioNode2, menuNode2, helpPanelNode2] = kids;
 
 // Register the Select and the Textarea with the shared focus manager so the
 // click-to-focus wiring can resolve clicks to them.
@@ -368,7 +461,7 @@ const disposeClick = subscribeClickFocus(renderer);
 
 // --- scene structure --------------------------------------------------------
 assert(rootBox?.type === "box", "app root is a box");
-assert(kids.length === 14, `scene holds 14 widget nodes (got ${kids.length})`);
+assert(kids.length === 19, `scene holds 19 widget nodes (got ${kids.length})`);
 assert(
   kids[0]?.type === "panels" &&
     kids[1]?.type === "scroll_view" &&
@@ -381,7 +474,12 @@ assert(
     kids[8]?.type === "status_bar" &&
     kids[9]?.type === "tabs" &&
     kids[10]?.type === "progress" &&
-    kids[11]?.type === "markdown",
+    kids[11]?.type === "markdown" &&
+    kids[14]?.type === "checkbox" &&
+    kids[15]?.type === "toggle" &&
+    kids[16]?.type === "radio" &&
+    kids[17]?.type === "menu" &&
+    kids[18]?.type === "box",
   "widget element types materialize in scene order",
 );
 
@@ -705,10 +803,136 @@ assert(
   fenceLines2 === "fn main() {\n    let x = 1;\n}",
   `the fence renders the code lines (got ${JSON.stringify(fenceLines2)})`,
 );
+// The deepened M3 blocks: the pipe table materializes as a `table` element
+// (the parser reuses the roadmap `Table` — sticky header + content region),
+// the task-list items render as checkbox-glyph rows (`[x]` / `[ ]` replace
+// the bullet), and the link line composes as a row box whose span carries
+// the link affordance: underline + the link fg, plus the OSC-8 `href` style
+// key the engine paints as a hyperlink sequence.
+const mdTable2 = markdownNode2?.children[3];
+const mdTableHeaderCells2 = mdTable2?.children[0]?.children.map((cell) => cell.props.text) ?? [];
+const mdTableRow0Cells2 = mdTable2?.children[1]?.children[0]?.children.map((cell) => cell.props.text) ?? [];
+assert(
+  mdTable2?.type === "table" &&
+    mdTableHeaderCells2.join("|") === "Name |Role " &&
+    mdTableRow0Cells2.join("|") === "Ada  |dev  ",
+  `the pipe table materializes as a table element (header ${JSON.stringify(mdTableHeaderCells2.join("|"))}, row ${JSON.stringify(mdTableRow0Cells2.join("|"))})`,
+);
+const mdTaskRows2 = markdownNode2?.children.slice(4, 6).map((child) => child.props.text) ?? [];
+assert(
+  mdTaskRows2.join("\n") === "[x] shipped task\n[ ] pending task",
+  `the task-list items render as checkbox-glyph rows (got ${JSON.stringify(mdTaskRows2.join("\n"))})`,
+);
+const mdLinkRow2 = markdownNode2?.children[6];
+const mdLinkSpan2 = mdLinkRow2?.children.find(
+  (span) => span.props.underline === true && span.props.fg === MARKDOWN_LINK_FG,
+);
+assert(
+  mdLinkRow2?.type === "box" &&
+    mdLinkRow2.props.flex_direction === "row" &&
+    mdLinkSpan2 !== undefined &&
+    mdLinkSpan2.props.text === "tern docs" &&
+    mdLinkSpan2.props.href === "https://tern.dev",
+  "the link line composes as a row box whose span carries the OSC-8 href style key",
+);
 
 // --- Theme ------------------------------------------------------------------------
 assert(themedPrimary?.props.fg === "#123456", "role=primary resolves the custom palette fg");
 assert(themedInput?.props.border_style === "double", "component=input resolves the preset border_style");
+
+// --- M3 form primitives -------------------------------------------------------------
+assert(checkboxNode2?.type === "checkbox", "Checkbox materializes");
+assert(checkboxNode2?.props.checked === true, "the checkbox starts checked");
+assert(
+  !("label" in (checkboxNode2?.props ?? {})),
+  "the checkbox label is JS bookkeeping, never a scene prop",
+);
+assert(
+  checkboxNode2?.children[0]?.props.text === `${CHECKBOX_CHECKED_GLYPH} Dark mode`,
+  "the checked checkbox composes the glyph + label leaf",
+);
+const flipped = checkboxKey(checkboxNode2!, { name: "char", char: " ", ctrl: false, alt: false, shift: false });
+assert(flipped.checked === false, "checkboxKey space unchecks the box");
+assert(toggleNode2?.type === "toggle", "Toggle materializes");
+assert(toggleNode2?.props.on === true, "the toggle starts on");
+assert(
+  toggleNode2?.children[0]?.props.text === `${TOGGLE_ON_GLYPH} Wrap`,
+  "the on toggle composes the glyph + label leaf",
+);
+const toggled = toggleKey(toggleNode2!, { name: "enter", ctrl: false, alt: false, shift: false });
+assert(toggled.on === false, "toggleKey enter turns the toggle off");
+assert(radioNode2?.type === "radio", "Radio materializes");
+assert(radioNode2?.props.selected === 0, "the radio starts on the first option");
+assert(
+  radioNode2?.children.length === 2 &&
+    radioNode2?.children[0]?.props.text === `${RADIO_SELECTED_GLYPH} Rust`,
+  "the radio composes one row per option, the selected row glyph-prefixed",
+);
+const moved = radioKey(radioNode2!, { name: "down", ctrl: false, alt: false, shift: false });
+assert(moved.focused === 1, "radioKey down moves the focus to option 1");
+const committed = radioKey(radioNode2!, { name: "char", char: " ", ctrl: false, alt: false, shift: false });
+assert(committed.selected === 1, "radioKey space commits the focused option");
+
+// --- Menu (floating overlay + focus isolation) -------------------------------------
+assert(menuNode2?.type === "menu", "the Menu materializes");
+assert(
+  menuNode2?.props.z_index === MENU_Z_INDEX,
+  `the floating menu paints above in-flow content (z_index = ${menuNode2?.props.z_index})`,
+);
+assert(
+  menuNode2?.props.hidden === true && menuNode2?.props.display === "none",
+  "a closed menu is hidden",
+);
+openMenu(menuNode2!);
+assert(
+  menuNode2?.props.hidden === false && menuNode2?.props.display === "flex",
+  "openMenu shows the menu",
+);
+assert(menuNode2?.children.length === 3, "the open menu composes one row per root item");
+assert(
+  menuNode2?.children[0]?.props.reversed === true,
+  "the highlighted item's row renders reversed",
+);
+const menuDown = menuKey(menuNode2!, { name: "down", ctrl: false, alt: false, shift: false });
+assert(menuDown.highlighted === 1, "menuKey down moves the highlight to the submenu branch");
+const menuRight = menuKey(menuNode2!, { name: "right", ctrl: false, alt: false, shift: false });
+assert(
+  menuRight.open_submenus.includes("insert") && menuRight.count === 5,
+  "menuKey right opens the branch: 3 root rows + 2 indented submenu rows",
+);
+closeMenu(menuNode2!);
+assert(menuNode2?.props.hidden === true, "closeMenu hides the menu");
+
+// --- HelpPanel (rendered from the demo keymap) --------------------------------------
+assert(helpPanelNode2?.type === "box", "HelpPanel materializes as a plain box");
+assert(
+  helpPanelNode2?.children[0]?.props.text === "Keybindings",
+  "the help panel renders the title row first",
+);
+const helpRows2 = helpPanelNode2?.children.slice(1) ?? [];
+assert(
+  helpRows2.length === 2 &&
+    helpRows2[0]?.children[0]?.props.text === "ctrl+k" &&
+    helpRows2[0]?.children[1]?.props.text === "open command palette" &&
+    helpRows2[1]?.children[1]?.props.dim === true,
+  "the help panel lists the described combos, dispatch-only entries skipped",
+);
+
+// --- OSC 8 hyperlink (root sibling) ---------------------------------------------------
+// The `hyperlink` prop translates to the `href` style key on the scene node
+// (the engine paints the run as an OSC 8 hyperlink sequence) — the same
+// alias the markdown link affordance mirrors. Assert the translation and
+// that the camelCase alias never leaks into the scene props.
+const osc8Node2 = renderer.root.children[2];
+assert(osc8Node2?.type === "text", "the OSC 8 hyperlink node materializes as a root sibling");
+assert(
+  osc8Node2?.props.text === "tern.dev" && osc8Node2?.props.href === "https://tern.dev",
+  "the hyperlink prop translates to the href style key on the scene node",
+);
+assert(
+  !("hyperlink" in (osc8Node2?.props ?? {})),
+  "the camelCase hyperlink alias never reaches the scene props",
+);
 
 // --- Mouse wheel scroll -------------------------------------------------------------
 // A wheel event on the Table scrolls its content region (the sticky header
@@ -819,6 +1043,18 @@ renderer.onKey((event: KeyEvent) => {
       closeModal(modal);
       modalOpen = false;
     }
+  }
+  // M3: 'c' / 't' / 'r' drive the checkbox, toggle and radio through their
+  // core key functions (the same functions the assertion section calls
+  // directly) — the interactive wiring of the scene nodes.
+  if (event.name === "char" && event.char === "c") {
+    checkboxKey(checkboxNode, { name: "char", char: " ", ctrl: false, alt: false, shift: false });
+  }
+  if (event.name === "char" && event.char === "t") {
+    toggleKey(toggleNode, { name: "enter", ctrl: false, alt: false, shift: false });
+  }
+  if (event.name === "char" && event.char === "r") {
+    radioKey(radioNode, { name: "down", ctrl: false, alt: false, shift: false });
   }
   if (event.name === "char" && event.char === "q") quit = true;
 });
