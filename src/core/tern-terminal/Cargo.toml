@@ -11,3 +11,10 @@ tern-core = { path = "../tern-core" }
 base64 = "0.22"
 crossterm = "0.29"
 supports-color = "3"
+
+[target.'cfg(unix)'.dependencies]
+# The probe makes stdin non-blocking for its duration (fcntl, via rustix —
+# already in the workspace lock through crossterm's event source) so its
+# reader thread cannot linger on a blocked read and swallow the app's next
+# input byte; the event source's fd flags are restored right after.
+rustix = { version = "1", default-features = false, features = ["fs", "std"] }

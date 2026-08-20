@@ -38,10 +38,11 @@
 use std::io::{self, Write};
 use std::sync::OnceLock;
 
+use crate::probe::{probe, TerminalCapabilities};
 use crossterm::cursor::{Hide, MoveTo, SetCursorStyle, Show};
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    EnableFocusChange, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
 use crossterm::style::{
@@ -253,7 +254,12 @@ impl Backend {
     ///
     /// crossterm only emits these events once the terminal has been told to
     /// track them; without this, mouse, focus, and paste events never reach
-    /// the event loop. Pair with
+    /// the event loop. Mouse capture is tiered: press/release, drag, and
+    /// scroll events are enabled here, but **any-event motion tracking
+    /// (`?1003`, the terminal reporting every mouse movement) is not** —
+    /// opt in with [`enable_any_event_mouse`](Backend::enable_any_event_mouse)
+    /// only while a motion/drag listener is registered, so terminals do not
+    /// stream motion events when nothing consumes them. Pair with
     /// [`disable_event_listening`](Backend::disable_event_listening).
     pub fn enable_event_listening(&self) -> io::Result<()> {
         let mut out = io::stdout();
@@ -261,10 +267,36 @@ impl Backend {
     }
 
     /// Tell the terminal to stop reporting mouse, focus-change, and
-    /// bracketed-paste events.
+    /// bracketed-paste events. Also turns off any-event motion tracking
+    /// (`?1003l`), so a separately enabled
+    /// [`enable_any_event_mouse`](Backend::enable_any_event_mouse) is fully
+    /// restored by this teardown.
     pub fn disable_event_listening(&self) -> io::Result<()> {
         let mut out = io::stdout();
         disable_event_listening_to(&mut out)
+    }
+
+    /// Opt into any-event mouse tracking (`?1003h`): the terminal reports
+    /// every mouse motion, not just presses and drags.
+    ///
+    /// Off by default — [`enable_event_listening`](Backend::enable_event_listening)
+    /// enables press/release, drag, and scroll tracking only — so motion
+    /// events only flow while a motion/drag listener is registered. Pair with
+    /// [`disable_any_event_mouse`](Backend::disable_any_event_mouse); the full
+    /// teardown in [`disable_event_listening`](Backend::disable_event_listening)
+    /// clears this mode too.
+    pub fn enable_any_event_mouse(&self) -> io::Result<()> {
+        let mut out = io::stdout();
+        enable_any_event_mouse_to(&mut out)
+    }
+
+    /// Stop any-event mouse tracking (`?1003l`): the terminal stops reporting
+    /// motion without a button pressed. Drags still report via the
+    /// button-event tracking enabled by
+    /// [`enable_event_listening`](Backend::enable_event_listening).
+    pub fn disable_any_event_mouse(&self) -> io::Result<()> {
+        let mut out = io::stdout();
+        disable_any_event_mouse_to(&mut out)
     }
 
     /// Enable the kitty keyboard protocol (progressive enhancement):
@@ -366,17 +398,82 @@ impl Backend {
 }
 
 /// Enable mouse, focus-change, and bracketed-paste event reporting on any
-/// `Write` target.
+/// `Write` target, gated by the interactive capability probe.
 ///
-/// Emits the crossterm enable sequences: mouse capture (normal, button-event,
-/// any-event, rxvt, and SGR tracking modes), focus-change reporting, then
-/// bracketed-paste mode. Without these, crossterm never surfaces mouse,
-/// focus, or paste events to [`poll_events`](crate::event::poll_events). Pair
-/// with [`disable_event_listening_to`] at shutdown.
+/// Emits the mouse capture modes minus any-event tracking (normal, button-
+/// event, rxvt, and SGR: `?1000h` `?1002h` `?1015h` `?1006h`) always, then
+/// focus-change reporting (`?1004h`) only when the cached [`probe`] reports
+/// `focus_events`, then bracketed-paste mode (`?2004h`) only when it reports
+/// `bracketed_paste`. Without these, crossterm never surfaces mouse, focus,
+/// or paste events to [`poll_events`](crate::event::poll_events). Any-event
+/// tracking (`?1003h`), which makes the terminal report every mouse motion,
+/// is deliberately NOT part of the default path — it streams high-volume
+/// motion events even when nothing consumes them. crossterm's
+/// `EnableMouseCapture` command bundles `?1003h`, so the four tiered modes
+/// are written raw through the `Write` (the same seam as
+/// [`set_clipboard_to`]); opt into motion reporting with
+/// [`enable_any_event_mouse_to`]. Pair with
+/// [`disable_event_listening_to`] at shutdown.
+///
+/// The gating logic lives in [`enable_event_listening_with`] (unit-testable
+/// with explicit capabilities); this entry point feeds it the cached probe,
+/// so `Backend::startup`, `Backend::enable_event_listening`, and the
+/// SIGCONT resume all gate the optional modes on what the probe reported. A
+/// probe skipped or unanswered (non-TTY, `TERM=dumb`, or a silent terminal)
+/// reports conservative defaults, so focus and bracketed paste simply stay
+/// off there.
 pub fn enable_event_listening_to<W: Write>(w: &mut W) -> io::Result<()> {
-    w.queue(EnableMouseCapture)?;
-    w.queue(EnableFocusChange)?;
-    w.queue(EnableBracketedPaste)?;
+    enable_event_listening_with(w, probe())
+}
+
+/// Enable mouse, focus-change, and bracketed-paste event reporting on any
+/// `Write` target, with the probe-gated modes decided by explicit
+/// capabilities.
+///
+/// The mouse capture modes (normal, button-event, rxvt, and SGR: `?1000h`
+/// `?1002h` `?1015h` `?1006h`) are emitted unconditionally; `EnableFocusChange`
+/// (`?1004h`) and `EnableBracketedPaste` (`?2004h`) follow only when `caps`
+/// reports the terminal supports focus events / bracketed paste. With both
+/// supported the byte stream is identical to the pre-gate sequence — the
+/// terminal's behavior never changes on a fully capable terminal, and a
+/// terminal that never enabled a mode has nothing to restore (the disable
+/// sequences in [`disable_event_listening_to`] are harmless no-ops there).
+///
+/// The same seam pattern as [`flush_diff_to`]: `caps` is injected so the
+/// exact escape bytes are unit-testable against an in-memory buffer without
+/// a terminal or a probe run.
+pub fn enable_event_listening_with<W: Write>(
+    w: &mut W,
+    caps: &TerminalCapabilities,
+) -> io::Result<()> {
+    w.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h")?;
+    if caps.focus_events {
+        w.queue(EnableFocusChange)?;
+    }
+    if caps.bracketed_paste {
+        w.queue(EnableBracketedPaste)?;
+    }
+    w.flush()
+}
+
+/// Opt into any-event mouse tracking on any `Write` target: the terminal
+/// reports every mouse motion (`?1003h`), not just presses and drags.
+///
+/// Call only while a motion/drag listener is registered — see
+/// [`enable_event_listening_to`], which leaves this mode off. Pair with
+/// [`disable_any_event_mouse_to`]; the full teardown in
+/// [`disable_event_listening_to`] clears this mode too.
+pub fn enable_any_event_mouse_to<W: Write>(w: &mut W) -> io::Result<()> {
+    w.write_all(b"\x1b[?1003h")?;
+    w.flush()
+}
+
+/// Stop any-event mouse tracking on any `Write` target (`?1003l`): the
+/// terminal stops reporting motion without a button pressed. Drags still
+/// report via the button-event tracking enabled by
+/// [`enable_event_listening_to`].
+pub fn disable_any_event_mouse_to<W: Write>(w: &mut W) -> io::Result<()> {
+    w.write_all(b"\x1b[?1003l")?;
     w.flush()
 }
 
@@ -385,7 +482,9 @@ pub fn enable_event_listening_to<W: Write>(w: &mut W) -> io::Result<()> {
 ///
 /// Emits the inverse of [`enable_event_listening_to`]: bracketed-paste mode
 /// off, focus-change reporting off, then the mouse capture modes off in
-/// reverse order.
+/// reverse order. The mouse clear also turns off any-event tracking
+/// (`?1003l`), so a separately enabled
+/// [`enable_any_event_mouse_to`] mode is fully restored by this teardown.
 pub fn disable_event_listening_to<W: Write>(w: &mut W) -> io::Result<()> {
     w.queue(DisableMouseCapture)?;
     w.queue(DisableFocusChange)?;
@@ -985,14 +1084,95 @@ mod tests {
     #[test]
     fn enable_event_listening_emits_mouse_and_focus_enable_sequences() {
         let mut out = Vec::new();
-        enable_event_listening_to(&mut out).expect("enable should succeed");
+        // Full capabilities: every event mode the constructor enables. The
+        // byte stream must be identical to the pre-probe-gate sequence —
+        // focus and bracketed paste follow the mouse modes in the same order
+        // on a terminal the probe reports supports both.
+        let caps = TerminalCapabilities {
+            focus_events: true,
+            bracketed_paste: true,
+            ..TerminalCapabilities::default()
+        };
+        enable_event_listening_with(&mut out, &caps).expect("enable should succeed");
         let s = String::from_utf8(out).unwrap();
-        // Mouse capture: normal (?1000h), button-event (?1002h), any-event
-        // (?1003h), rxvt (?1015h), sgr (?1006h); then focus change (?1004h)
+        // Mouse capture minus any-event: normal (?1000h), button-event
+        // (?1002h), rxvt (?1015h), sgr (?1006h); then focus change (?1004h)
         // and bracketed paste (?2004h).
         assert_eq!(
-            s, "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h\x1b[?1004h\x1b[?2004h",
+            s, "\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h\x1b[?1004h\x1b[?2004h",
             "got: {s:?}"
+        );
+        // Any-event tracking (?1003h) is NOT part of the default path — motion
+        // events only stream when enable_any_event_mouse_to is called.
+        assert!(
+            !s.contains("?1003h"),
+            "default enable must not set any-event tracking, got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn enable_event_listening_with_conservative_caps_skips_focus_and_paste() {
+        // A probe that reported nothing — or was skipped (non-TTY,
+        // TERM=dumb) leaving conservative defaults — must keep focus and
+        // bracketed paste disabled. The mouse modes stay unconditional; the
+        // optional modes simply do not reach the terminal.
+        let mut out = Vec::new();
+        enable_event_listening_with(&mut out, &TerminalCapabilities::default())
+            .expect("enable should succeed");
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("?1000h"), "mouse capture stays unconditional: {s:?}");
+        assert!(!s.contains("?1004h"), "focus change must be skipped: {s:?}");
+        assert!(!s.contains("?2004h"), "bracketed paste must be skipped: {s:?}");
+    }
+
+    #[test]
+    fn enable_event_listening_with_focus_only_emits_1004h_without_2004h() {
+        // A terminal that answers focus events but not bracketed paste (or
+        // the paste query stays unanswered): ?1004h yes, ?2004h no.
+        let mut out = Vec::new();
+        let caps = TerminalCapabilities {
+            focus_events: true,
+            ..TerminalCapabilities::default()
+        };
+        enable_event_listening_with(&mut out, &caps).expect("enable should succeed");
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("?1004h"), "focus-only caps must enable focus: {s:?}");
+        assert!(!s.contains("?2004h"), "bracketed paste stays off: {s:?}");
+    }
+
+    #[test]
+    fn enable_event_listening_with_paste_only_emits_2004h_without_1004h() {
+        // The mirror case: bracketed paste yes, focus events no.
+        let mut out = Vec::new();
+        let caps = TerminalCapabilities {
+            bracketed_paste: true,
+            ..TerminalCapabilities::default()
+        };
+        enable_event_listening_with(&mut out, &caps).expect("enable should succeed");
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("?2004h"), "paste-only caps must enable paste: {s:?}");
+        assert!(!s.contains("?1004h"), "focus change stays off: {s:?}");
+    }
+
+    #[test]
+    fn enable_any_event_mouse_emits_exact_1003h_sequence() {
+        let mut out = Vec::new();
+        enable_any_event_mouse_to(&mut out).expect("enable should succeed");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[?1003h",
+            "any-event enable must emit exactly the ?1003h sequence"
+        );
+    }
+
+    #[test]
+    fn disable_any_event_mouse_emits_exact_1003l_sequence() {
+        let mut out = Vec::new();
+        disable_any_event_mouse_to(&mut out).expect("disable should succeed");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[?1003l",
+            "any-event disable must emit exactly the ?1003l sequence"
         );
     }
 
@@ -1001,11 +1181,18 @@ mod tests {
         let mut out = Vec::new();
         disable_event_listening_to(&mut out).expect("disable should succeed");
         let s = String::from_utf8(out).unwrap();
-        // The inverse of enable, in reverse order; focus change (?1004l)
-        // next, then bracketed paste (?2004l), then the mouse modes back off.
+        // The inverse of enable, in reverse order; the mouse clear (which
+        // includes any-event ?1003l) lands first, then focus change (?1004l),
+        // then bracketed paste (?2004l).
         assert_eq!(
             s, "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1004l\x1b[?2004l",
             "got: {s:?}"
+        );
+        // Teardown also clears any-event tracking, so a separately enabled
+        // any-event mode is fully restored.
+        assert!(
+            s.contains("?1003l"),
+            "teardown must clear any-event tracking, got: {s:?}"
         );
     }
 
