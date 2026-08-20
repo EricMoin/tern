@@ -28,8 +28,8 @@ deviations require user approval.
   public architecture ideas may inform design. Dependencies must be
   permissively licensed (MIT/Apache).
 - **Roadmap discipline.** New features must be checked against
-  [docs/roadmap.md](docs/roadmap.md) and [docs/components.md](docs/components.md)
-  before starting; do not open new directions at will.
+  [docs/components.md](docs/components.md) before starting; do not open new
+  directions at will.
 
 ## Quality gates (minimum acceptance for any change)
 

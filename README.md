@@ -329,8 +329,6 @@ Each demo renders a scene, asserts it against the scene tree, and quits on
 - [docs/api/](docs/api/index.html) — generated API reference for `@tern-tui/core` / `@tern-tui/react` / `@tern-tui/solid` (build: `deno task docs:api`)
 - [docs/architecture.md](docs/architecture.md) — render pipeline and repository conventions
 - [docs/components.md](docs/components.md) — code-agent component roadmap and status
-- [docs/roadmap.md](docs/roadmap.md) — post-MVP phases
-- [docs/todo.md](docs/todo.md) — remaining work toward a complete TUI library, staged as a TODO checklist
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [CONTRIBUTING.md](CONTRIBUTING.md) — build / test / smoke gates and engineering rules
 

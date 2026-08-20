@@ -178,7 +178,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pasteInto` / `pasteIntoTextarea`. Multi-codepoint CJK/IME-confirmed
   strings — pre-composed and decomposed forms — round-trip losslessly into a
   focused `Input` and `Textarea` (regression-tested, plain and
-  pre-composed); full rationale in `docs/roadmap.md` → "IME posture".
+  pre-composed); full rationale: IME composition stays a non-goal (see
+  `docs/components.md`, Input/Textarea design).
 - **Works-over-a-pty incl. ssh (roadmap Phase 5 scoping):** the Phase 5 ssh
   exit criterion is met by existing machinery — a tern app runs inside any
   pty (a local terminal, or the remote end of an `ssh host -t` session)
@@ -393,7 +394,7 @@ the MVP, the roadmap element set, and the Phase 2 event surface.
   (react-reconciler custom renderer), `@tern/solid` (vendored solid-js 1.9.14
   universal renderer), `@tern/examples` (React/Solid demos with a PTY smoke
   harness).
-- Docs: `docs/architecture.md`, `docs/components.md`, `docs/roadmap.md`.
+- Docs: `docs/architecture.md`, `docs/components.md`.
 
 ### Added — Roadmap elements (code-agent component set)
 
@@ -425,8 +426,8 @@ the MVP, the roadmap element set, and the Phase 2 event surface.
 - `onResize` receives `{ width, height }`, `onFocus` receives
   `{ focus_gained }`, `onMouse` receives a `MouseEventJs` payload.
 - Consuming the surface — layout reflow on resize, mouse drag-resize handles
-  for `Panels`, and focus-aware redraw — remains tracked in
-  `docs/roadmap.md` Phase 2.
+  for `Panels`, and focus-aware redraw — remains tracked on the project roadmap
+  (maintained outside the repository).
 
 [0.2.0]: https://github.com/EricMoin/tern/releases/tag/v0.2.0
 [0.1.0]: https://github.com/EricMoin/tern/releases/tag/v0.1.0
