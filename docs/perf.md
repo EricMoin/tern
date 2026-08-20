@@ -6,7 +6,8 @@ shipped in the high-frame-rate round (subtasks 2–8), the
 (incremental layout, dirty-region repaint, props incremental sync), the
 round-3 change-detection work (mutation-site pushed dirty set), the round-4
 large-dirty work (scratch-frame pooling, retained-buffer reuse, single-layout
-full-repaint fallback), and how to
+full-repaint fallback), the round-5 scroll-region work (terminal-native
+DECSTBM scroll flushing), and how to
 reproduce the benchmark numbers recorded in
 [`tools/bench/BASELINE.md`](../tools/bench/BASELINE.md). Read the results
 section last — the measured gains on the synthetic scene are small, and this
@@ -298,15 +299,18 @@ Two benches measure the pipeline, plus a runner that executes both and prints
 the before/after comparison table (all three run from the repo root):
 
 ```text
-# 1. Rust compositor pipeline (paint + diff + flush), release profile — two
-#    blocks: the round-1 static scene + the round-2 single-cell target:
+# 1. Rust compositor pipeline (paint + diff + flush), release profile — three
+#    blocks: the round-1 static scene + the round-2 single-cell target + the
+#    round-5 scroll-churn bench (one-row scroll, scroll-region fast path):
 cargo test --release -p tern-components --test bench_timing -- --ignored --nocapture
 
 # 2. TS renderer round-trip through the real tern-node addon (needs a PTY):
 deno run --allow-all tools/bench/render.bench.ts
 
-# 3. Both, with a baseline-vs-now comparison table (rounds 1, 2, 3 and 4):
+# 3. Both, with a baseline-vs-now comparison table (rounds 1, 2, 3, 4 and the
+#    round-5 scroll bytes; --check gates the Rust metrics ±10%):
 bash tools/bench/run.sh
+bash tools/bench/run.sh --check
 ```
 
 Notes:
@@ -318,13 +322,17 @@ Notes:
   `flush_diff_to` over an **unchanged** scene (the round-1 canonical number —
   note it now exits through the compositor's `NoPaint` fast path, see
   [Results](#results--read-them-honestly)); the second block mutates exactly
-  one cell per frame — the incremental-layout target.
+  one cell per frame — the incremental-layout target; the third block pans
+  the content one row per frame and flushes through the scroll-region fast
+  path (recording bytes per frame).
 - The TS bench (`tools/bench/render.bench.ts`) loads the real `tern-node`
-  addon through `@tern-tui/core`, builds the same synthetic scene, and runs four
+  addon through `@tern-tui/core`, builds the same synthetic scene, and runs six
   scenarios: 0 = animated round-trip (N = 1000 `renderer.render()` calls with
   a `Spinner` tick between frames), 1 = no-change frames (epoch idle fast
   path), 2 = single-cell change frames (incremental-layout target), 3 =
-  `requestFrame` burst (1000 calls per tick, coalescing ratio must be ~1.0).
+  `requestFrame` burst (1000 calls per tick, coalescing ratio must be ~1.0),
+  4 = viewport scroll (one-row shift per frame; flushed bytes per frame), 5 =
+  alternating full screens (flushed bytes per frame).
   It runs in a real terminal (raw mode); headless (no addon / no PTY) it
   prints an explicit `SKIP` message and exits 0, so it is safe to run in CI.
   `tools/bench/run.sh` wraps it in `script` on macOS to give it a PTY sized
@@ -460,6 +468,65 @@ the large-dirty path (`src/core/tern-components/src/compositor.rs` +
 Rerun both benches on the same machine after any render-path change to
 quantify the delta — `tools/bench/run.sh` prints both comparison tables
 automatically.
+
+### Round 5 (scroll-region fast path, release addon both sides)
+
+Round 5 (roadmap M2 acceptance 1) attacks the *byte* cost of a large-dirty
+scroll frame: instead of repainting every changed cell of a full-viewport
+diff, a frame whose diff is exactly a vertical scroll of a full-width row
+band flushes one DECSTBM region set + `CSI S`/`CSI T` scroll command plus the
+newly exposed rows — the terminal scrolls the region natively. Full tables:
+`tools/bench/BASELINE.md` → "Round 5 — scroll-region fast path".
+
+- **Rust scroll-churn bytes/frame: 4904 → 203 B (−95.9%)** — the acceptance
+  target (≥60% drop) met with margin. 1987/2000 frames take the scroll path;
+  the rest are the bench's 160-cycle wraps (not one-row shifts) and fall back
+  to the diff flush, exactly like the renderer.
+- **The time rows are drift, not regression**: ~18 commits between the
+  2026-08-05 round-4 recording and this round moved every bench number
+  (+17–24% on the round-4 constants, which is why `run.sh --check` failed on
+  the pre-refresh tree). The gate constants were refreshed to the round-5
+  measurements; the ±10% tolerance is unchanged.
+- **TS scenario 4** now reports flushed bytes per frame (`lastFlushBytes`,
+  the same seam as scenario 5). Under the bench's `script` PTY on this
+  machine the capability probe gets no reply, so `scrollRegion` is off and
+  s4 reports the fallback full-repaint flush (5797 B); on a real terminal the
+  scroll path fires and reports the optimized stream.
+
+### 13. Scroll-region fast path (tern-components + tern-terminal)
+
+The round-5 work routes a scroll-shaped frame through the terminal's native
+DECSTBM scroll instead of a full repaint:
+
+1. **Pure scroll-shift detection** (`detect_vertical_scroll` in
+   `src/core/tern-components/src/compositor/scroll.rs`): given the previous
+   and current buffers plus the changed-row band (the update rows expanded to
+   the full viewport width), it returns the smallest vertical shift that
+   explains the change cell-for-cell (`next[y] == prev[y + rows]` across the
+   overlap, wide-char cells included). A sub-width band or a non-shift diff
+   returns `None` — the regular diff flush stays the fallback.
+2. **Exposed-band narrowing** (`exposed_band_updates`): the only cells that
+   need repainting after the scroll command are the newly exposed rows (the
+   bottom `rows` rows scrolling up, the top `rows` scrolling down).
+3. **Scroll-region flush** (`flush_scroll_to` in
+   `src/core/tern-terminal/src/backend.rs`): emits `MoveTo` to the region's
+   top-left, the DECSTBM region set, the `CSI S`/`CSI T` scroll, the exposed
+   band's runs, the region reset, and the park trailer — one flush, style
+   state left clean, byte-counted through the same counting writer as
+   `flush_diff_to`.
+4. **Renderer wiring** (`TuiRenderer::render` in
+   `src/bindings/tern-node/src/renderer.rs`): the scroll path is gated on the
+   caller's `scroll_optimization` opt-in (default on), a non-headless
+   renderer, and the probe-derived `scrollRegion` capability (off for
+   tmux/screen and unknown terminals — DECSTBM quirks make scroll painting
+   unsafe there). A detected scroll flushes the retained frame in full so
+   post-scroll frames diff correctly; a set caret bypasses the path (the
+   scroll flush parks without caret control).
+
+Both benches exercise the path: the Rust scroll-churn bench wires
+`detect_vertical_scroll` + `flush_scroll_to` directly into the pipeline (the
+authoritative byte measurement), and TS scenario 4 reports the renderer's
+`lastFlushBytes`.
 
 ## Architecture diagram: unchanged
 
