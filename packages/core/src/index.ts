@@ -19,8 +19,10 @@
  *   tail vs the `clip_height` viewport, a manual scroll above the tail
  *   detaches, and `followTail` re-attaches.
  * - `Input` / `Spinner` / `StatusBar` / `Panels` / `DiffView` / `Select` /
- *   `ScrollView` / `Table` / `Tabs` / `Progress` / `Modal` / `MarkdownView`
- *   / `Canvas` / `BarChart` / `Chart` / `Sparkline` are roadmap
+ *   `Menu` / `ScrollView` / `Table` / `Tabs` / `Progress` / `Modal` /
+ *   `MarkdownView`
+ *   / `Canvas` / `BarChart` / `Chart` / `Sparkline` / `HelpPanel` are
+ *   roadmap
  *   element factories that compose the primitive kinds into richer widgets
  *   (all editing/caret/selection/scroll/tab math stays in the element, the
  *   Rust compositor paints it), and a
@@ -32,6 +34,10 @@
  *   {@link pasteInto} and {@link pasteIntoTextarea}, which insert pasted text
  *   at the caret (multi-width aware) — the natural handler for
  *   `Renderer.onPaste` events.
+ *   `HelpPanel` renders a key-help overlay from a `Keymap`'s listings
+ *   (`Keymap.register` accepts an optional human-readable description per
+ *   combo, readable back via `Keymap.list()`), defaulting to the module-level
+ *   `keymap`; the `help` component preset styles it.
  *   `Panels` lays its panels out with a 1-cell gutter between
  *   them; `startPanelDrag` / `dragPanels` / `endPanelDrag` implement mouse
  *   drag-resize on that gutter (an absolute `flex_basis` on the adjacent
@@ -187,10 +193,10 @@ import type { NativeIncrementalHighlighter, TernAddon } from "./addon.ts";
 /**
  * The scene node kinds. `box`/`text`/`streaming_text` are materialized by the
  * binding; `input`/`textarea`/`spinner`/`status_bar`/`panels`/`diff`/`select`/
- * `scroll_view`/`table`/`tree`/`tabs`/`progress`/`modal`/`markdown`/`canvas`/
- * `bar_chart`/`chart`/`sparkline` are JS-only element kinds that materialize
- * as compositions over the primitive kinds (their root primitive is fixed by
- * {@link NATIVE_KIND}).
+ * `checkbox`/`radio`/`toggle`/`menu`/`scroll_view`/`table`/`tree`/`tabs`/
+ * `progress`/`modal`/`markdown`/`canvas`/`bar_chart`/`chart`/`sparkline` are
+ * JS-only element kinds that materialize as compositions over the primitive
+ * kinds (their root primitive is fixed by {@link NATIVE_KIND}).
  */
 export type NodeType =
   | "box"
@@ -203,6 +209,10 @@ export type NodeType =
   | "panels"
   | "diff"
   | "select"
+  | "checkbox"
+  | "radio"
+  | "toggle"
+  | "menu"
   | "scroll_view"
   | "table"
   | "tree"
@@ -221,8 +231,9 @@ export type NodeType =
  * kinds are pure JS compositions over those primitives (constitution: no new
  * engine kinds in the binding), so each maps to the root primitive of its
  * composition: an `input` is a framed box, a `spinner` is a text leaf, a
- * `status_bar` / `panels` / `diff` / `select` / `table` / `tree` / `tabs` /
- * `progress` / `modal` / `markdown` / `canvas` is a flex box.
+ * `status_bar` / `panels` / `diff` / `select` / `checkbox` / `radio` /
+ * `toggle` / `menu` / `table` / `tree` / `tabs` / `progress` / `modal` /
+ * `markdown` / `canvas` is a flex box.
  */
 const NATIVE_KIND: Record<NodeType, NodeType> = {
   box: "box",
@@ -235,6 +246,10 @@ const NATIVE_KIND: Record<NodeType, NodeType> = {
   panels: "box",
   diff: "box",
   select: "box",
+  checkbox: "box",
+  radio: "box",
+  toggle: "box",
+  menu: "box",
   scroll_view: "box",
   table: "box",
   tree: "box",
@@ -527,10 +542,14 @@ function toNativeProps(props: NodeProps): NodeProps {
   if (hrefValue !== undefined) out.href = hrefValue;
   const underlineStyleValue = out.underlineStyle;
   delete out.underlineStyle;
-  if (underlineStyleValue !== undefined) out.underline_style = underlineStyleValue;
+  if (underlineStyleValue !== undefined) {
+    out.underline_style = underlineStyleValue;
+  }
   const underlineColorValue = out.underlineColor;
   delete out.underlineColor;
-  if (underlineColorValue !== undefined) out.underline_color = underlineColorValue;
+  if (underlineColorValue !== undefined) {
+    out.underline_color = underlineColorValue;
+  }
   return out;
 }
 
@@ -563,7 +582,11 @@ export class Node {
   }
 
   /** @internal — build a detached node object. */
-  static create(type: NodeType, props: NodeProps = {}, children: Node[] = []): Node {
+  static create(
+    type: NodeType,
+    props: NodeProps = {},
+    children: Node[] = [],
+  ): Node {
     return new Node(type, props, children);
   }
 
@@ -644,7 +667,10 @@ export class Node {
       throw new Error("anchor node is not a child of this parent");
     }
     if (this.#attached) {
-      this.#ensureHandle().insert_before(child.#ensureHandle(), anchor.#ensureHandle());
+      this.#ensureHandle().insert_before(
+        child.#ensureHandle(),
+        anchor.#ensureHandle(),
+      );
       child.#attach();
     }
     child.#parent = this;
@@ -690,7 +716,9 @@ export class Node {
             changed.push([key, next[key]]);
           }
         }
-        for (const [key, value] of changed) this.#handle.set_prop(key, value as never);
+        for (const [key, value] of changed) {
+          this.#handle.set_prop(key, value as never);
+        }
       }
     }
     this.#props = next;
@@ -754,7 +782,9 @@ export class Node {
     if (this.#attached && this.#handle !== null) {
       this.#handle.append_span(text, nativeStyle);
     } else {
-      this.#spans.push(nativeStyle === undefined ? { text } : { text, style: nativeStyle });
+      this.#spans.push(
+        nativeStyle === undefined ? { text } : { text, style: nativeStyle },
+      );
     }
   }
 
@@ -811,7 +841,10 @@ export class Node {
   /** Create the native handle on demand (idempotent). */
   #ensureHandle(): NativeNodeHandle {
     if (this.#handle === null) {
-      this.#handle = loadAddon().create_node(NATIVE_KIND[this.type], this.#props);
+      this.#handle = loadAddon().create_node(
+        NATIVE_KIND[this.type],
+        this.#props,
+      );
     }
     return this.#handle;
   }
@@ -887,7 +920,10 @@ export function StreamingText(props: NodeProps = {}): Node {
   const autoScroll = plain.autoScroll !== false;
   delete plain.autoScroll;
   const node = Node.create("streaming_text", plain);
-  streamScrollStates.set(node, { following: autoScroll, autoScrollEnabled: autoScroll });
+  streamScrollStates.set(node, {
+    following: autoScroll,
+    autoScrollEnabled: autoScroll,
+  });
   return node;
 }
 
@@ -1130,7 +1166,12 @@ function clusterRuns(value: string): ClusterRun[] {
   // point per iteration, keeping surrogate pairs whole).
   let start = 0;
   for (const ch of text) {
-    runs.push({ start: orig[start]!, len: ch.length, width: charWidth(ch), text: ch });
+    runs.push({
+      start: orig[start]!,
+      len: ch.length,
+      width: charWidth(ch),
+      text: ch,
+    });
     start += ch.length;
   }
   return runs;
@@ -1234,9 +1275,16 @@ export interface InputProps extends NodeProps {
 
 /** The text leaf props for an input state: the value (or the dimmed
  * placeholder when empty) plus the caret column. */
-function inputTextProps(value: string, caret: number, placeholder: string | undefined): NodeProps {
+function inputTextProps(
+  value: string,
+  caret: number,
+  placeholder: string | undefined,
+): NodeProps {
   const empty = value === "";
-  const textProps: NodeProps = { text: empty && placeholder !== undefined ? placeholder : value, caret };
+  const textProps: NodeProps = {
+    text: empty && placeholder !== undefined ? placeholder : value,
+    caret,
+  };
   if (empty && placeholder !== undefined) textProps.dim = true;
   return textProps;
 }
@@ -1246,7 +1294,9 @@ function inputTextProps(value: string, caret: number, placeholder: string | unde
  * compositor paints). */
 function setInputState(input: Node, value: string, caret: number): void {
   const props = input.props;
-  const placeholder = typeof props.placeholder === "string" ? props.placeholder : undefined;
+  const placeholder = typeof props.placeholder === "string"
+    ? props.placeholder
+    : undefined;
   const leaf = input.children[0];
   if (leaf !== undefined && leaf.type === "text") {
     leaf.setProps(inputTextProps(value, caret, placeholder));
@@ -1277,7 +1327,10 @@ export function Input(props: InputProps = {}): Node {
  * sequence is one step, never split mid-cluster), mirroring tern-core's
  * cluster-width convention (cell.rs:75). Returns the new `{ value, caret }`.
  */
-export function editKey(input: Node, key: KeyEvent): { value: string; caret: number } {
+export function editKey(
+  input: Node,
+  key: KeyEvent,
+): { value: string; caret: number } {
   const props = input.props;
   const value = typeof props.value === "string" ? props.value : "";
   const caret = typeof props.caret === "number" ? props.caret : 0;
@@ -1306,7 +1359,8 @@ function applyEditKey(
   if (name === "backspace") {
     const prev = lastClusterBefore(value, columnToIndex(value, caret));
     if (prev === null) return { value, caret };
-    const next = value.slice(0, prev.start) + value.slice(prev.start + prev.len);
+    const next = value.slice(0, prev.start) +
+      value.slice(prev.start + prev.len);
     return { value: next, caret: Math.max(0, caret - prev.width) };
   }
   if (name === "left") {
@@ -1320,7 +1374,9 @@ function applyEditKey(
     return { value, caret: caret + cluster.width };
   }
   if (name === "home") return { value, caret: 0 };
-  if (name === "end") return { value, caret: indexToColumn(value, value.length) };
+  if (name === "end") {
+    return { value, caret: indexToColumn(value, value.length) };
+  }
   return { value, caret };
 }
 
@@ -1333,7 +1389,10 @@ function applyEditKey(
  * by the pasted text's total display width (its clusters' widths — a ZWJ
  * emoji counts 2, never per code point). Returns the new `{ value, caret }`.
  */
-export function pasteInto(input: Node, text: string): { value: string; caret: number } {
+export function pasteInto(
+  input: Node,
+  text: string,
+): { value: string; caret: number } {
   const props = input.props;
   const value = typeof props.value === "string" ? props.value : "";
   const caret = typeof props.caret === "number" ? props.caret : 0;
@@ -1406,13 +1465,17 @@ const textareaVertical = new WeakMap<Node, TextareaVerticalState>();
 /** The wrap width of a textarea's props, or `null` when no width is set. */
 function textareaWidth(props: TextareaProps): number | null {
   const w = props.width;
-  return typeof w === "number" && Number.isFinite(w) && w > 0 ? Math.floor(w) : null;
+  return typeof w === "number" && Number.isFinite(w) && w > 0
+    ? Math.floor(w)
+    : null;
 }
 
 /** The visible window of a textarea's props (rows), or `null` when unset. */
 function textareaHeight(props: TextareaProps): number | null {
   const h = props.height;
-  return typeof h === "number" && Number.isFinite(h) && h > 0 ? Math.floor(h) : null;
+  return typeof h === "number" && Number.isFinite(h) && h > 0
+    ? Math.floor(h)
+    : null;
 }
 
 /** The total display width of a string in terminal columns — the sum of its
@@ -1566,7 +1629,11 @@ export function measureText(
 }
 
 /** The display row where logical line `row` begins. */
-function displayBase(lines: string[], row: number, width: number | null): number {
+function displayBase(
+  lines: string[],
+  row: number,
+  width: number | null,
+): number {
   let base = 0;
   for (let i = 0; i < row; i++) base += wrapCount(lines[i]!, width);
   return base;
@@ -1615,10 +1682,14 @@ function caretDisplayIn(
   width: number | null,
 ): { col: number; start: number } {
   const wrapped = wrapLineWithOffsets(line, width);
-  const entry = wrapped[Math.min(offset, wrapped.length - 1)] ?? { text: "", start: 0 };
+  const entry = wrapped[Math.min(offset, wrapped.length - 1)] ??
+    { text: "", start: 0 };
   const { orig } = stripEscapes(line);
   const base = strippedIndexAt(orig, entry.start);
-  const local = Math.max(0, Math.min(strippedIndexAt(orig, col) - base, entry.text.length));
+  const local = Math.max(
+    0,
+    Math.min(strippedIndexAt(orig, col) - base, entry.text.length),
+  );
   return { col: indexToColumn(entry.text, local), start: entry.start };
 }
 
@@ -1661,7 +1732,8 @@ function charAtDisplayCol(
   width: number | null,
 ): number {
   const wrapped = wrapLineWithOffsets(line, width);
-  const entry = wrapped[Math.min(offset, wrapped.length - 1)] ?? { text: "", start: 0 };
+  const entry = wrapped[Math.min(offset, wrapped.length - 1)] ??
+    { text: "", start: 0 };
   const { orig } = stripEscapes(line);
   const base = strippedIndexAt(orig, entry.start);
   const local = columnToIndex(entry.text, targetCol);
@@ -1706,8 +1778,20 @@ function textareaLeafProps(
 function rebuildTextarea(textarea: Node): void {
   const props = textarea.props as TextareaProps;
   const lines = Array.isArray(props.lines) ? props.lines : [""];
-  const row = Math.max(0, Math.min(typeof props.row === "number" ? Math.floor(props.row) : 0, lines.length - 1));
-  const col = Math.max(0, Math.min(typeof props.col === "number" ? Math.floor(props.col) : 0, lines[row]!.length));
+  const row = Math.max(
+    0,
+    Math.min(
+      typeof props.row === "number" ? Math.floor(props.row) : 0,
+      lines.length - 1,
+    ),
+  );
+  const col = Math.max(
+    0,
+    Math.min(
+      typeof props.col === "number" ? Math.floor(props.col) : 0,
+      lines[row]!.length,
+    ),
+  );
   const width = textareaWidth(props);
   const height = textareaHeight(props);
   const scroll = visibleScroll(
@@ -1724,9 +1808,14 @@ function rebuildTextarea(textarea: Node): void {
   const last = Math.min(scroll + (height === null ? total : height), total);
   for (const child of [...textarea.children]) child.remove();
   for (let displayRow = first; displayRow < last; displayRow++) {
-    const { row: lineRow, offset } = logicalAtDisplayRow(lines, displayRow, width);
+    const { row: lineRow, offset } = logicalAtDisplayRow(
+      lines,
+      displayRow,
+      width,
+    );
     const wrapped = wrapLineWithOffsets(lines[lineRow]!, width);
-    const entry = wrapped[Math.min(offset, wrapped.length - 1)] ?? { text: "", start: 0 };
+    const entry = wrapped[Math.min(offset, wrapped.length - 1)] ??
+      { text: "", start: 0 };
     let caretCol: number | null = null;
     if (displayRow === caretRow) {
       caretCol = caretDisplayIn(lines[lineRow]!, col, offset, width).col;
@@ -1774,8 +1863,18 @@ function textareaKeyPosition(
     if (!canMove) return { lines, row, col, changed: false };
     const target = name === "up" ? caretRow - 1 : caretRow + 1;
     const at = logicalAtDisplayRow(lines, target, width);
-    const nextCol = charAtDisplayCol(lines[at.row]!, at.offset, preferredCol, width);
-    return { lines, row: at.row, col: nextCol, changed: at.row !== row || nextCol !== col };
+    const nextCol = charAtDisplayCol(
+      lines[at.row]!,
+      at.offset,
+      preferredCol,
+      width,
+    );
+    return {
+      lines,
+      row: at.row,
+      col: nextCol,
+      changed: at.row !== row || nextCol !== col,
+    };
   }
   if (name === "char" && !key.ctrl && !key.alt && key.char !== undefined) {
     const next = line.slice(0, col) + key.char + line.slice(col);
@@ -1787,7 +1886,8 @@ function textareaKeyPosition(
     if (col > 0) {
       const prev = lastClusterBefore(line, col);
       if (prev === null) return { lines, row, col, changed: false };
-      const next = line.slice(0, prev.start) + line.slice(prev.start + prev.len);
+      const next = line.slice(0, prev.start) +
+        line.slice(prev.start + prev.len);
       const nextLines = [...lines];
       nextLines[row] = next;
       return { lines: nextLines, row, col: col - prev.len, changed: true };
@@ -1831,9 +1931,21 @@ function textareaKeyPosition(
   if (name === "left") {
     if (col > 0) {
       const prev = lastClusterBefore(line, col);
-      return { lines, row, col: prev === null ? 0 : prev.start, changed: prev !== null };
+      return {
+        lines,
+        row,
+        col: prev === null ? 0 : prev.start,
+        changed: prev !== null,
+      };
     }
-    if (row > 0) return { lines, row: row - 1, col: lines[row - 1]!.length, changed: true };
+    if (row > 0) {
+      return {
+        lines,
+        row: row - 1,
+        col: lines[row - 1]!.length,
+        changed: true,
+      };
+    }
     return { lines, row, col, changed: false };
   }
   if (name === "right") {
@@ -1842,11 +1954,15 @@ function textareaKeyPosition(
       const len = cluster === null ? 1 : cluster.len;
       return { lines, row, col: col + len, changed: true };
     }
-    if (row + 1 < lines.length) return { lines, row: row + 1, col: 0, changed: true };
+    if (row + 1 < lines.length) {
+      return { lines, row: row + 1, col: 0, changed: true };
+    }
     return { lines, row, col, changed: false };
   }
   if (name === "home") return { lines, row, col: 0, changed: col !== 0 };
-  if (name === "end") return { lines, row, col: line.length, changed: col !== line.length };
+  if (name === "end") {
+    return { lines, row, col: line.length, changed: col !== line.length };
+  }
   return { lines, row, col, changed: false };
 }
 
@@ -1865,14 +1981,30 @@ function textareaKeyPosition(
  * any edit. Any other key leaves the textarea unchanged. Returns the new
  * `{ lines, row, col }`.
  */
-export function editTextareaKey(textarea: Node, event: KeyEvent): TextareaState {
+export function editTextareaKey(
+  textarea: Node,
+  event: KeyEvent,
+): TextareaState {
   const props = textarea.props as TextareaProps;
   const lines = Array.isArray(props.lines) ? [...props.lines] : [""];
-  const row = Math.max(0, Math.min(typeof props.row === "number" ? Math.floor(props.row) : 0, lines.length - 1));
-  const col = Math.max(0, Math.min(typeof props.col === "number" ? Math.floor(props.col) : 0, lines[row]!.length));
+  const row = Math.max(
+    0,
+    Math.min(
+      typeof props.row === "number" ? Math.floor(props.row) : 0,
+      lines.length - 1,
+    ),
+  );
+  const col = Math.max(
+    0,
+    Math.min(
+      typeof props.col === "number" ? Math.floor(props.col) : 0,
+      lines[row]!.length,
+    ),
+  );
   const width = textareaWidth(props);
   const height = textareaHeight(props);
-  const vertical = textareaVertical.get(textarea) ?? { preferredCol: 0, sticky: false };
+  const vertical = textareaVertical.get(textarea) ??
+    { preferredCol: 0, sticky: false };
   const verticalKey = event.name === "up" || event.name === "down";
   // A vertical run keeps the column captured on its first move; the first
   // move of a run (or any horizontal move / edit) re-captures it.
@@ -1880,10 +2012,22 @@ export function editTextareaKey(textarea: Node, event: KeyEvent): TextareaState 
     vertical.preferredCol = currentDisplayCol(lines, row, col, width);
     vertical.sticky = true;
   }
-  const next = textareaKeyPosition(lines, row, col, width, vertical.preferredCol, event);
+  const next = textareaKeyPosition(
+    lines,
+    row,
+    col,
+    width,
+    vertical.preferredCol,
+    event,
+  );
   if (!verticalKey) {
     vertical.sticky = false;
-    vertical.preferredCol = currentDisplayCol(next.lines, next.row, next.col, width);
+    vertical.preferredCol = currentDisplayCol(
+      next.lines,
+      next.row,
+      next.col,
+      width,
+    );
   }
   if (next.changed) {
     const scroll = visibleScroll(
@@ -1894,7 +2038,13 @@ export function editTextareaKey(textarea: Node, event: KeyEvent): TextareaState 
       height,
       typeof props.scroll === "number" ? props.scroll : 0,
     );
-    textarea.setProps({ ...props, lines: next.lines, row: next.row, col: next.col, scroll });
+    textarea.setProps({
+      ...props,
+      lines: next.lines,
+      row: next.row,
+      col: next.col,
+      scroll,
+    });
     rebuildTextarea(textarea);
   }
   textareaVertical.set(textarea, vertical);
@@ -1917,10 +2067,19 @@ export function editTextareaKey(textarea: Node, event: KeyEvent): TextareaState 
 export function pasteIntoTextarea(textarea: Node, text: string): TextareaState {
   const props = textarea.props as TextareaProps;
   const lines = Array.isArray(props.lines) ? [...props.lines] : [""];
-  const row = Math.max(0, Math.min(typeof props.row === "number" ? Math.floor(props.row) : 0, lines.length - 1));
+  const row = Math.max(
+    0,
+    Math.min(
+      typeof props.row === "number" ? Math.floor(props.row) : 0,
+      lines.length - 1,
+    ),
+  );
   const rawCol = Math.max(
     0,
-    Math.min(typeof props.col === "number" ? Math.floor(props.col) : 0, lines[row]!.length),
+    Math.min(
+      typeof props.col === "number" ? Math.floor(props.col) : 0,
+      lines[row]!.length,
+    ),
   );
   // A paste lands on a grapheme-cluster boundary: a mid-cluster cursor snaps
   // to the boundary after its cluster (where its caret visually paints).
@@ -1946,7 +2105,10 @@ export function pasteIntoTextarea(textarea: Node, text: string): TextareaState {
     nextLines.splice(
       row + 1,
       0,
-      ...middle.map((segment, i) => (i === last ? segment + originalTail : segment)),
+      ...middle.map((
+        segment,
+        i,
+      ) => (i === last ? segment + originalTail : segment)),
     );
   }
 
@@ -1958,7 +2120,8 @@ export function pasteIntoTextarea(textarea: Node, text: string): TextareaState {
     ? (segments[segments.length - 1] ?? "").length
     : col + (segments[0] ?? "").length;
 
-  const vertical = textareaVertical.get(textarea) ?? { preferredCol: 0, sticky: false };
+  const vertical = textareaVertical.get(textarea) ??
+    { preferredCol: 0, sticky: false };
   // A paste is a horizontal edit: end any vertical-move run and re-capture
   // the preferred column at the new caret, like `editTextareaKey` does for
   // non-vertical keys.
@@ -1974,7 +2137,13 @@ export function pasteIntoTextarea(textarea: Node, text: string): TextareaState {
     height,
     typeof props.scroll === "number" ? props.scroll : 0,
   );
-  textarea.setProps({ ...props, lines: nextLines, row: nextRow, col: nextCol, scroll });
+  textarea.setProps({
+    ...props,
+    lines: nextLines,
+    row: nextRow,
+    col: nextCol,
+    scroll,
+  });
   rebuildTextarea(textarea);
   return { lines: nextLines, row: nextRow, col: nextCol };
 }
@@ -1997,7 +2166,18 @@ export interface SpinnerProps extends NodeProps {
 }
 
 /** The default indeterminate frame glyphs (braille spinner). */
-export const DEFAULT_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+export const DEFAULT_SPINNER_FRAMES = [
+  "⠋",
+  "⠙",
+  "⠹",
+  "⠸",
+  "⠼",
+  "⠴",
+  "⠦",
+  "⠧",
+  "⠇",
+  "⠏",
+];
 
 /** The text a spinner renders for the given props: the determinate
  * `'▓'`/`'░'` bar (exactly `ceil(value/max * width)` filled cells) or the
@@ -2005,14 +2185,20 @@ export const DEFAULT_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴",
 function spinnerText(props: SpinnerProps): string {
   const { value, max } = props;
   if (typeof value === "number" && typeof max === "number" && max > 0) {
-    const width = typeof props.width === "number" ? Math.max(0, props.width) : 10;
-    const filled = Math.max(0, Math.min(width, Math.ceil((value / max) * width)));
+    const width = typeof props.width === "number"
+      ? Math.max(0, props.width)
+      : 10;
+    const filled = Math.max(
+      0,
+      Math.min(width, Math.ceil((value / max) * width)),
+    );
     return "▓".repeat(filled) + "░".repeat(width - filled);
   }
   const frames = props.frames ?? DEFAULT_SPINNER_FRAMES;
   if (frames.length === 0) return "";
   const frame = typeof props.frame === "number" ? props.frame : 0;
-  return frames[((frame % frames.length) + frames.length) % frames.length] ?? "";
+  return frames[((frame % frames.length) + frames.length) % frames.length] ??
+    "";
 }
 
 /**
@@ -2033,7 +2219,8 @@ export function Spinner(props: SpinnerProps = {}): Node {
 export function tick(spinner: Node): string {
   const props = spinner.props as SpinnerProps;
   const current = typeof props.frame === "number" ? props.frame : 0;
-  const determinate = typeof props.value === "number" && typeof props.max === "number";
+  const determinate = typeof props.value === "number" &&
+    typeof props.max === "number";
   const frame = determinate ? current : current + 1;
   const text = spinnerText({ ...props, frame });
   if (text !== props.text) spinner.setProps({ ...props, frame, text });
@@ -2167,7 +2354,9 @@ function panelAt(panels: Node, index: number): Node | undefined {
 export function Panels(props: PanelsProps): Node {
   const direction = props.direction ?? "column";
   const active = props.active ?? 0;
-  const panels = props.panels.map((spec, index) => buildPanel(spec, index === active));
+  const panels = props.panels.map((spec, index) =>
+    buildPanel(spec, index === active)
+  );
   const boxProps: NodeProps = { ...props, flex_direction: direction, active };
   // The 1-cell gutter between adjacent panels (the mouse drag-resize handle,
   // roadmap Phase 2; matches the Rust renderable's default `gap`). An explicit
@@ -2325,7 +2514,10 @@ function mainAxisSize(panel: Node, direction: "row" | "column"): number | null {
 }
 
 /** The main-axis coordinate of a mouse event for the stack direction. */
-function mainAxisCoord(event: MouseEventJs, direction: "row" | "column"): number {
+function mainAxisCoord(
+  event: MouseEventJs,
+  direction: "row" | "column",
+): number {
   return direction === "column" ? event.row : event.column;
 }
 
@@ -2339,7 +2531,10 @@ function mainAxisCoord(event: MouseEventJs, direction: "row" | "column"): number
  * stack with fewer than two panels), or the panels element is detached (no
  * geometry).
  */
-export function startPanelDrag(panels: Node, event: MouseEventJs): PanelDragHandle | null {
+export function startPanelDrag(
+  panels: Node,
+  event: MouseEventJs,
+): PanelDragHandle | null {
   if (event.kind !== "down_left") return null;
   const direction = panels.props.flex_direction === "row" ? "row" : "column";
   const children = panels.children;
@@ -2366,7 +2561,9 @@ export function startPanelDrag(panels: Node, event: MouseEventJs): PanelDragHand
       // The stack's laid-out main size (the container rect) bounds the
       // pane so the neighbor keeps at least its min size.
       const stackMain = mainAxisSize(panels, direction);
-      const upper = stackMain === null ? Infinity : stackMain - gap - neighborMin;
+      const upper = stackMain === null
+        ? Infinity
+        : stackMain - gap - neighborMin;
       panelDrags.set(panels, {
         index: i,
         direction,
@@ -2393,7 +2590,10 @@ export function startPanelDrag(panels: Node, event: MouseEventJs): PanelDragHand
  * (post-clamp) result, or `null` when no drag is active or the event is not
  * `drag_left`.
  */
-export function dragPanels(panels: Node, event: MouseEventJs): PanelDragResult | null {
+export function dragPanels(
+  panels: Node,
+  event: MouseEventJs,
+): PanelDragResult | null {
   const state = panelDrags.get(panels);
   if (state === undefined || event.kind !== "drag_left") return null;
   const m = mainAxisCoord(event, state.direction);
@@ -2491,14 +2691,22 @@ export const DIFF_DEL_FG = "#e06c75";
 function diffGutterWidth(hunks: DiffLine[]): number {
   let width = 1;
   for (const line of hunks) {
-    width = Math.max(width, String(line.old_line).length, String(line.new_line).length);
+    width = Math.max(
+      width,
+      String(line.old_line).length,
+      String(line.new_line).length,
+    );
   }
   return width;
 }
 
 /** One gutter cell: the line number right-aligned to `width`, or blank when
  * the line has no number on this side (0). */
-function diffGutterCell(line: DiffLine, width: number, side: "old" | "new"): string {
+function diffGutterCell(
+  line: DiffLine,
+  width: number,
+  side: "old" | "new",
+): string {
   const number = side === "old" ? line.old_line : line.new_line;
   return number > 0 ? String(number).padStart(width) : " ".repeat(width);
 }
@@ -2506,7 +2714,9 @@ function diffGutterCell(line: DiffLine, width: number, side: "old" | "new"): str
 /** The gutter text for one line: `old new`, each column right-aligned to the
  * widest line number. */
 function diffGutterText(line: DiffLine, width: number): string {
-  return `${diffGutterCell(line, width, "old")} ${diffGutterCell(line, width, "new")}`;
+  return `${diffGutterCell(line, width, "old")} ${
+    diffGutterCell(line, width, "new")
+  }`;
 }
 
 /** The per-kind style stamped on a line's marker and content: added lines
@@ -2605,7 +2815,9 @@ function diffChars(oldText: string, newText: string): DiffCharRun[] {
  * lines break runs, so only adjacent pairs are considered). Lines without a
  * counterpart are left unpaired.
  */
-function diffLinePairs(hunks: readonly DiffLine[]): Array<[DiffLine, DiffLine]> {
+function diffLinePairs(
+  hunks: readonly DiffLine[],
+): Array<[DiffLine, DiffLine]> {
   const pairs: Array<[DiffLine, DiffLine]> = [];
   let dels: DiffLine[] = [];
   let adds: DiffLine[] = [];
@@ -2626,7 +2838,9 @@ function diffLinePairs(hunks: readonly DiffLine[]): Array<[DiffLine, DiffLine]> 
 
 /** Map every paired line to its `[del, add]` pair for intra-line
  * highlighting (unpaired lines are absent). */
-function diffPairMap(hunks: readonly DiffLine[]): Map<DiffLine, [DiffLine, DiffLine]> {
+function diffPairMap(
+  hunks: readonly DiffLine[],
+): Map<DiffLine, [DiffLine, DiffLine]> {
   const map = new Map<DiffLine, [DiffLine, DiffLine]>();
   for (const pair of diffLinePairs(hunks)) {
     map.set(pair[0], pair);
@@ -2645,7 +2859,11 @@ interface DiffLineSegment {
 
 /** Append `text` with flag `changed`, merging into the previous segment when
  * its flag matches (keeps the leaf count minimal). */
-function appendSegment(segments: DiffLineSegment[], text: string, changed: boolean): void {
+function appendSegment(
+  segments: DiffLineSegment[],
+  text: string,
+  changed: boolean,
+): void {
   const last = segments[segments.length - 1];
   if (last !== undefined && last.changed === changed) last.text += text;
   else segments.push({ text, changed });
@@ -2658,7 +2876,10 @@ function appendSegment(segments: DiffLineSegment[], text: string, changed: boole
  * nothing to this line's text, so the segments always re-join the original
  * text exactly.
  */
-function diffLineSegments(line: DiffLine, pair: [DiffLine, DiffLine] | undefined): DiffLineSegment[] {
+function diffLineSegments(
+  line: DiffLine,
+  pair: [DiffLine, DiffLine] | undefined,
+): DiffLineSegment[] {
   if (pair === undefined) return [{ text: line.text, changed: false }];
   const isDel = line === pair[0];
   const segments: DiffLineSegment[] = [];
@@ -2678,7 +2899,11 @@ function diffLineSegments(line: DiffLine, pair: [DiffLine, DiffLine] | undefined
  * `markdownLineNode`. `base` is the line's kind style; changed segments get
  * `DIFF_CHANGED_STYLE` on top.
  */
-function diffContentNode(segments: DiffLineSegment[], base: NodeProps, wrap: boolean | undefined): Node {
+function diffContentNode(
+  segments: DiffLineSegment[],
+  base: NodeProps,
+  wrap: boolean | undefined,
+): Node {
   if (segments.length === 1) {
     const segment = segments[0]!;
     const props: NodeProps = { text: segment.text, ...base };
@@ -2710,7 +2935,11 @@ function buildDiffRow(
   const style = diffKindStyle(line.kind);
   const content = inlineHighlight
     ? diffContentNode(diffLineSegments(line, pair), style, wrap)
-    : Text({ text: line.text, ...style, ...(wrap !== undefined ? { wrap } : {}) });
+    : Text({
+      text: line.text,
+      ...style,
+      ...(wrap !== undefined ? { wrap } : {}),
+    });
   return Box(
     { flex_direction: "row" },
     Text({ text: diffGutterText(line, width), dim: true }),
@@ -2721,7 +2950,10 @@ function buildDiffRow(
 
 /** The widest line number on one side of `hunks`, so each side-by-side
  * column's gutter aligns on its own numbers. */
-function diffSideGutterWidth(hunks: readonly DiffLine[], side: "old" | "new"): number {
+function diffSideGutterWidth(
+  hunks: readonly DiffLine[],
+  side: "old" | "new",
+): number {
   let width = 1;
   for (const line of hunks) {
     const number = side === "old" ? line.old_line : line.new_line;
@@ -2760,12 +2992,18 @@ function buildSideCell(
     : {};
   const marker = side === "old"
     ? line.kind === "del" ? "-" : " "
-    : line.kind === "add" ? "+" : " ";
+    : line.kind === "add"
+    ? "+"
+    : " ";
   const content = !owns
     ? Text({ text: "" })
     : inlineHighlight
     ? diffContentNode(diffLineSegments(line, pair), style, wrap)
-    : Text({ text: line.text, ...style, ...(wrap !== undefined ? { wrap } : {}) });
+    : Text({
+      text: line.text,
+      ...style,
+      ...(wrap !== undefined ? { wrap } : {}),
+    });
   return Box(
     { flex_direction: "row" },
     Text({ text: diffGutterCell(line, width, side), dim: true }),
@@ -2794,8 +3032,13 @@ function buildSideCell(
 export function DiffView(props: DiffViewProps): Node {
   const mode = props.mode ?? "unified";
   const inline = props.inline_highlight ?? false;
-  const pairs = inline ? diffPairMap(props.hunks) : new Map<DiffLine, [DiffLine, DiffLine]>();
-  const rootProps: NodeProps = { ...props, flex_direction: mode === "side" ? "row" : "column" };
+  const pairs = inline
+    ? diffPairMap(props.hunks)
+    : new Map<DiffLine, [DiffLine, DiffLine]>();
+  const rootProps: NodeProps = {
+    ...props,
+    flex_direction: mode === "side" ? "row" : "column",
+  };
   // The 1-cell gutter between the two side-by-side columns (mirroring the
   // `Panels` flex-row split). An explicit `gap` wins — `gap: 0` removes it.
   if (mode === "side" && rootProps.gap === undefined) rootProps.gap = 1;
@@ -2811,8 +3054,12 @@ export function DiffView(props: DiffViewProps): Node {
     const newRows: Node[] = [];
     for (const line of props.hunks) {
       const pair = pairs.get(line);
-      oldRows.push(buildSideCell(line, "old", oldWidth, props.wrap, pair, inline));
-      newRows.push(buildSideCell(line, "new", newWidth, props.wrap, pair, inline));
+      oldRows.push(
+        buildSideCell(line, "old", oldWidth, props.wrap, pair, inline),
+      );
+      newRows.push(
+        buildSideCell(line, "new", newWidth, props.wrap, pair, inline),
+      );
     }
     children = [
       Box({ flex_direction: "column" }, ...oldRows),
@@ -2905,10 +3152,15 @@ const selectOptions = new WeakMap<Node, NormalizedSelectOption[]>();
 
 /** The options visible under a filter: those whose label starts with the
  * query (case-insensitive prefix match). An empty query shows everything. */
-function selectVisible(options: readonly NormalizedSelectOption[], filter: string): NormalizedSelectOption[] {
+function selectVisible(
+  options: readonly NormalizedSelectOption[],
+  filter: string,
+): NormalizedSelectOption[] {
   if (filter === "") return [...options];
   const needle = filter.toLowerCase();
-  return options.filter((option) => option.label.toLowerCase().startsWith(needle));
+  return options.filter((option) =>
+    option.label.toLowerCase().startsWith(needle)
+  );
 }
 
 /**
@@ -2933,7 +3185,9 @@ function rebuildSelect(select: Node): void {
   const options = selectOptions.get(select) ?? [];
   const multi = props.multi ?? false;
   const filter = typeof props.filter === "string" ? props.filter : "";
-  const highlighted = typeof props.highlighted === "number" ? props.highlighted : 0;
+  const highlighted = typeof props.highlighted === "number"
+    ? props.highlighted
+    : 0;
   const selected = new Set(Array.isArray(props.value) ? props.value : []);
   const visible = selectVisible(options, filter);
 
@@ -2941,12 +3195,17 @@ function rebuildSelect(select: Node): void {
 
   // Filter row: the typeahead query, dimmed while empty.
   const empty = filter === "";
-  select.addChild(Text({ text: empty ? SELECT_FILTER_PLACEHOLDER : filter, dim: empty }));
+  select.addChild(
+    Text({ text: empty ? SELECT_FILTER_PLACEHOLDER : filter, dim: empty }),
+  );
   // Option rows: `✓ `/`  ` prefix (multi) + label; the highlight reversed.
   visible.forEach((option, index) => {
     const prefix = multi ? (selected.has(option.value) ? "✓ " : "  ") : "";
     select.addChild(
-      Text({ text: `${prefix}${option.label}`, reversed: index === highlighted }),
+      Text({
+        text: `${prefix}${option.label}`,
+        reversed: index === highlighted,
+      }),
     );
   });
   // Summary row (multi mode): the selected-count line.
@@ -2975,10 +3234,12 @@ export function Select(props: SelectProps): Node {
   const initialValue: string | string[] = multi
     ? Array.isArray(props.value)
       ? props.value
-      : props.options.filter((option) => option.selected).map((option) => option.value)
+      : props.options.filter((option) => option.selected).map((option) =>
+        option.value
+      )
     : typeof props.value === "string"
-      ? props.value
-      : "";
+    ? props.value
+    : "";
   const rootProps: NodeProps = {
     ...props,
     multi,
@@ -3021,14 +3282,16 @@ export function selectKey(select: Node, event: KeyEvent): SelectState {
   const options = selectOptions.get(select) ?? [];
   const multi = props.multi ?? false;
   const filter = typeof props.filter === "string" ? props.filter : "";
-  const highlighted = typeof props.highlighted === "number" ? props.highlighted : 0;
+  const highlighted = typeof props.highlighted === "number"
+    ? props.highlighted
+    : 0;
   const open = props.open ?? true;
   const value: string | string[] =
     typeof props.value === "string" || Array.isArray(props.value)
       ? props.value
       : multi
-        ? []
-        : "";
+      ? []
+      : "";
 
   let nextFilter = filter;
   let nextHighlighted = highlighted;
@@ -3039,7 +3302,10 @@ export function selectKey(select: Node, event: KeyEvent): SelectState {
   if (name === "up") {
     nextHighlighted = Math.max(0, highlighted - 1);
   } else if (name === "down") {
-    nextHighlighted = Math.min(selectVisible(options, filter).length - 1, highlighted + 1);
+    nextHighlighted = Math.min(
+      selectVisible(options, filter).length - 1,
+      highlighted + 1,
+    );
   } else if (name === "enter") {
     const visible = selectVisible(options, filter);
     const option = visible[Math.min(nextHighlighted, visible.length - 1)];
@@ -3061,7 +3327,9 @@ export function selectKey(select: Node, event: KeyEvent): SelectState {
           : current.filter((v) => v !== option.value);
       }
     }
-  } else if (name === "char" && !event.ctrl && !event.alt && event.char !== undefined) {
+  } else if (
+    name === "char" && !event.ctrl && !event.alt && event.char !== undefined
+  ) {
     nextFilter = filter + event.char;
     nextHighlighted = 0;
   } else if (name === "backspace") {
@@ -3071,11 +3339,18 @@ export function selectKey(select: Node, event: KeyEvent): SelectState {
 
   // Clamp the highlight into the visible list (a filter change can shrink
   // it; up/down/space already clamp).
-  nextHighlighted = Math.min(nextHighlighted, Math.max(0, selectVisible(options, nextFilter).length - 1));
+  nextHighlighted = Math.min(
+    nextHighlighted,
+    Math.max(0, selectVisible(options, nextFilter).length - 1),
+  );
 
-  const state: SelectState = { highlighted: nextHighlighted, filter: nextFilter, value: nextValue, open: nextOpen };
-  const changed =
-    state.highlighted !== highlighted ||
+  const state: SelectState = {
+    highlighted: nextHighlighted,
+    filter: nextFilter,
+    value: nextValue,
+    open: nextOpen,
+  };
+  const changed = state.highlighted !== highlighted ||
     state.filter !== filter ||
     state.value !== value ||
     state.open !== open;
@@ -3090,6 +3365,907 @@ export function selectKey(select: Node, event: KeyEvent): SelectState {
     rebuildSelect(select);
   }
   return state;
+}
+
+// ---------------------------------------------------------------------------
+// Form primitives
+//
+// `checkbox` / `radio` / `toggle` are single-leaf form controls: each renders
+// a glyph + label text leaf (checkbox `[x]`/`[ ]`, toggle `●`/`○`, radio one
+// `(•)`/`( )` row per option) whose focused row is painted with the theme's
+// `primary` palette colors and reversed (mirroring `Select`'s highlight). The
+// label / option list is JS bookkeeping (never scene props, mirroring
+// `Select`'s `selectOptions`); the interactive state (`checked` / `on` /
+// `selected` + `focused`) lives on the root box's props, and `checkboxKey` /
+// `toggleKey` / `radioKey` mutate it and rebuild the composition in place
+// (mirroring `selectKey`). No new napi node kind: the `checkbox` / `radio` /
+// `toggle` elements materialize as a `box` (constitution).
+// ---------------------------------------------------------------------------
+
+/** The checked glyph of a `checkbox` leaf. */
+export const CHECKBOX_CHECKED_GLYPH = "[x]";
+/** The unchecked glyph of a `checkbox` leaf. */
+export const CHECKBOX_UNCHECKED_GLYPH = "[ ]";
+/** The on glyph of a `toggle` leaf. */
+export const TOGGLE_ON_GLYPH = "●";
+/** The off glyph of a `toggle` leaf. */
+export const TOGGLE_OFF_GLYPH = "○";
+/** The selected glyph of a `radio` row. */
+export const RADIO_SELECTED_GLYPH = "(•)";
+/** The unselected glyph of a `radio` row. */
+export const RADIO_UNSELECTED_GLYPH = "( )";
+/** The fg of a focused form primitive's row — the default theme's `primary`
+ * palette fg (mirroring `TAB_PRIMARY_FG`). */
+export const CHECK_PRIMARY_FG = "#61afef";
+/** The bg of a focused form primitive's row — the default theme's `primary`
+ * palette bg (mirroring `TAB_PRIMARY_BG`). */
+export const CHECK_PRIMARY_BG = "#21252b";
+
+/** The state reported by {@link checkboxKey} after a routed key. */
+export interface CheckboxState {
+  /** Whether the box is checked. */
+  checked: boolean;
+}
+
+/** The state reported by {@link toggleKey} after a routed key. */
+export interface ToggleState {
+  /** Whether the toggle is on. */
+  on: boolean;
+}
+
+/** The state reported by {@link radioKey} after a routed key. */
+export interface RadioState {
+  /** The selected option's index. */
+  selected: number;
+  /** The focused option's index. */
+  focused: number;
+}
+
+/** One option in a `Radio` list. */
+export interface RadioOption {
+  /** The option's value — what confirmation carries. */
+  value: string;
+  /** The option's display label (defaults to the value). */
+  label?: string;
+  /** Start selected (default `false`; the first selected option wins when
+   * `selected` is unset). */
+  selected?: boolean;
+}
+
+/**
+ * Props for the `Checkbox` element. `label` is consumed by the factory (the
+ * label is JS bookkeeping — it never reaches the scene props); the
+ * interactive state (`checked`, `focused`) and the remaining style/layout
+ * props flow to the root box, which holds one text leaf.
+ */
+export interface CheckboxProps extends NodeProps {
+  /** The label text rendered after the glyph. */
+  label: string;
+  /** Whether the box is checked (default `false`). */
+  checked?: boolean;
+  /** Whether the box is focused (default `false`; a focused box paints its
+   * leaf with the theme's `primary` palette colors, reversed). */
+  focused?: boolean;
+}
+
+/**
+ * Props for the `Toggle` element. `label` is consumed by the factory (the
+ * label is JS bookkeeping — it never reaches the scene props); the
+ * interactive state (`on`, `focused`) and the remaining style/layout props
+ * flow to the root box, which holds one text leaf.
+ */
+export interface ToggleProps extends NodeProps {
+  /** The label text rendered after the glyph. */
+  label: string;
+  /** Whether the toggle is on (default `false`). */
+  on?: boolean;
+  /** Whether the toggle is focused (default `false`; a focused toggle paints
+   * its leaf with the theme's `primary` palette colors, reversed). */
+  focused?: boolean;
+}
+
+/**
+ * Props for the `Radio` element. `options` is consumed by the factory (the
+ * option list is JS bookkeeping — it never reaches the scene props); the
+ * interactive state (`selected`, `focused`) and the remaining style/layout
+ * props flow to the root box, which is a flex column of text leaves.
+ */
+export interface RadioProps extends NodeProps {
+  /** The options to choose from, in list order. */
+  options: RadioOption[];
+  /** The selected option's index (default the first `selected`-flagged
+   * option, else 0). */
+  selected?: number;
+  /** The focused option's index (default 0). */
+  focused?: number;
+}
+
+/** The label of a checkbox node (JS bookkeeping — never scene props,
+ * mirroring `Select`'s `selectOptions`). */
+const checkboxLabels = new WeakMap<Node, string>();
+
+/** The label of a toggle node (JS bookkeeping — never scene props, mirroring
+ * `Select`'s `selectOptions`). */
+const toggleLabels = new WeakMap<Node, string>();
+
+/** The label-normalized option list of a radio node (JS bookkeeping — never
+ * scene props, mirroring `Select`'s `selectOptions`). */
+const radioOptions = new WeakMap<Node, NormalizedSelectOption[]>();
+
+/**
+ * Rebuild a checkbox node's children from its current props (the source of
+ * truth, mirroring `rebuildSelect`): one text leaf — the checked/unchecked
+ * glyph + the label, painted with the `primary` palette colors and reversed
+ * while focused. Runs at creation and after every {@link checkboxKey}
+ * mutation.
+ */
+function rebuildCheckbox(checkbox: Node): void {
+  const props = checkbox.props as CheckboxProps;
+  const label = checkboxLabels.get(checkbox) ?? "";
+  const checked = props.checked ?? false;
+
+  for (const child of [...checkbox.children]) child.remove();
+
+  const leaf: NodeProps = {
+    text: `${
+      checked ? CHECKBOX_CHECKED_GLYPH : CHECKBOX_UNCHECKED_GLYPH
+    } ${label}`,
+  };
+  if (props.focused === true) {
+    leaf.fg = CHECK_PRIMARY_FG;
+    leaf.bg = CHECK_PRIMARY_BG;
+    leaf.reversed = true;
+  }
+  checkbox.addChild(Text(leaf));
+}
+
+/**
+ * Rebuild a toggle node's children from its current props (the source of
+ * truth, mirroring `rebuildSelect`): one text leaf — the on/off glyph + the
+ * label, painted with the `primary` palette colors and reversed while
+ * focused. Runs at creation and after every {@link toggleKey} mutation.
+ */
+function rebuildToggle(toggle: Node): void {
+  const props = toggle.props as ToggleProps;
+  const label = toggleLabels.get(toggle) ?? "";
+  const on = props.on ?? false;
+
+  for (const child of [...toggle.children]) child.remove();
+
+  const leaf: NodeProps = {
+    text: `${on ? TOGGLE_ON_GLYPH : TOGGLE_OFF_GLYPH} ${label}`,
+  };
+  if (props.focused === true) {
+    leaf.fg = CHECK_PRIMARY_FG;
+    leaf.bg = CHECK_PRIMARY_BG;
+    leaf.reversed = true;
+  }
+  toggle.addChild(Text(leaf));
+}
+
+/**
+ * Rebuild a radio node's children from its current props (the source of
+ * truth, mirroring `rebuildSelect`): one text leaf per option — the
+ * selected/unselected glyph + the label, the focused row painted with the
+ * `primary` palette colors and reversed (mirroring the Select highlight).
+ * Runs at creation and after every {@link radioKey} mutation.
+ */
+function rebuildRadio(radio: Node): void {
+  const props = radio.props as RadioProps;
+  const options = radioOptions.get(radio) ?? [];
+  const selected = typeof props.selected === "number" ? props.selected : 0;
+  const focused = typeof props.focused === "number" ? props.focused : 0;
+
+  for (const child of [...radio.children]) child.remove();
+
+  options.forEach((option, index) => {
+    const leaf: NodeProps = {
+      text: `${
+        index === selected ? RADIO_SELECTED_GLYPH : RADIO_UNSELECTED_GLYPH
+      } ${option.label}`,
+    };
+    if (index === focused) {
+      leaf.fg = CHECK_PRIMARY_FG;
+      leaf.bg = CHECK_PRIMARY_BG;
+      leaf.reversed = true;
+    }
+    radio.addChild(Text(leaf));
+  });
+}
+
+/**
+ * Create a `checkbox` element: a flex box holding one text leaf — the
+ * checked/unchecked glyph + the label, painted with the theme's `primary`
+ * palette colors and reversed while focused. The label is JS bookkeeping
+ * (never scene props); the interactive state (`checked`, `focused`) lives on
+ * the root box's props. Drive it with {@link checkboxKey}. No new napi node
+ * kind: the `checkbox` element materializes as a `box` (constitution).
+ */
+export function Checkbox(props: CheckboxProps): Node {
+  const rootProps: NodeProps = {
+    ...props,
+    checked: props.checked ?? false,
+    focused: props.focused ?? false,
+  };
+  const plain = rootProps as Record<string, unknown>;
+  delete plain.label;
+  const checkbox = Node.create("checkbox", rootProps, []);
+  checkboxLabels.set(checkbox, props.label);
+  rebuildCheckbox(checkbox);
+  return checkbox;
+}
+
+/**
+ * Create a `toggle` element: a flex box holding one text leaf — the on/off
+ * glyph + the label, painted with the theme's `primary` palette colors and
+ * reversed while focused. The label is JS bookkeeping (never scene props);
+ * the interactive state (`on`, `focused`) lives on the root box's props.
+ * Drive it with {@link toggleKey}. No new napi node kind: the `toggle`
+ * element materializes as a `box` (constitution).
+ */
+export function Toggle(props: ToggleProps): Node {
+  const rootProps: NodeProps = {
+    ...props,
+    on: props.on ?? false,
+    focused: props.focused ?? false,
+  };
+  const plain = rootProps as Record<string, unknown>;
+  delete plain.label;
+  const toggle = Node.create("toggle", rootProps, []);
+  toggleLabels.set(toggle, props.label);
+  rebuildToggle(toggle);
+  return toggle;
+}
+
+/**
+ * Create a `radio` element: a flex column of text leaves — one row per
+ * option, the selected row `(•)`-prefixed and the focused row painted with
+ * the theme's `primary` palette colors and reversed. The option list is JS
+ * bookkeeping (never scene props); the interactive state (`selected`,
+ * `focused`) lives on the root box's props. Drive it with {@link radioKey}.
+ * No new napi node kind: the `radio` element materializes as a `box`
+ * (constitution).
+ */
+export function Radio(props: RadioProps): Node {
+  const options = props.options.map((option) => ({
+    value: option.value,
+    label: option.label ?? option.value,
+  }));
+  const selected = typeof props.selected === "number"
+    ? props.selected
+    : Math.max(0, props.options.findIndex((option) => option.selected));
+  const rootProps: NodeProps = {
+    ...props,
+    selected,
+    focused: props.focused ?? 0,
+    flex_direction: "column",
+  };
+  const plain = rootProps as Record<string, unknown>;
+  delete plain.options;
+  const radio = Node.create("radio", rootProps, []);
+  radioOptions.set(radio, options);
+  rebuildRadio(radio);
+  return radio;
+}
+
+/**
+ * Apply a key to a checkbox node, mutating its state and rebuilding the
+ * composition in place — the Checkbox counterpart of {@link selectKey}.
+ *
+ * - `space` / `enter` toggle the checked state.
+ *
+ * Returns the new state; any other key leaves the checkbox unchanged.
+ */
+export function checkboxKey(checkbox: Node, event: KeyEvent): CheckboxState {
+  const props = checkbox.props as CheckboxProps;
+  const checked = props.checked ?? false;
+  const name = event.name;
+  const toggles = (name === "char" && event.char === " ") || name === "enter";
+  if (!toggles) return { checked };
+  const next = !checked;
+  checkbox.setProps({ ...props, checked: next });
+  rebuildCheckbox(checkbox);
+  return { checked: next };
+}
+
+/**
+ * Apply a key to a toggle node, mutating its state and rebuilding the
+ * composition in place — the Toggle counterpart of {@link selectKey}.
+ *
+ * - `space` / `enter` toggle the on state.
+ *
+ * Returns the new state; any other key leaves the toggle unchanged.
+ */
+export function toggleKey(toggle: Node, event: KeyEvent): ToggleState {
+  const props = toggle.props as ToggleProps;
+  const on = props.on ?? false;
+  const name = event.name;
+  const toggles = (name === "char" && event.char === " ") || name === "enter";
+  if (!toggles) return { on };
+  const next = !on;
+  toggle.setProps({ ...props, on: next });
+  rebuildToggle(toggle);
+  return { on: next };
+}
+
+/**
+ * Apply a key to a radio node, mutating its state and rebuilding the
+ * composition in place — the Radio counterpart of {@link selectKey}.
+ *
+ * - `up` / `left` move the focus toward the first option (clamped at 0).
+ * - `down` / `right` move the focus toward the last option (clamped at the
+ *   last index).
+ * - `space` / `enter` commit the focused option as the selection.
+ *
+ * Returns the new state; any other key leaves the radio unchanged.
+ */
+export function radioKey(radio: Node, event: KeyEvent): RadioState {
+  const props = radio.props as RadioProps;
+  const options = radioOptions.get(radio) ?? [];
+  const last = Math.max(0, options.length - 1);
+  const selected = typeof props.selected === "number" ? props.selected : 0;
+  const focused = typeof props.focused === "number" ? props.focused : 0;
+  const name = event.name;
+  const isSpace = name === "char" && event.char === " ";
+  const isEnter = name === "enter";
+
+  let nextFocused = focused;
+  let nextSelected = selected;
+  if (name === "up" || name === "left") {
+    nextFocused = Math.max(0, focused - 1);
+  } else if (name === "down" || name === "right") {
+    nextFocused = Math.min(last, focused + 1);
+  } else if (isSpace || isEnter) {
+    nextSelected = focused;
+  }
+
+  if (nextFocused !== focused || nextSelected !== selected) {
+    radio.setProps({ ...props, selected: nextSelected, focused: nextFocused });
+    rebuildRadio(radio);
+  }
+  return { selected: nextSelected, focused: nextFocused };
+}
+
+// ---------------------------------------------------------------------------
+// Menu
+//
+// A `menu` element is a hierarchical item list: a flex column of text leaves —
+// one leaf per *visible* item of a nested `items` model (an item is visible
+// when every ancestor submenu is open), the highlighted item reversed. The
+// item model is JS bookkeeping (never scene props, mirroring `Table`'s `rows`
+// / `Tree`'s node model); the interactive state (`highlighted`,
+// `open_submenus`, `open`) lives on the root box's props, and `menuKey` /
+// `menuHover` / `menuClick` mutate it and rebuild the composition in place
+// (mirroring `selectKey`). Submenus render inline as indented rows (2 cells
+// per depth level, tree-style), or — with `submenu: "flyout"` — as separate
+// overlay layers stamped with their own `z_index` (paint order, the same
+// mechanism `Select`'s `floating` overlay and the `Modal` overlay use), so a
+// flyout paints above the menu column. A `floating` menu stamps the root
+// box's `z_index` prop so it overlays in-flow content. `openMenu` /
+// `closeMenu` toggle the visible state (`hidden` modifier + `display: none`,
+// so a closed menu truly leaves the scene) and isolate focus through the
+// {@link FocusManager} — opening records the active id and focuses the first
+// registered focusable, closing restores the recorded id (or blurs),
+// mirroring `openModal` / `closeModal`. No new napi node kind: the `menu`
+// element materializes as a `box` (constitution).
+// ---------------------------------------------------------------------------
+
+/** The menu overlay's paint z-order (100). In-flow content stacks at z 0 (the
+ * scrollbar / sticky table header at 1), so a menu stamped with this
+ * `z_index` always paints above them — the value to pass to `Menu`'s
+ * `z_index` prop for a full-overlay menu, and the z-order a `"flyout"`
+ * submenu layer is stamped with (compositor z-order, the same mechanism
+ * `Select`'s `floating` overlay and the `Modal` overlay use). */
+export const MENU_Z_INDEX = 100;
+
+/** The indentation width (cells per depth level) of a menu's inline submenu
+ * rows (mirroring `Tree`'s default indent). */
+const MENU_INDENT = 2;
+
+/**
+ * One item of a {@link Menu}: a `label`, an optional stable `id`, and
+ * optional `children`. An item with a non-empty `children` array is a submenu
+ * branch (`right` / `enter` / a click open its submenu); an empty or absent
+ * `children` array is a leaf (enter / a click activate it and dismiss the
+ * menu).
+ */
+export interface MenuItem {
+  /** The item's label text, painted after the indentation prefix. */
+  label: string;
+  /** A stable key identifying the item for open-state bookkeeping and the
+   * `open_submenus` prop. Defaults to the item's dot-joined index path from
+   * the root (e.g. `"0.2"`), which is unique. */
+  id?: string;
+  /** Child items, in display order (top to bottom). */
+  children?: MenuItem[];
+}
+
+/** The state reported by {@link menuKey} after a routed key. */
+export interface MenuState {
+  /** The highlighted visible-item index (clamped into the visible items). */
+  highlighted: number;
+  /** The keys of the open submenus after the key. */
+  open_submenus: string[];
+  /** Whether the menu is open (enter on a leaf / escape dismiss it). */
+  open: boolean;
+  /** The number of visible items after the key (a submenu open/close changes
+   * it). */
+  count: number;
+  /** The key of the item activated by `enter` (a leaf), or `null`. */
+  activated: string | null;
+}
+
+/**
+ * Props for the `Menu` element. `items` / `floating` / `submenu` are consumed
+ * by the factory (the item model + render mode are JS bookkeeping — they
+ * never reach the scene props, mirroring `Tree`'s `nodes`); the interactive
+ * state (`highlighted`, `open_submenus`, `open`) and the remaining
+ * style/layout props flow to the root box, which is a flex column of the
+ * visible item leaves (plus the flyout layers in `"flyout"` mode).
+ */
+export interface MenuProps extends NodeProps {
+  /** The menu items, in display order (top to bottom). */
+  items: MenuItem[];
+  /** The highlighted visible-item index (default 0) — its row renders
+   * reversed. {@link menuKey} moves it with up/down, clamping to the visible
+   * items. */
+  highlighted?: number;
+  /** The keys of submenus open initially (default none). A key is an item's
+   * `id`, or its dot-joined index path. */
+  open_submenus?: string[];
+  /** Whether the menu is open (default `false`). `openMenu` / `closeMenu`
+   * toggle it (and the visible state); a menu starts hidden. */
+  open?: boolean;
+  /**
+   * Render the menu as a floating overlay: the root box carries the
+   * `z_index` prop (the compositor's paint z-order; default `0`), so the
+   * menu paints above in-flow content at the default z. The mode flag is
+   * consumed by the factory — only the `z_index` prop reaches the scene.
+   */
+  floating?: boolean;
+  /** The overlay's paint z-order (used when `floating`; default 0). Pass
+   * {@link MENU_Z_INDEX} for a full-overlay menu. */
+  z_index?: number;
+  /** Submenu rendering: `"inline"` (default) renders open submenu items as
+   * indented rows within the menu column (tree-style); `"flyout"` renders
+   * each open submenu as a separate overlay layer beside its parent, stamped
+   * with {@link MENU_Z_INDEX}. */
+  submenu?: "inline" | "flyout";
+}
+
+/** One visible item row of a menu — the flattened row with its flat index
+ * (internal; the scene row text derives from it). */
+interface FlatMenuRow {
+  /** The menu item this row renders. */
+  item: MenuItem;
+  /** The item's open-state key (its `id`, or its dot-joined index path). */
+  key: string;
+  /** The item's depth from the root (0 for a top-level item). */
+  depth: number;
+  /** Whether the item is a submenu branch (has children). */
+  expandable: boolean;
+  /** Whether the branch's submenu is currently open (always `false` for a
+   * leaf). */
+  open: boolean;
+  /** The row's flat index in the visible list (its scene position). */
+  index: number;
+}
+
+/** The normalized item model of a menu node (JS bookkeeping — never scene
+ * props, mirroring `Table`'s `tableRows`). Deep-copied at creation. */
+const menuItemModels = new WeakMap<Node, MenuItem[]>();
+
+/** The submenu render mode of a menu node (JS bookkeeping — the `submenu`
+ * prop is consumed by the factory, mirroring `Select`'s `floating`). */
+const menuSubmenuModes = new WeakMap<Node, "inline" | "flyout">();
+
+/** The per-menu focus bookkeeping (JS state — never scene props), mirroring
+ * `Modal`'s `modalStates`. */
+interface MenuFocusRecord {
+  /** The active focus id recorded when the menu opened (restored on close;
+   * `null` when nothing was focused before the open). */
+  previousFocusId: string | null;
+}
+
+/** The focus records of menu nodes created with {@link Menu}. */
+const menuFocusRecords = new WeakMap<Node, MenuFocusRecord>();
+
+/** Clamp `index` into `[0, count - 1]` (0 when `count` is 0). */
+function clampMenuIndex(index: number, count: number): number {
+  if (count <= 0) return 0;
+  return Math.max(0, Math.min(index, count - 1));
+}
+
+/** Deep-copy a menu item (so later mutations of the caller's model do not
+ * reach the menu's private bookkeeping, mirroring `Tree`'s node copy). */
+function cloneMenuItem(item: MenuItem): MenuItem {
+  const copy: MenuItem = { label: item.label };
+  if (item.id !== undefined) copy.id = item.id;
+  if (item.children !== undefined) {
+    copy.children = item.children.map(cloneMenuItem);
+  }
+  return copy;
+}
+
+/** The open-submenu key set of a menu node — from the `open_submenus` prop,
+ * the interactive state's scene-visible source of truth. */
+function menuOpenSet(menu: Node): Set<string> {
+  const props = menu.props as MenuProps;
+  const keys = props.open_submenus;
+  return new Set<string>(Array.isArray(keys) ? keys : []);
+}
+
+/**
+ * Flatten a menu's item model into the ordered list of *visible* items: an
+ * item is visible when every ancestor submenu is open. Each row carries its
+ * depth, its open-state key (the item's `id` or its dot-joined index path),
+ * whether it is a submenu branch and open, and its flat index (its scene
+ * position).
+ */
+function flattenMenu(items: MenuItem[], openSet: Set<string>): FlatMenuRow[] {
+  const rows: FlatMenuRow[] = [];
+  const walk = (list: MenuItem[], depth: number, prefix: string): void => {
+    list.forEach((item, i) => {
+      const indexPath = prefix === "" ? String(i) : `${prefix}.${i}`;
+      const key = item.id ?? indexPath;
+      const children = item.children ?? [];
+      const expandable = children.length > 0;
+      const open = expandable && openSet.has(key);
+      rows.push({ item, key, depth, expandable, open, index: rows.length });
+      if (open) walk(children, depth + 1, indexPath);
+    });
+  };
+  walk(items, 0, "");
+  return rows;
+}
+
+/** The rendered text of one menu row: the indentation prefix (2 cells per
+ * depth level) plus the item label. */
+function menuRowText(row: FlatMenuRow): string {
+  return " ".repeat(row.depth * MENU_INDENT) + row.item.label;
+}
+
+/**
+ * Rebuild a menu node's children from its current props + bookkeeping (the
+ * source of truth, mirroring `rebuildTree`): flatten the model to its visible
+ * items, then materialize one row per visible item — the highlighted row
+ * reversed. In `"inline"` mode the rows are direct text leaves of the root
+ * column; in `"flyout"` mode the root-layer (depth-0) rows are direct leaves
+ * and each open submenu renders as a separate flyout layer box — an
+ * absolutely positioned child stamped with {@link MENU_Z_INDEX} — holding
+ * that branch's whole visible subtree. Runs at creation and after every
+ * {@link menuKey} / {@link menuHover} / {@link menuClick} mutation.
+ */
+function rebuildMenu(menu: Node): void {
+  const props = menu.props as MenuProps;
+  const items = menuItemModels.get(menu) ?? [];
+  const rows = flattenMenu(items, menuOpenSet(menu));
+  const count = rows.length;
+  const highlight = clampMenuIndex(
+    typeof props.highlighted === "number" ? props.highlighted : 0,
+    count,
+  );
+  const flyout = (menuSubmenuModes.get(menu) ?? "inline") === "flyout";
+
+  for (const child of [...menu.children]) child.remove();
+
+  if (!flyout) {
+    for (const row of rows) {
+      menu.addChild(
+        Text({ text: menuRowText(row), reversed: row.index === highlight }),
+      );
+    }
+    return;
+  }
+
+  // Flyout: the depth-0 rows are direct children of the menu column; each
+  // contiguous run of deeper rows is an open submenu's layer — a separate
+  // absolutely positioned box stamped with the flyout z-order (the branch's
+  // whole visible subtree: its open children and any deeper open
+  // grandchildren).
+  let i = 0;
+  while (i < count) {
+    const row = rows[i]!;
+    if (row.depth === 0) {
+      menu.addChild(
+        Text({ text: menuRowText(row), reversed: row.index === highlight }),
+      );
+      i++;
+      continue;
+    }
+    const start = i;
+    while (i < count && rows[i]!.depth >= row.depth) i++;
+    const layer = Box({
+      position: "absolute",
+      top: 0,
+      left: 0,
+      flex_direction: "column",
+      z_index: MENU_Z_INDEX,
+    });
+    for (let j = start; j < i; j++) {
+      layer.addChild(
+        Text({
+          text: menuRowText(rows[j]!),
+          reversed: rows[j]!.index === highlight,
+        }),
+      );
+    }
+    menu.addChild(layer);
+  }
+}
+
+/**
+ * Create a `menu` element: a flex column of text leaves — one leaf per
+ * *visible* item of the hierarchical `items` model (an item is visible when
+ * every ancestor submenu is open), each an indentation prefix (2 cells per
+ * depth level) + the item label, the highlighted item reversed. Submenus
+ * render inline as indented rows, or — with `submenu: "flyout"` — as
+ * separate overlay layers stamped with their own `z_index`. The item model
+ * and the render mode are JS bookkeeping (never scene props); the interactive
+ * state (`highlighted`, `open_submenus`, `open`) lives on the root box's
+ * props. Drive it with {@link menuKey} (up/down move the highlight, right /
+ * enter open a submenu, left closes to the parent, enter on a leaf activates
+ * it and dismisses, escape dismisses) or the mouse helpers {@link menuHover}
+ * / {@link menuClick}; toggle visibility + focus with {@link openMenu} /
+ * {@link closeMenu}. A `floating` menu stamps the root box's `z_index` prop
+ * (compositor paint order, default 0) so it overlays in-flow content; a
+ * closed menu is hidden (`hidden` modifier + `display: none`, so it truly
+ * leaves the scene). No new napi node kind: the `menu` element materializes
+ * as a `box` (constitution).
+ */
+export function Menu(props: MenuProps): Node {
+  const items = props.items.map(cloneMenuItem);
+  const open = props.open ?? false;
+  const rootProps: NodeProps = {
+    ...props,
+    highlighted: props.highlighted ?? 0,
+    open_submenus: [...(props.open_submenus ?? [])],
+    open,
+    // A closed menu is truly gone: the `hidden` modifier (the reconciler's
+    // hide semantics) plus `display: none` (the engine removes the node and
+    // its subtree from layout) — the Modal pattern.
+    hidden: !open,
+    display: open ? "flex" : "none",
+    flex_direction: "column",
+  };
+  // The Select `floating` pattern: the overlay's paint z-order is stamped on
+  // the root box (an explicit `z_index` prop wins).
+  if (props.floating === true) {
+    rootProps.z_index = (props.z_index as number | undefined) ?? 0;
+  }
+  const plain = rootProps as Record<string, unknown>;
+  delete plain.items;
+  delete plain.floating;
+  delete plain.submenu;
+  const menu = Node.create("menu", rootProps, []);
+  menuItemModels.set(menu, items);
+  menuSubmenuModes.set(menu, props.submenu === "flyout" ? "flyout" : "inline");
+  menuFocusRecords.set(menu, { previousFocusId: null });
+  rebuildMenu(menu);
+  return menu;
+}
+
+/**
+ * Apply a key to a menu node, mutating its state and rebuilding the
+ * composition in place — the Menu counterpart of {@link selectKey}.
+ *
+ * - `up` / `down` move the highlight through the visible items (clamped at
+ *   the ends).
+ * - `right` opens the highlighted item's submenu (a no-op on a leaf); on an
+ *   already-open branch it steps into the first child.
+ * - `left` closes the highlighted item's submenu; otherwise it closes the
+ *   parent submenu and highlights the parent item (a no-op at the top
+ *   level).
+ * - `enter` opens the highlighted item's submenu (a branch) or activates it
+ *   (a leaf) and dismisses the menu.
+ * - `escape` dismisses the menu.
+ *
+ * Returns the new state; any other key (or a key on an empty menu) leaves the
+ * menu unchanged.
+ */
+export function menuKey(menu: Node, event: KeyEvent): MenuState {
+  const props = menu.props as MenuProps;
+  const items = menuItemModels.get(menu) ?? [];
+  const openSet = menuOpenSet(menu);
+  const rows = flattenMenu(items, openSet);
+  const count = rows.length;
+  const highlighted = clampMenuIndex(
+    typeof props.highlighted === "number" ? props.highlighted : 0,
+    count,
+  );
+  const open = props.open ?? false;
+
+  let nextHighlighted = highlighted;
+  let nextOpen = open;
+  let activated: string | null = null;
+  const nextOpenSet = new Set(openSet);
+
+  const row = rows[highlighted];
+  const name = event.name;
+  if (name === "up") {
+    nextHighlighted = Math.max(0, highlighted - 1);
+  } else if (name === "down") {
+    nextHighlighted = Math.min(Math.max(0, count - 1), highlighted + 1);
+  } else if (name === "right") {
+    if (row?.expandable) {
+      if (!openSet.has(row.key)) nextOpenSet.add(row.key);
+      else nextHighlighted = Math.min(Math.max(0, count - 1), highlighted + 1);
+    }
+  } else if (name === "left") {
+    if (row?.expandable && openSet.has(row.key)) {
+      nextOpenSet.delete(row.key);
+    } else if (row !== undefined) {
+      // Close to the parent: remove the nearest ancestor branch's key and
+      // land the highlight on its row.
+      for (let i = highlighted - 1; i >= 0; i--) {
+        if (rows[i]!.depth < row.depth) {
+          nextOpenSet.delete(rows[i]!.key);
+          nextHighlighted = i;
+          break;
+        }
+      }
+    }
+  } else if (name === "enter") {
+    if (row?.expandable) {
+      nextOpenSet.add(row.key);
+    } else if (row !== undefined) {
+      activated = row.key;
+      nextOpen = false;
+    }
+  } else if (name === "escape") {
+    nextOpen = false;
+  }
+
+  const nextRows = flattenMenu(items, nextOpenSet);
+  const nextCount = nextRows.length;
+  nextHighlighted = clampMenuIndex(nextHighlighted, nextCount);
+
+  const changed = nextHighlighted !== highlighted ||
+    nextOpen !== open ||
+    activated !== null ||
+    nextOpenSet.size !== openSet.size ||
+    [...nextOpenSet].some((key) => !openSet.has(key));
+
+  if (changed) {
+    menu.setProps({
+      ...props,
+      highlighted: nextHighlighted,
+      open_submenus: [...nextOpenSet],
+      open: nextOpen,
+    });
+    rebuildMenu(menu);
+  }
+  return {
+    highlighted: nextHighlighted,
+    open_submenus: [...nextOpenSet],
+    open: nextOpen,
+    count: nextCount,
+    activated,
+  };
+}
+
+/**
+ * Move the menu's highlight to the visible item at `index` (clamped into the
+ * visible items), mutating the same state {@link menuKey} drives and
+ * rebuilding the composition in place — the mouse counterpart of the up/down
+ * keys, the hook the `MouseEventJs` host wiring subscribes to (a later
+ * subtask wires the events; this helper is pure). Returns the new state. A
+ * no-op when the highlight is already at `index` (or the menu has no items).
+ */
+export function menuHover(menu: Node, index: number): MenuState {
+  const props = menu.props as MenuProps;
+  const items = menuItemModels.get(menu) ?? [];
+  const openSet = menuOpenSet(menu);
+  const rows = flattenMenu(items, openSet);
+  const count = rows.length;
+  const target = clampMenuIndex(index, count);
+  const highlighted = clampMenuIndex(
+    typeof props.highlighted === "number" ? props.highlighted : 0,
+    count,
+  );
+  if (target !== highlighted) {
+    menu.setProps({ ...props, highlighted: target });
+    rebuildMenu(menu);
+  }
+  return {
+    highlighted: target,
+    open_submenus: [...openSet],
+    open: props.open ?? false,
+    count,
+    activated: null,
+  };
+}
+
+/**
+ * Click the visible item at `index` (clamped into the visible items): first
+ * moves the highlight there (like {@link menuHover}), then acts like `enter`
+ * — a branch opens its submenu, a leaf activates (the returned state's
+ * `activated` carries its key) and dismisses the menu. Returns the new state.
+ */
+export function menuClick(menu: Node, index: number): MenuState {
+  const props = menu.props as MenuProps;
+  const items = menuItemModels.get(menu) ?? [];
+  const openSet = menuOpenSet(menu);
+  const rows = flattenMenu(items, openSet);
+  const count = rows.length;
+  const target = clampMenuIndex(index, count);
+  const row = rows[target];
+  const highlighted = clampMenuIndex(
+    typeof props.highlighted === "number" ? props.highlighted : 0,
+    count,
+  );
+
+  let activated: string | null = null;
+  let open = props.open ?? false;
+  const nextOpenSet = new Set(openSet);
+  if (row?.expandable) {
+    if (!openSet.has(row.key)) nextOpenSet.add(row.key);
+  } else if (row !== undefined) {
+    activated = row.key;
+    open = false;
+  }
+  const nextOpenSubmenus = [...nextOpenSet];
+  const changed = target !== highlighted ||
+    open !== (props.open ?? false) ||
+    activated !== null ||
+    nextOpenSubmenus.length !== openSet.size ||
+    nextOpenSubmenus.some((key) => !openSet.has(key));
+  if (changed) {
+    menu.setProps({
+      ...props,
+      highlighted: target,
+      open_submenus: nextOpenSubmenus,
+      open,
+    });
+    rebuildMenu(menu);
+  }
+  return {
+    highlighted: target,
+    open_submenus: nextOpenSubmenus,
+    open,
+    count: flattenMenu(items, nextOpenSet).length,
+    activated,
+  };
+}
+
+/**
+ * Open a menu: record the currently active focus id, show the menu (toggle
+ * the `hidden` modifier off and `display` back to flex), and move focus into
+ * it — `focusFirst()` focuses the first registered focusable (the menu's
+ * content is expected to register its focusables with `manager`, mirroring
+ * `openModal`). A no-op when the menu is already open (the record must not be
+ * overwritten by the focus that now sits inside the menu).
+ */
+export function openMenu(
+  menu: Node,
+  manager: FocusManager = focusManager,
+): void {
+  const record = menuFocusRecords.get(menu);
+  if (record === undefined || menu.props.open === true) return;
+  record.previousFocusId = manager.activeId;
+  menu.setProps({ ...menu.props, open: true, hidden: false, display: "flex" });
+  manager.focusFirst();
+}
+
+/**
+ * Close a menu: hide it (toggle the `hidden` modifier on and `display` to
+ * none) and restore the focus recorded by {@link openMenu} — the previously
+ * active id, or a blur when nothing was focused before the open (fallback
+ * `null`; a recorded id that was unregistered meanwhile also falls back to a
+ * blur), mirroring `closeModal`. A no-op when the menu is already closed.
+ */
+export function closeMenu(
+  menu: Node,
+  manager: FocusManager = focusManager,
+): void {
+  const record = menuFocusRecords.get(menu);
+  if (record === undefined || menu.props.open !== true) return;
+  const previous = record.previousFocusId;
+  menu.setProps({ ...menu.props, open: false, hidden: true, display: "none" });
+  record.previousFocusId = null;
+  if (previous === null || !manager.focus(previous)) {
+    manager.blur();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3174,14 +4350,23 @@ function scrollbarMetrics(
   if (viewportHeight <= 0) return { offset: 0, thumb: 0, text: "" };
   const thumb = Math.max(
     1,
-    Math.min(viewportHeight, Math.round((viewportHeight * viewportHeight) / Math.max(1, contentHeight))),
+    Math.min(
+      viewportHeight,
+      Math.round(
+        (viewportHeight * viewportHeight) / Math.max(1, contentHeight),
+      ),
+    ),
   );
   const overflow = Math.max(0, contentHeight - viewportHeight);
   const range = Math.max(0, viewportHeight - thumb);
   const offset = overflow > 0 ? Math.round((scrollY / overflow) * range) : 0;
   const rows: string[] = [];
   for (let i = 0; i < viewportHeight; i++) {
-    rows.push(i >= offset && i < offset + thumb ? SCROLLBAR_THUMB_CHAR : SCROLLBAR_TRACK_CHAR);
+    rows.push(
+      i >= offset && i < offset + thumb
+        ? SCROLLBAR_THUMB_CHAR
+        : SCROLLBAR_TRACK_CHAR,
+    );
   }
   return { offset, thumb, text: rows.join("\n") };
 }
@@ -3200,12 +4385,18 @@ function scrollbarMetrics(
  * taller than the visible window, e.g. a table's content region) — and
  * against the node's own laid-out size otherwise.
  */
-function scrollGeometry(view: Node): { viewport: ContentSize; content: ContentSize } {
+function scrollGeometry(
+  view: Node,
+): { viewport: ContentSize; content: ContentSize } {
   const content = view.contentSize();
   const props = view.props;
   const viewport: ContentSize = {
-    width: typeof props.clip_width === "number" ? props.clip_width : content.width,
-    height: typeof props.clip_height === "number" ? props.clip_height : content.height,
+    width: typeof props.clip_width === "number"
+      ? props.clip_width
+      : content.width,
+    height: typeof props.clip_height === "number"
+      ? props.clip_height
+      : content.height,
   };
   if (view.type === "streaming_text") {
     return { viewport, content };
@@ -3245,7 +4436,10 @@ function scrollableContentSize(view: Node, viewport: ContentSize): ContentSize {
     width = Math.max(width, size.width);
     height = Math.max(height, size.height);
   }
-  return { width: Math.max(width, viewport.width), height: Math.max(height, viewport.height) };
+  return {
+    width: Math.max(width, viewport.width),
+    height: Math.max(height, viewport.height),
+  };
 }
 
 /** The current scroll offset of a scroll view (0 when unset). */
@@ -3268,9 +4462,16 @@ function maxScroll(view: Node): { x: number; y: number } {
 }
 
 /** Clamp a requested scroll offset to the content bounds. */
-function clampScroll(view: Node, x: number, y: number): { x: number; y: number } {
+function clampScroll(
+  view: Node,
+  x: number,
+  y: number,
+): { x: number; y: number } {
   const max = maxScroll(view);
-  return { x: Math.max(0, Math.min(x, max.x)), y: Math.max(0, Math.min(y, max.y)) };
+  return {
+    x: Math.max(0, Math.min(x, max.x)),
+    y: Math.max(0, Math.min(y, max.y)),
+  };
 }
 
 /**
@@ -3316,7 +4517,10 @@ function renderScrollbar(view: Node): void {
  * {@link scrollTo} / {@link scrollBy} / {@link scrollTop}. No new napi node
  * kind: the `scroll_view` element materializes as a `box` (constitution).
  */
-export function ScrollView(props: ScrollViewProps = {}, ...children: Node[]): Node {
+export function ScrollView(
+  props: ScrollViewProps = {},
+  ...children: Node[]
+): Node {
   const content: Node[] = [...children];
   if (Array.isArray(props.children)) content.push(...props.children);
   const rootProps: NodeProps = { ...props };
@@ -3353,7 +4557,11 @@ export function ScrollView(props: ScrollViewProps = {}, ...children: Node[]): No
  * re-attach, {@link scrollToBottom} to jump to the tail). Scrolling to/at
  * the tail keeps the current follow state.
  */
-export function scrollTo(view: Node, x: number, y: number): { x: number; y: number } {
+export function scrollTo(
+  view: Node,
+  x: number,
+  y: number,
+): { x: number; y: number } {
   const next = clampScroll(view, x, y);
   const state = streamScrollStates.get(view);
   if (state !== undefined && next.y < maxScroll(view).y) {
@@ -3377,7 +4585,11 @@ export function scrollTo(view: Node, x: number, y: number): { x: number; y: numb
  * Scroll a scroll view by `dx` / `dy` cells from its current offset, clamped
  * to the content bounds. Returns the new applied offsets.
  */
-export function scrollBy(view: Node, dx: number, dy: number): { x: number; y: number } {
+export function scrollBy(
+  view: Node,
+  dx: number,
+  dy: number,
+): { x: number; y: number } {
   const current = currentScroll(view);
   return scrollTo(view, current.x + dx, current.y + dy);
 }
@@ -3564,7 +4776,11 @@ function tableCellText(
  * `width` prop fixes the leaf's laid-out width, so the compositor trims any
  * residual overflow at the column edge (the same trim `wrap: false` lines
  * get). */
-function tableCell(value: string | number, column: TableColumn, reversed: boolean): Node {
+function tableCell(
+  value: string | number,
+  column: TableColumn,
+  reversed: boolean,
+): Node {
   return Text({
     text: tableCellText(value, column.width, column.align),
     width: column.width,
@@ -3574,10 +4790,16 @@ function tableCell(value: string | number, column: TableColumn, reversed: boolea
 
 /** One data row: a flex row of per-column cell leaves, one per column
  * (missing cells render blank). The highlighted row's cells are reversed. */
-function buildTableRow(row: (string | number)[], columns: TableColumn[], highlighted: boolean): Node {
+function buildTableRow(
+  row: (string | number)[],
+  columns: TableColumn[],
+  highlighted: boolean,
+): Node {
   return Box(
     { flex_direction: "row" },
-    ...columns.map((column, index) => tableCell(row[index] ?? "", column, highlighted)),
+    ...columns.map((column, index) =>
+      tableCell(row[index] ?? "", column, highlighted)
+    ),
   );
 }
 
@@ -3587,7 +4809,10 @@ function buildTableRow(row: (string | number)[], columns: TableColumn[], highlig
 function buildTableHeader(columns: TableColumn[], sticky: boolean): Node {
   const props: NodeProps = { flex_direction: "row" };
   if (sticky) props.z_index = TABLE_HEADER_Z_INDEX;
-  return Box(props, ...columns.map((column) => tableCell(column.header, column, false)));
+  return Box(
+    props,
+    ...columns.map((column) => tableCell(column.header, column, false)),
+  );
 }
 
 /** The current vertical scroll of a table's content region (0 when unset). */
@@ -3601,7 +4826,9 @@ function tableScrollY(table: Node): number {
  * row list when unset (nothing to clamp against — every row is "visible"). */
 function tableViewport(table: Node): number {
   const props = table.props as TableProps;
-  if (typeof props.clip_height === "number" && props.clip_height > 0) return props.clip_height;
+  if (typeof props.clip_height === "number" && props.clip_height > 0) {
+    return props.clip_height;
+  }
   return (tableRows.get(table) ?? []).length;
 }
 
@@ -3656,9 +4883,17 @@ function rebuildTable(table: Node, initialScrollY?: number): void {
   // so an out-of-range initial offset cannot open an empty window.
   const viewport = Math.max(
     1,
-    typeof props.clip_height === "number" && props.clip_height > 0 ? props.clip_height : rows.length,
+    typeof props.clip_height === "number" && props.clip_height > 0
+      ? props.clip_height
+      : rows.length,
   );
-  const scrollY = Math.max(0, Math.min(initialScrollY ?? tableScrollY(table), Math.max(0, rows.length - viewport)));
+  const scrollY = Math.max(
+    0,
+    Math.min(
+      initialScrollY ?? tableScrollY(table),
+      Math.max(0, rows.length - viewport),
+    ),
+  );
 
   for (const child of [...table.children]) child.remove();
 
@@ -3667,9 +4902,16 @@ function rebuildTable(table: Node, initialScrollY?: number): void {
   const start = Math.floor(scrollY);
   const end = Math.min(rows.length, start + viewport);
   const rowNodes: Node[] = [];
-  for (let i = start; i < end; i++) rowNodes.push(buildTableRow(rows[i]!, columns, i === highlight));
-  const regionProps: NodeProps = { flex_direction: "column", scroll_y: scrollY };
-  if (typeof props.clip_height === "number") regionProps.clip_height = props.clip_height;
+  for (let i = start; i < end; i++) {
+    rowNodes.push(buildTableRow(rows[i]!, columns, i === highlight));
+  }
+  const regionProps: NodeProps = {
+    flex_direction: "column",
+    scroll_y: scrollY,
+  };
+  if (typeof props.clip_height === "number") {
+    regionProps.clip_height = props.clip_height;
+  }
 
   let region: Node;
   if (sticky) {
@@ -3778,10 +5020,16 @@ export function tableKey(table: Node, event: KeyEvent): TableState {
   // viewport cannot scroll).
   let nextScrollY = scrollY;
   if (nextHighlight < nextScrollY) nextScrollY = nextHighlight;
-  if (nextHighlight > nextScrollY + viewport - 1) nextScrollY = nextHighlight - viewport + 1;
+  if (nextHighlight > nextScrollY + viewport - 1) {
+    nextScrollY = nextHighlight - viewport + 1;
+  }
   nextScrollY = Math.max(0, Math.min(nextScrollY, maxScroll));
 
-  const state: TableState = { highlight: nextHighlight, scroll_x: scrollX, scroll_y: nextScrollY };
+  const state: TableState = {
+    highlight: nextHighlight,
+    scroll_x: scrollX,
+    scroll_y: nextScrollY,
+  };
   const changed = state.highlight !== highlight || state.scroll_y !== scrollY;
   if (changed) {
     table.setProps({ ...props, highlight: state.highlight });
@@ -3922,7 +5170,9 @@ function clampRowIndex(index: number, count: number): number {
 function cloneTreeNode(node: TreeNode): TreeNode {
   const copy: TreeNode = { label: node.label };
   if (node.id !== undefined) copy.id = node.id;
-  if (node.children !== undefined) copy.children = node.children.map(cloneTreeNode);
+  if (node.children !== undefined) {
+    copy.children = node.children.map(cloneTreeNode);
+  }
   return copy;
 }
 
@@ -3933,17 +5183,34 @@ function cloneTreeNode(node: TreeNode): TreeNode {
  * is an expandable branch and expanded, plus the per-ancestor guide flags
  * (whether each ancestor has a following sibling) used to draw the guides.
  */
-function flattenTree(nodes: TreeNode[], expandedSet: Set<string>): FlatTreeRow[] {
+function flattenTree(
+  nodes: TreeNode[],
+  expandedSet: Set<string>,
+): FlatTreeRow[] {
   const rows: FlatTreeRow[] = [];
-  const walk = (list: TreeNode[], depth: number, prefix: string, guides: boolean[]): void => {
+  const walk = (
+    list: TreeNode[],
+    depth: number,
+    prefix: string,
+    guides: boolean[],
+  ): void => {
     list.forEach((node, i) => {
       const indexPath = prefix === "" ? String(i) : `${prefix}.${i}`;
       const key = node.id ?? indexPath;
       const children = node.children ?? [];
       const expandable = children.length > 0;
       const expanded = expandable && expandedSet.has(key);
-      rows.push({ node, key, depth, expandable, expanded, guides: [...guides] });
-      if (expanded) walk(children, depth + 1, indexPath, [...guides, i < list.length - 1]);
+      rows.push({
+        node,
+        key,
+        depth,
+        expandable,
+        expanded,
+        guides: [...guides],
+      });
+      if (expanded) {
+        walk(children, depth + 1, indexPath, [...guides, i < list.length - 1]);
+      }
     });
   };
   walk(nodes, 0, "", []);
@@ -3957,9 +5224,13 @@ function treeRowText(row: FlatTreeRow, indent: number): string {
   const gap = " ".repeat(Math.max(0, indent));
   let prefix = "";
   for (const cont of row.guides) {
-    prefix += cont ? TREE_GUIDE_VERTICAL + " ".repeat(Math.max(0, indent - 1)) : gap;
+    prefix += cont
+      ? TREE_GUIDE_VERTICAL + " ".repeat(Math.max(0, indent - 1))
+      : gap;
   }
-  const glyph = row.expandable ? `${row.expanded ? TREE_EXPANDED_GLYPH : TREE_COLLAPSED_GLYPH} ` : "  ";
+  const glyph = row.expandable
+    ? `${row.expanded ? TREE_EXPANDED_GLYPH : TREE_COLLAPSED_GLYPH} `
+    : "  ";
   return prefix + glyph + row.node.label;
 }
 
@@ -3973,7 +5244,9 @@ function treeScrollY(tree: Node): number {
  *  visible-row count when unset (nothing to clamp against). */
 function treeViewport(tree: Node, count: number): number {
   const props = tree.props as TreeProps;
-  if (typeof props.clip_height === "number" && props.clip_height > 0) return props.clip_height;
+  if (typeof props.clip_height === "number" && props.clip_height > 0) {
+    return props.clip_height;
+  }
   return Math.max(1, count);
 }
 
@@ -3995,21 +5268,34 @@ function rebuildTree(tree: Node, initialScrollY?: number): void {
   const indent = treeIndents.get(tree) ?? 2;
   const rows = flattenTree(models, expandedSet);
   const count = rows.length;
-  const highlight = clampRowIndex(typeof props.highlight === "number" ? props.highlight : 0, count);
+  const highlight = clampRowIndex(
+    typeof props.highlight === "number" ? props.highlight : 0,
+    count,
+  );
   const viewport = treeViewport(tree, count);
-  const scrollY = Math.max(0, Math.min(initialScrollY ?? treeScrollY(tree), Math.max(0, count - viewport)));
+  const scrollY = Math.max(
+    0,
+    Math.min(
+      initialScrollY ?? treeScrollY(tree),
+      Math.max(0, count - viewport),
+    ),
+  );
 
   for (const child of [...tree.children]) child.remove();
 
   const start = Math.floor(scrollY);
   const end = Math.min(count, start + viewport);
   for (let i = start; i < end; i++) {
-    tree.addChild(Text({ text: treeRowText(rows[i]!, indent), reversed: i === highlight }));
+    tree.addChild(
+      Text({ text: treeRowText(rows[i]!, indent), reversed: i === highlight }),
+    );
   }
 
   // Re-stamp the clamped scroll offset (bookkeeping — the window is
   // materialized here, never scrolled by the layout engine).
-  if (treeScrollY(tree) !== scrollY) tree.setProps({ ...tree.props, scroll_y: scrollY });
+  if (treeScrollY(tree) !== scrollY) {
+    tree.setProps({ ...tree.props, scroll_y: scrollY });
+  }
 }
 
 /**
@@ -4042,7 +5328,10 @@ export function Tree(props: TreeProps): Node {
   const tree = Node.create("tree", rootProps, []);
   treeNodeModels.set(tree, models);
   treeExpandedSets.set(tree, new Set<string>(props.expanded ?? []));
-  treeIndents.set(tree, typeof props.indent === "number" && props.indent > 0 ? props.indent : 2);
+  treeIndents.set(
+    tree,
+    typeof props.indent === "number" && props.indent > 0 ? props.indent : 2,
+  );
   rebuildTree(tree, props.scroll_y);
   return tree;
 }
@@ -4105,7 +5394,10 @@ function setTreeExpanded(tree: Node, key: string, expanded: boolean): boolean {
   else expandedSet.delete(key);
   const count = flattenTree(models, expandedSet).length;
   const props = tree.props as TreeProps;
-  const highlight = clampRowIndex(typeof props.highlight === "number" ? props.highlight : 0, count);
+  const highlight = clampRowIndex(
+    typeof props.highlight === "number" ? props.highlight : 0,
+    count,
+  );
   tree.setProps({ ...props, highlight });
   rebuildTree(tree);
   return true;
@@ -4153,7 +5445,10 @@ export function treeKey(tree: Node, event: KeyEvent): TreeState {
 
   let rows = flattenTree(models, expandedSet);
   let count = rows.length;
-  const originalHighlight = clampRowIndex(typeof props.highlight === "number" ? props.highlight : 0, count);
+  const originalHighlight = clampRowIndex(
+    typeof props.highlight === "number" ? props.highlight : 0,
+    count,
+  );
   const originalScroll = treeScrollY(tree);
   let highlight = originalHighlight;
   const row = rows[highlight];
@@ -4183,7 +5478,10 @@ export function treeKey(tree: Node, event: KeyEvent): TreeState {
         }
       }
     }
-  } else if (name === "enter" || (name === "char" && event.char === " ") || name === "space") {
+  } else if (
+    name === "enter" || (name === "char" && event.char === " ") ||
+    name === "space"
+  ) {
     if (row?.expandable) {
       if (row.expanded) expandedSet.delete(row.key);
       else expandedSet.add(row.key);
@@ -4206,7 +5504,8 @@ export function treeKey(tree: Node, event: KeyEvent): TreeState {
   if (highlight > scrollY + viewport - 1) scrollY = highlight - viewport + 1;
   scrollY = Math.max(0, Math.min(scrollY, maxScroll));
 
-  const changed = toggledExpand || highlight !== originalHighlight || scrollY !== originalScroll;
+  const changed = toggledExpand || highlight !== originalHighlight ||
+    scrollY !== originalScroll;
   if (changed) {
     tree.setProps({ ...tree.props, highlight, scroll_y: scrollY });
     rebuildTree(tree);
@@ -4309,14 +5608,22 @@ function tabClosable(spec: TabSpec, elementClosable: boolean): boolean {
 
 /** The text of one tab leaf: the label — prefixed by the top-border marker
  * when active, suffixed by the close glyph when closable. */
-function tabLeafText(spec: TabSpec, isActive: boolean, closable: boolean): string {
+function tabLeafText(
+  spec: TabSpec,
+  isActive: boolean,
+  closable: boolean,
+): string {
   const text = isActive ? TAB_ACTIVE_MARKER + spec.label : spec.label;
   return closable ? `${text} ${TAB_CLOSE_CHAR}` : text;
 }
 
 /** The props of one tab leaf: active tabs are painted with the `primary`
  * palette colors and reversed; closable tabs carry the close glyph. */
-function tabLeafProps(spec: TabSpec, isActive: boolean, closable: boolean): NodeProps {
+function tabLeafProps(
+  spec: TabSpec,
+  isActive: boolean,
+  closable: boolean,
+): NodeProps {
   const props: NodeProps = { text: tabLeafText(spec, isActive, closable) };
   if (isActive) {
     props.fg = TAB_PRIMARY_FG;
@@ -4339,14 +5646,25 @@ function tabLeafProps(spec: TabSpec, isActive: boolean, closable: boolean): Node
 function rebuildTabs(tabs: Node): void {
   const props = tabs.props as TabsProps;
   const specs = tabSpecs.get(tabs) ?? [];
-  const active = clampTabIndex(typeof props.active === "number" ? props.active : 0, specs.length);
+  const active = clampTabIndex(
+    typeof props.active === "number" ? props.active : 0,
+    specs.length,
+  );
   const elementClosable = tabsElementClosable(tabs);
 
   for (const child of [...tabs.children]) child.remove();
 
   const bar = Box({ flex_direction: "row" });
   specs.forEach((spec, index) => {
-    bar.addChild(Text(tabLeafProps(spec, index === active, tabClosable(spec, elementClosable))));
+    bar.addChild(
+      Text(
+        tabLeafProps(
+          spec,
+          index === active,
+          tabClosable(spec, elementClosable),
+        ),
+      ),
+    );
   });
   tabs.addChild(bar);
 
@@ -4367,10 +5685,16 @@ function rebuildTabs(tabs: Node): void {
  * kind: the `tabs` element materializes as a `box` (constitution).
  */
 export function Tabs(props: TabsProps): Node {
-  const specs = props.tabs.map((spec) => ({ ...spec, content: [...spec.content] }));
+  const specs = props.tabs.map((spec) => ({
+    ...spec,
+    content: [...spec.content],
+  }));
   const rootProps: NodeProps = {
     ...props,
-    active: clampTabIndex(typeof props.active === "number" ? props.active : 0, specs.length),
+    active: clampTabIndex(
+      typeof props.active === "number" ? props.active : 0,
+      specs.length,
+    ),
     flex_direction: "column",
   };
   const plain = rootProps as Record<string, unknown>;
@@ -4391,7 +5715,10 @@ export function Tabs(props: TabsProps): Node {
 export function activateTab(tabs: Node, index: number): void {
   const specs = tabSpecs.get(tabs) ?? [];
   const clamped = clampTabIndex(index, specs.length);
-  const current = clampTabIndex(typeof tabs.props.active === "number" ? tabs.props.active : 0, specs.length);
+  const current = clampTabIndex(
+    typeof tabs.props.active === "number" ? tabs.props.active : 0,
+    specs.length,
+  );
   if (clamped === current) return;
   tabs.setProps({ ...tabs.props, active: clamped });
   rebuildTabs(tabs);
@@ -4409,9 +5736,15 @@ export function closeTab(tabs: Node, index: number): void {
   if (specs === undefined) return;
   if (index < 0 || index >= specs.length) return;
   const props = tabs.props as TabsProps;
-  const oldActive = clampTabIndex(typeof props.active === "number" ? props.active : 0, specs.length);
+  const oldActive = clampTabIndex(
+    typeof props.active === "number" ? props.active : 0,
+    specs.length,
+  );
   specs.splice(index, 1);
-  const nextActive = clampTabIndex(index < oldActive ? oldActive - 1 : oldActive, specs.length);
+  const nextActive = clampTabIndex(
+    index < oldActive ? oldActive - 1 : oldActive,
+    specs.length,
+  );
   tabs.setProps({ ...props, active: nextActive });
   rebuildTabs(tabs);
 }
@@ -4430,7 +5763,10 @@ export function closeTab(tabs: Node, index: number): void {
  */
 export function tabsKey(tabs: Node, event: KeyEvent): TabsState {
   const specs = tabSpecs.get(tabs) ?? [];
-  const active = clampTabIndex(typeof tabs.props.active === "number" ? tabs.props.active : 0, specs.length);
+  const active = clampTabIndex(
+    typeof tabs.props.active === "number" ? tabs.props.active : 0,
+    specs.length,
+  );
   const name = event.name;
 
   if (name === "left") {
@@ -4442,7 +5778,9 @@ export function tabsKey(tabs: Node, event: KeyEvent): TabsState {
     if (specs.length > 1) activateTab(tabs, (active + 1) % specs.length);
   } else if (name === "tab" && event.ctrl && event.shift) {
     // ctrl+shift+tab: previous, wrapping to the last tab.
-    if (specs.length > 1) activateTab(tabs, (active - 1 + specs.length) % specs.length);
+    if (specs.length > 1) {
+      activateTab(tabs, (active - 1 + specs.length) % specs.length);
+    }
   } else if (name === "w" && event.ctrl) {
     // ctrl+w: close the active tab (closeTab re-clamps the active index).
     closeTab(tabs, active);
@@ -4450,7 +5788,10 @@ export function tabsKey(tabs: Node, event: KeyEvent): TabsState {
 
   // Re-read the live state: a ctrl+w close changed the tab count.
   const after = tabSpecs.get(tabs) ?? [];
-  const nextActive = clampTabIndex(typeof tabs.props.active === "number" ? tabs.props.active : 0, after.length);
+  const nextActive = clampTabIndex(
+    typeof tabs.props.active === "number" ? tabs.props.active : 0,
+    after.length,
+  );
   return { active: nextActive, count: after.length };
 }
 
@@ -4536,9 +5877,10 @@ function progressRatio(props: ProgressProps): number {
   const value = typeof props.value === "number" && Number.isFinite(props.value)
     ? Math.max(0, props.value)
     : 0;
-  const max = typeof props.max === "number" && Number.isFinite(props.max) && props.max > 0
-    ? props.max
-    : 100;
+  const max =
+    typeof props.max === "number" && Number.isFinite(props.max) && props.max > 0
+      ? props.max
+      : 100;
   return Math.max(0, Math.min(1, value / max));
 }
 
@@ -4586,8 +5928,12 @@ function progressLabelFits(
  * the inner width. */
 function progressBarText(props: ProgressProps): string {
   const inner = progressInnerWidth(props);
-  const filled = Math.max(0, Math.min(inner, Math.ceil(progressRatio(props) * inner)));
-  return PROGRESS_FILL_CHAR.repeat(filled) + PROGRESS_EMPTY_CHAR.repeat(inner - filled);
+  const filled = Math.max(
+    0,
+    Math.min(inner, Math.ceil(progressRatio(props) * inner)),
+  );
+  return PROGRESS_FILL_CHAR.repeat(filled) +
+    PROGRESS_EMPTY_CHAR.repeat(inner - filled);
 }
 
 /**
@@ -4607,18 +5953,31 @@ function rebuildProgress(node: Node): void {
 
   // The fill leaf: in-flow, sized to the full inner width — the label and
   // readout overlay it, mirroring ratatui Gauge, so the fill count is exact.
-  node.addChild(Text({ text: progressBarText(props), width: progressInnerWidth(props) }));
+  node.addChild(
+    Text({ text: progressBarText(props), width: progressInnerWidth(props) }),
+  );
   // The label overlay: left-aligned inside the bar area when there is room.
   const label = progressLabels.get(node) ?? "";
   if (progressLabelFits(label, props, showPercentage)) {
     node.addChild(
-      Text({ text: label, position: "absolute", left: 0, z_index: 1, dim: true }),
+      Text({
+        text: label,
+        position: "absolute",
+        left: 0,
+        z_index: 1,
+        dim: true,
+      }),
     );
   }
   // The percentage readout overlay: right side of the bar area.
   if (showPercentage) {
     node.addChild(
-      Text({ text: progressPercentText(props), position: "absolute", right: 0, z_index: 1 }),
+      Text({
+        text: progressPercentText(props),
+        position: "absolute",
+        right: 0,
+        z_index: 1,
+      }),
     );
   }
 }
@@ -4674,7 +6033,11 @@ export function setProgress(node: Node, value: number, max?: number): void {
   node.setProps(next);
   const bar = node.children[0];
   if (bar !== undefined && bar.type === "text") {
-    bar.setProps({ ...bar.props, text: progressBarText(next), width: progressInnerWidth(next) });
+    bar.setProps({
+      ...bar.props,
+      text: progressBarText(next),
+      width: progressInnerWidth(next),
+    });
   }
   if (progressShowPercentages.get(node) ?? true) {
     const readout = node.children[node.children.length - 1];
@@ -4744,7 +6107,11 @@ function brailleDotBit(subCol: number, subRow: number): number {
  * codepoint is `0x2800 | bits`, the U+2800 braille block. A sub-cell outside
  * the matrix (a partial edge) reads as off.
  */
-export function brailleCell(dots: CanvasDots, col: number, row: number): string {
+export function brailleCell(
+  dots: CanvasDots,
+  col: number,
+  row: number,
+): string {
   const x0 = col * 2;
   const y0 = row * 4;
   let bits = 0;
@@ -4883,7 +6250,13 @@ function chartScale(
  * uses, so a line chart paints through the braille rasterizer). Both
  * endpoints are plotted; sub-cells outside the matrix are ignored.
  */
-function plotLine(dots: string[], x0: number, y0: number, x1: number, y1: number): void {
+function plotLine(
+  dots: string[],
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+): void {
   const width = dots[0]?.length ?? 0;
   const height = dots.length;
   const dx = Math.abs(x1 - x0);
@@ -4956,12 +6329,19 @@ export interface BarChartProps extends NodeProps {
  * normalized onto the scale and quantized into `8 * height` eighths
  * (`full_block`: `height` whole cells) — the atom the row glyphs read.
  */
-function barChartSubHeights(props: BarChartProps, scale: { min: number; max: number }): number[] {
-  const height = typeof props.height === "number" ? Math.max(1, Math.round(props.height)) : 5;
+function barChartSubHeights(
+  props: BarChartProps,
+  scale: { min: number; max: number },
+): number[] {
+  const height = typeof props.height === "number"
+    ? Math.max(1, Math.round(props.height))
+    : 5;
   const fullBlock = props.full_block === true;
   return (props.data ?? []).map((value) => {
     const norm = chartClamp((value - scale.min) / (scale.max - scale.min));
-    return fullBlock ? Math.round(norm * height) : Math.round(norm * 8 * height);
+    return fullBlock
+      ? Math.round(norm * height)
+      : Math.round(norm * 8 * height);
   });
 }
 
@@ -4978,12 +6358,20 @@ function barChartSubHeights(props: BarChartProps, scale: { min: number; max: num
  */
 export function BarChart(props: BarChartProps): Node {
   const data = props.data ?? [];
-  const height = typeof props.height === "number" ? Math.max(1, Math.round(props.height)) : 5;
-  const barWidth = typeof props.bar_width === "number" ? Math.max(1, Math.round(props.bar_width)) : 1;
-  const gap = typeof props.gap === "number" ? Math.max(0, Math.round(props.gap)) : 1;
+  const height = typeof props.height === "number"
+    ? Math.max(1, Math.round(props.height))
+    : 5;
+  const barWidth = typeof props.bar_width === "number"
+    ? Math.max(1, Math.round(props.bar_width))
+    : 1;
+  const gap = typeof props.gap === "number"
+    ? Math.max(0, Math.round(props.gap))
+    : 1;
   const showAxis = props.show_axis === true;
   const scale = chartScale(data, props.min, props.max, 0);
-  const barsWidth = data.length === 0 ? 0 : data.length * barWidth + (data.length - 1) * gap;
+  const barsWidth = data.length === 0
+    ? 0
+    : data.length * barWidth + (data.length - 1) * gap;
   const width = typeof props.width === "number"
     ? Math.max(1, Math.round(props.width))
     : Math.max(1, barsWidth);
@@ -5014,7 +6402,11 @@ export function BarChart(props: BarChartProps): Node {
     }
     leaves.push(Text(chartLeafProps(props, { text })));
   }
-  if (showAxis) leaves.push(Text(chartLeafProps(props, { text: CHART_AXIS_CHAR.repeat(width) })));
+  if (showAxis) {
+    leaves.push(
+      Text(chartLeafProps(props, { text: CHART_AXIS_CHAR.repeat(width) })),
+    );
+  }
 
   const rootProps: NodeProps = {
     ...props,
@@ -5072,7 +6464,9 @@ export interface ChartProps extends NodeProps {
  */
 export function Chart(props: ChartProps): Node {
   const data = props.data ?? [];
-  const height = typeof props.height === "number" ? Math.max(1, Math.round(props.height)) : 5;
+  const height = typeof props.height === "number"
+    ? Math.max(1, Math.round(props.height))
+    : 5;
   const width = typeof props.width === "number"
     ? Math.max(1, Math.round(props.width))
     : Math.max(2, Math.ceil(data.length / 2));
@@ -5090,18 +6484,34 @@ export function Chart(props: ChartProps): Node {
     for (let i = 0; i < data.length - 1; i++) {
       const x0 = Math.round((i * (subCols - 1)) / (data.length - 1));
       const x1 = Math.round(((i + 1) * (subCols - 1)) / (data.length - 1));
-      const y0 = subRows - 1 - Math.round(chartClamp((data[i]! - scale.min) / (scale.max - scale.min)) * (subRows - 1));
-      const y1 = subRows - 1 - Math.round(chartClamp((data[i + 1]! - scale.min) / (scale.max - scale.min)) * (subRows - 1));
+      const y0 = subRows - 1 -
+        Math.round(
+          chartClamp((data[i]! - scale.min) / (scale.max - scale.min)) *
+            (subRows - 1),
+        );
+      const y1 = subRows - 1 -
+        Math.round(
+          chartClamp((data[i + 1]! - scale.min) / (scale.max - scale.min)) *
+            (subRows - 1),
+        );
       plotLine(dots, x0, y0, x1, y1);
     }
   } else if (data.length === 1) {
-    const y = subRows - 1 - Math.round(chartClamp((data[0]! - scale.min) / (scale.max - scale.min)) * (subRows - 1));
+    const y = subRows - 1 -
+      Math.round(
+        chartClamp((data[0]! - scale.min) / (scale.max - scale.min)) *
+          (subRows - 1),
+      );
     plotLine(dots, 0, y, 0, y);
   }
 
-  const leaves = brailleRows(dots).map((row) => Text(chartLeafProps(props, { text: row })));
+  const leaves = brailleRows(dots).map((row) =>
+    Text(chartLeafProps(props, { text: row }))
+  );
   if (props.show_axis === true) {
-    leaves.push(Text(chartLeafProps(props, { text: CHART_AXIS_CHAR.repeat(width) })));
+    leaves.push(
+      Text(chartLeafProps(props, { text: CHART_AXIS_CHAR.repeat(width) })),
+    );
   }
 
   const rootProps: NodeProps = {
@@ -5161,7 +6571,9 @@ export interface SparklineProps extends NodeProps {
  */
 export function Sparkline(props: SparklineProps): Node {
   const data = props.data ?? [];
-  const height = typeof props.height === "number" ? Math.max(1, Math.round(props.height)) : 1;
+  const height = typeof props.height === "number"
+    ? Math.max(1, Math.round(props.height))
+    : 1;
   const width = typeof props.width === "number"
     ? Math.max(1, Math.round(props.width))
     : data.length;
@@ -5183,7 +6595,9 @@ export function Sparkline(props: SparklineProps): Node {
       const y = 4 * height - 1 - Math.round(norm * (4 * height - 1));
       plotLine(dots, i, y, i, y);
     });
-    leaves = brailleRows(dots).map((row) => Text(chartLeafProps(props, { text: row })));
+    leaves = brailleRows(dots).map((row) =>
+      Text(chartLeafProps(props, { text: row }))
+    );
   } else {
     // Eighth-block glyphs: each point quantized onto `8 * height`
     // sub-heights, clamped to at least 1 eighth so no point paints an
@@ -5352,11 +6766,19 @@ export function Modal(props: ModalProps = {}, ...children: Node[]): Node {
  * with `manager`). A no-op when the modal is already open (the record must
  * not be overwritten by the focus that now sits inside the overlay).
  */
-export function openModal(modal: Node, manager: FocusManager = focusManager): void {
+export function openModal(
+  modal: Node,
+  manager: FocusManager = focusManager,
+): void {
   const state = modalStates.get(modal);
   if (state === undefined || modal.props.open === true) return;
   state.previousFocusId = manager.activeId;
-  modal.setProps({ ...modal.props, open: true, hidden: false, display: "flex" });
+  modal.setProps({
+    ...modal.props,
+    open: true,
+    hidden: false,
+    display: "flex",
+  });
   manager.focusFirst();
 }
 
@@ -5367,11 +6789,19 @@ export function openModal(modal: Node, manager: FocusManager = focusManager): vo
  * open (fallback `null`; a recorded id that was unregistered meanwhile also
  * falls back to a blur). A no-op when the modal is already closed.
  */
-export function closeModal(modal: Node, manager: FocusManager = focusManager): void {
+export function closeModal(
+  modal: Node,
+  manager: FocusManager = focusManager,
+): void {
   const state = modalStates.get(modal);
   if (state === undefined || modal.props.open !== true) return;
   const previous = state.previousFocusId;
-  modal.setProps({ ...modal.props, open: false, hidden: true, display: "none" });
+  modal.setProps({
+    ...modal.props,
+    open: false,
+    hidden: true,
+    display: "none",
+  });
   state.previousFocusId = null;
   if (previous === null || !manager.focus(previous)) {
     manager.blur();
@@ -6135,10 +7565,15 @@ export const THEME_COMPONENTS = [
   "panels",
   "diff",
   "select",
+  "checkbox",
+  "radio",
+  "toggle",
   "scroll_view",
   "table",
   "markdown",
   "progress",
+  "help",
+  "menu",
 ] as const;
 
 /** A themeable component kind ("input", "diff", ...). */
@@ -6215,10 +7650,15 @@ export const defaultTheme: Theme = {
     panels: {},
     diff: {},
     select: {},
+    checkbox: {},
+    radio: {},
+    toggle: {},
     scroll_view: {},
     table: {},
     markdown: {},
     progress: {},
+    help: {},
+    menu: {},
   },
 };
 
@@ -6258,7 +7698,10 @@ export function mergeTheme(base: Theme, overrides: ThemeOverrides = {}): Theme {
  * returned props, so the output is ordinary `NodeProps` — the same surface
  * the scene node understands, with no new napi surface (constitution).
  */
-export function resolveTheme(theme: Theme, props: ThemeResolvableProps): NodeProps {
+export function resolveTheme(
+  theme: Theme,
+  props: ThemeResolvableProps,
+): NodeProps {
   const role = props.role;
   const component = props.component;
   // No hints: return the props object unchanged. Identity here matters —
@@ -6294,10 +7737,16 @@ export function resolveTheme(theme: Theme, props: ThemeResolvableProps): NodePro
     if (colors !== undefined) {
       // The role palette is the more specific intent: it overrides the
       // component preset's fg/bg, but never an explicit prop.
-      if ((out.fg === undefined || presetFilled.has("fg")) && colors.fg !== undefined) {
+      if (
+        (out.fg === undefined || presetFilled.has("fg")) &&
+        colors.fg !== undefined
+      ) {
         out.fg = colors.fg;
       }
-      if ((out.bg === undefined || presetFilled.has("bg")) && colors.bg !== undefined) {
+      if (
+        (out.bg === undefined || presetFilled.has("bg")) &&
+        colors.bg !== undefined
+      ) {
         out.bg = colors.bg;
       }
     }
@@ -6353,8 +7802,8 @@ function comboSignature(combo: KeyCombo): string {
  * event, the character) plus every modifier flag, with omitted combo
  * modifiers treated as released. */
 function comboMatches(combo: KeyCombo, event: KeyEvent): boolean {
-  const nameMatches =
-    event.name === combo.name || (event.name === "char" && event.char === combo.name);
+  const nameMatches = event.name === combo.name ||
+    (event.name === "char" && event.char === combo.name);
   if (!nameMatches) return false;
   return (
     event.ctrl === (combo.ctrl ?? false) &&
@@ -6380,16 +7829,29 @@ function comboMatches(combo: KeyCombo, event: KeyEvent): boolean {
  * with no per-tree wiring.
  */
 export class Keymap {
-  #entries = new Map<string, { combo: KeyCombo; handler: KeyHandler }>();
+  // `description` is explicitly `| undefined`: `register` always stores the
+  // (possibly absent) argument, and exactOptionalPropertyTypes forbids an
+  // explicit `undefined` for a plain optional property.
+  #entries = new Map<
+    string,
+    { combo: KeyCombo; handler: KeyHandler; description?: string | undefined }
+  >();
 
   /**
-   * Register `handler` for `combo`. Registering the same combo again replaces
-   * the earlier handler. Returns an unsubscribe function that removes the
-   * registration.
+   * Register `handler` for `combo`, optionally with a human-readable
+   * `description` — surfaced by {@link HelpPanel} as the overlay's dimmed
+   * description column. Omit it (the status-quo path) for dispatch-only
+   * shortcuts; the dispatch behavior is identical either way. Registering
+   * the same combo again replaces the earlier handler and description.
+   * Returns an unsubscribe function that removes the registration.
    */
-  register(combo: KeyCombo, handler: KeyHandler): () => void {
+  register(
+    combo: KeyCombo,
+    handler: KeyHandler,
+    description?: string,
+  ): () => void {
     const signature = comboSignature(combo);
-    this.#entries.set(signature, { combo, handler });
+    this.#entries.set(signature, { combo, handler, description });
     return () => {
       const entry = this.#entries.get(signature);
       // Only remove when the current handler is still the one this call
@@ -6398,6 +7860,29 @@ export class Keymap {
         this.#entries.delete(signature);
       }
     };
+  }
+
+  /**
+   * The registered combos in registration order — one entry per live
+   * registration, carrying the optional description when one was supplied.
+   * Re-registering a combo keeps its original position (replacing the
+   * handler and description), so the order is stable and mirrors
+   * {@link dispatch}'s match order. Returns fresh copies: mutating the
+   * returned array or combos never affects the keymap.
+   */
+  list(): { combo: KeyCombo; description?: string }[] {
+    const listed: { combo: KeyCombo; description?: string }[] = [];
+    for (const { combo, description } of this.#entries.values()) {
+      // exactOptionalPropertyTypes: only attach `description` when present.
+      const entry: { combo: KeyCombo; description?: string } = {
+        combo: { ...combo },
+      };
+      if (description !== undefined) {
+        entry.description = description;
+      }
+      listed.push(entry);
+    }
+    return listed;
   }
 
   /**
@@ -6423,6 +7908,80 @@ export class Keymap {
  * registered here fires regardless of focus and is never delivered to the
  * focused element's handler or the tree-level handler. */
 export const keymap: Keymap = new Keymap();
+
+// ---------------------------------------------------------------------------
+// Help panel
+// ---------------------------------------------------------------------------
+
+/** Props for the `HelpPanel` element. `keymap` / `title` are consumed by the
+ * factory — the overlay is rendered from the keymap's listings at creation
+ * time — so they never reach the scene props; remaining props style the root
+ * box. */
+export interface HelpPanelProps extends NodeProps {
+  /** The keymap whose listings render. Defaults to the module-level
+   * {@link keymap}. */
+  keymap?: Keymap;
+  /** An optional title row rendered above the key/description rows. */
+  title?: string;
+}
+
+/** Render a combo's key hint as `mod1+mod2+key` (bubbletea help style:
+ * modifiers first, then the key name — `ctrl+k`, `shift+enter`, `f1`). */
+function helpComboHint(combo: KeyCombo): string {
+  const mods: string[] = [];
+  if (combo.ctrl) mods.push("ctrl");
+  if (combo.alt) mods.push("alt");
+  if (combo.shift) mods.push("shift");
+  if (combo.meta) mods.push("meta");
+  if (combo.super) mods.push("super");
+  return [...mods, combo.name].join("+");
+}
+
+/**
+ * Create a `help` element (bubbletea Help parity): a flex column `box` of
+ * text leaves listing a {@link Keymap}'s described combos — one row per
+ * entry, the key hint right-aligned in a key column as wide as the widest
+ * hint, then the dimmed description (a `margin_left` gap mirrors bubbletea's
+ * two-cell separator). Entries registered without a description are skipped
+ * (dispatch-only shortcuts, bubbletea's `desc == ""` skip). The optional
+ * `title` renders as a plain text row above the entries. The source keymap
+ * defaults to the module-level {@link keymap}. Style the overlay through the
+ * `help` component preset: hosts resolve it with
+ * `resolveTheme(theme, { ...props, component: "help" })` — the factory
+ * materializes as a plain `box` with text children, so no new napi node kind
+ * is introduced (constitution).
+ */
+export function HelpPanel(props: HelpPanelProps = {}): Node {
+  const source = props.keymap ?? keymap;
+  const rows: Node[] = [];
+  if (props.title !== undefined && props.title !== "") {
+    rows.push(Text({ text: props.title, bold: true }));
+  }
+  // Only described entries render (bubbletea skips empty descriptions); the
+  // key column is as wide as the widest hint among them.
+  const described = source.list().filter((entry) =>
+    entry.description !== undefined
+  );
+  const keyColWidth = described.reduce(
+    (widest, entry) => Math.max(widest, helpComboHint(entry.combo).length),
+    0,
+  );
+  for (const entry of described) {
+    const keys = helpComboHint(entry.combo).padStart(keyColWidth);
+    rows.push(
+      Box(
+        { flex_direction: "row", height: 1 },
+        Text({ text: keys }),
+        Text({ text: entry.description as string, dim: true, margin_left: 2 }),
+      ),
+    );
+  }
+  const rootProps: NodeProps = { ...props, flex_direction: "column" };
+  const plain = rootProps as Record<string, unknown>;
+  delete plain.keymap;
+  delete plain.title;
+  return Node.create("box", rootProps, rows);
+}
 
 // ---------------------------------------------------------------------------
 // Focus manager
@@ -6701,7 +8260,10 @@ export function useFocus(
 function isScrollableNode(view: Node): boolean {
   if (!view.attached) return false;
   const type = view.type;
-  if (type === "scroll_view" || type === "streaming_text" || type === "diff" || type === "table") {
+  if (
+    type === "scroll_view" || type === "streaming_text" || type === "diff" ||
+    type === "table"
+  ) {
     return true;
   }
   const props = view.props;
@@ -6876,7 +8438,11 @@ const selectionLastRect = new WeakMap<Renderer, SelectionRange>();
 
 /** Whether the cell (`col`, `row`) lies inside the (possibly reversed)
  * selection rect `range`. */
-function rangeContains(range: SelectionRange, col: number, row: number): boolean {
+function rangeContains(
+  range: SelectionRange,
+  col: number,
+  row: number,
+): boolean {
   return (
     col >= Math.min(range.col1, range.col2) &&
     col <= Math.max(range.col1, range.col2) &&
@@ -6920,7 +8486,11 @@ export function setSelectionClockForTesting(clock: () => number): void {
  * untouched then. Cluster-aware: the native word-range lookup treats a masked
  * continuation cell (a wide glyph's second column) as part of its glyph's run.
  */
-export function selectWordAt(renderer: Renderer, col: number, row: number): SelectionRange | null {
+export function selectWordAt(
+  renderer: Renderer,
+  col: number,
+  row: number,
+): SelectionRange | null {
   const range = renderer.selectionWordRange(col, row);
   if (range === null) return null;
   renderer.setSelection(range.col1, range.row1, range.col2, range.row2);
@@ -6939,14 +8509,16 @@ export function selectWordAt(renderer: Renderer, col: number, row: number): Sele
  * replaces it. Returns the applied selection range, or `null` when the event
  * is not `down_left`.
  */
-export function startSelection(renderer: Renderer, event: MouseEventJs): SelectionRange | null {
+export function startSelection(
+  renderer: Renderer,
+  event: MouseEventJs,
+): SelectionRange | null {
   if (event.kind !== "down_left") return null;
   const col = event.column;
   const row = event.row;
   const prev = selectionLastPress.get(renderer);
   const at = selectionClock();
-  const doubleClick =
-    prev !== undefined &&
+  const doubleClick = prev !== undefined &&
     at - prev.at <= SELECTION_DOUBLE_CLICK_MS &&
     Math.abs(col - prev.col) + Math.abs(row - prev.row) <= 1;
   // Snapshot the overlay before this gesture replaces it: the click-
@@ -6987,7 +8559,10 @@ export function startSelection(renderer: Renderer, event: MouseEventJs): Selecti
  * selects the spanned rectangle). Returns the applied (post-extension)
  * range, or `null` when no session is active or the event is not `drag_left`.
  */
-export function dragSelection(renderer: Renderer, event: MouseEventJs): SelectionRange | null {
+export function dragSelection(
+  renderer: Renderer,
+  event: MouseEventJs,
+): SelectionRange | null {
   const session = selectionSessions.get(renderer);
   if (session === undefined || event.kind !== "drag_left") return null;
   session.active = { col: event.column, row: event.row };
@@ -7012,7 +8587,10 @@ export function dragSelection(renderer: Renderer, event: MouseEventJs): Selectio
  * release, or `null` when no session was active (or the event is not an
  * `up_*` release).
  */
-export function endSelection(renderer: Renderer, event: MouseEventJs): SelectionRange | null {
+export function endSelection(
+  renderer: Renderer,
+  event: MouseEventJs,
+): SelectionRange | null {
   const session = selectionSessions.get(renderer);
   if (session === undefined || !event.kind.startsWith("up")) return null;
   selectionSessions.delete(renderer);
@@ -7022,8 +8600,8 @@ export function endSelection(renderer: Renderer, event: MouseEventJs): Selection
     col2: session.active.col,
     row2: session.active.row,
   };
-  const bare =
-    session.anchor.col === session.active.col && session.anchor.row === session.active.row;
+  const bare = session.anchor.col === session.active.col &&
+    session.anchor.row === session.active.row;
   if (
     bare && session.prior !== null &&
     !rangeContains(session.prior, session.anchor.col, session.anchor.row)
@@ -7061,7 +8639,10 @@ export function copySelection(renderer: Renderer): void {
  * different mapping.
  */
 export function selectionKey(renderer: Renderer, event: KeyEvent): boolean {
-  if (event.name === "char" && event.char === "c" && event.ctrl && event.shift && !event.alt) {
+  if (
+    event.name === "char" && event.char === "c" && event.ctrl && event.shift &&
+    !event.alt
+  ) {
     copySelection(renderer);
     return true;
   }
@@ -7188,11 +8769,15 @@ export class Renderer {
       use_alt_screen: options.useAltScreen ?? true,
     };
     if (options.title !== undefined) nativeOptions.title = options.title;
-    if (options.headless !== undefined) nativeOptions.headless = options.headless;
-    if (options.keyboardEnhancement !== undefined)
+    if (options.headless !== undefined) {
+      nativeOptions.headless = options.headless;
+    }
+    if (options.keyboardEnhancement !== undefined) {
       nativeOptions.keyboard_enhancement = options.keyboardEnhancement;
-    if (options.scrollOptimization !== undefined)
+    }
+    if (options.scrollOptimization !== undefined) {
       nativeOptions.scroll_optimization = options.scrollOptimization;
+    }
     if (options.size !== undefined) {
       nativeOptions.width = options.size.width;
       nativeOptions.height = options.size.height;
@@ -7307,7 +8892,13 @@ export class Renderer {
     visible: boolean;
     blink: boolean;
   }): void {
-    this.#native.set_cursor(options.x, options.y, options.shape, options.visible, options.blink);
+    this.#native.set_cursor(
+      options.x,
+      options.y,
+      options.shape,
+      options.visible,
+      options.blink,
+    );
   }
 
   /**
@@ -7425,7 +9016,9 @@ export class Renderer {
         // pending). On `"resume"` the screen was invalidated, so the app
         // must re-render.
         if (event.lifecycle !== undefined) {
-          for (const handler of this.#lifecycleHandlers) handler(event.lifecycle);
+          for (const handler of this.#lifecycleHandlers) {
+            handler(event.lifecycle);
+          }
         }
         break;
     }
@@ -7509,7 +9102,10 @@ export class Renderer {
       // the delay is exactly 0 — the next macrotask, unchanged from the
       // unthrottled schedule. The microtask fallback stays throttle-free.
       const delay = this.#maxFps > 0
-        ? Math.max(0, 1000 / this.#maxFps - (performance.now() - this.#lastNativeRenderAt))
+        ? Math.max(
+          0,
+          1000 / this.#maxFps - (performance.now() - this.#lastNativeRenderAt),
+        )
         : 0;
       this.#frameTimer = setTimeout(run, delay);
     } else {
@@ -7728,7 +9324,10 @@ export function framesEqual(a: string[], b: string[]): boolean {
  * when set" contract, so the comparison is the full equality contract for
  * styled frames. The styled counterpart of {@link framesEqual}.
  */
-export function styledFramesEqual(a: StyleRunJs[][], b: StyleRunJs[][]): boolean {
+export function styledFramesEqual(
+  a: StyleRunJs[][],
+  b: StyleRunJs[][],
+): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
     const rowA = a[i]!;

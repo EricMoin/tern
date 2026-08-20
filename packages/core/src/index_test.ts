@@ -16,56 +16,30 @@
  */
 
 import {
+  activateTab,
   BarChart,
   Box,
-  Canvas,
-  Chart,
-  DIFF_ADD_FG,
-  DIFF_DEL_FG,
-  DiffView,
-  FocusManager,
-  Input,
-  Keymap,
-  MODAL_BACKDROP_BG,
-  MODAL_Z_INDEX,
-  Modal,
-  Node,
-  PANEL_DRAG_MIN_SIZE,
-  Panels,
-  PROGRESS_DEFAULT_WIDTH,
-  PROGRESS_EMPTY_CHAR,
-  PROGRESS_FILL_CHAR,
-  Progress,
-  SCROLLBAR_THUMB_CHAR,
-  SCROLLBAR_TRACK_CHAR,
-  SELECT_FILTER_PLACEHOLDER,
-  SELECTION_DOUBLE_CLICK_MS,
-  STREAM_AFFORDANCE_CHAR,
-  ScrollView,
-  Select,
-  Sparkline,
-  Spinner,
-  StatusBar,
-  StreamingText,
-  TAB_ACTIVE_MARKER,
-  TAB_CLOSE_CHAR,
-  TAB_PRIMARY_BG,
-  TAB_PRIMARY_FG,
-  Table,
-  Tabs,
-  Text,
-  Textarea,
-  THEME_COMPONENTS,
-  THEME_ROLES,
-  activateTab,
   brailleCell,
   brailleRows,
+  Canvas,
+  Chart,
+  CHECK_PRIMARY_BG,
+  CHECK_PRIMARY_FG,
+  Checkbox,
+  CHECKBOX_CHECKED_GLYPH,
+  CHECKBOX_UNCHECKED_GLYPH,
+  checkboxKey,
+  closeMenu,
+  closeModal,
   closeTab,
   collapsePanel,
-  closeModal,
+  collapseTreeNode,
   copySelection,
   createRenderer,
   defaultTheme,
+  DIFF_ADD_FG,
+  DIFF_DEL_FG,
+  DiffView,
   dragPanels,
   dragSelection,
   editKey,
@@ -73,71 +47,122 @@ import {
   endPanelDrag,
   endSelection,
   expandPanel,
-  followTail,
+  expandTreeNode,
   focusAt,
+  FocusManager,
   focusManager,
   focusPanel,
+  followTail,
   framesEqual,
+  HelpPanel,
+  highlightCode,
+  Input,
   isStreamFollowing,
+  Keymap,
   keymap,
   measureText,
+  Menu,
+  MENU_Z_INDEX,
+  menuClick,
+  menuHover,
+  menuKey,
   mergeTheme,
+  Modal,
+  MODAL_BACKDROP_BG,
+  MODAL_Z_INDEX,
   name,
+  Node,
+  openMenu,
   openModal,
+  PANEL_DRAG_MIN_SIZE,
+  Panels,
   pasteInto,
   pasteIntoTextarea,
+  Progress,
+  PROGRESS_DEFAULT_WIDTH,
+  PROGRESS_EMPTY_CHAR,
+  PROGRESS_FILL_CHAR,
+  Radio,
+  RADIO_SELECTED_GLYPH,
+  RADIO_UNSELECTED_GLYPH,
+  radioKey,
   resolveTheme,
+  SCROLLBAR_THUMB_CHAR,
+  SCROLLBAR_TRACK_CHAR,
   scrollBy,
   scrollTo,
   scrollToBottom,
   scrollTop,
+  ScrollView,
+  Select,
+  SELECT_FILTER_PLACEHOLDER,
+  SELECTION_DOUBLE_CLICK_MS,
+  selectionKey,
   selectKey,
   selectWordAt,
-  selectionKey,
+  setProgress,
   setSelectionClockForTesting,
+  Sparkline,
+  Spinner,
   startPanelDrag,
   startSelection,
+  StatusBar,
+  STREAM_AFFORDANCE_CHAR,
+  StreamingText,
   styledFramesEqual,
   syncStreamTail,
+  TAB_ACTIVE_MARKER,
+  TAB_CLOSE_CHAR,
+  TAB_PRIMARY_BG,
+  TAB_PRIMARY_FG,
+  Table,
   tableKey,
+  Tabs,
   tabsKey,
+  Text,
+  Textarea,
+  THEME_COMPONENTS,
+  THEME_ROLES,
   tick,
+  Toggle,
+  TOGGLE_OFF_GLYPH,
+  TOGGLE_ON_GLYPH,
+  toggleKey,
+  togglePanel,
   toggleTreeNode,
-  expandTreeNode,
-  collapseTreeNode,
   Tree,
-  treeKey,
   TREE_COLLAPSED_GLYPH,
   TREE_EXPANDED_GLYPH,
   TREE_GUIDE_VERTICAL,
-  visibleTreeRows,
-  togglePanel,
+  treeKey,
   useFocus,
   version,
   visibleOptions,
   visibleTableRows,
+  visibleTreeRows,
   wheelScroll,
-  setProgress,
   wrapLineWithOffsets,
 } from "./index.ts";
 import type {
+  HelpPanelProps,
   KeyCombo,
+  MenuItem,
   NodeProps,
   ProgressProps,
   SelectOption,
   StyleRunJs,
-  TabSpec,
   TableColumn,
   TableState,
+  TabSpec,
   TextareaProps,
-  TreeNode,
-  TreeRow,
   Theme,
   ThemeOverrides,
   ThemeResolvableProps,
+  TreeNode,
+  TreeRow,
 } from "./index.ts";
-import { setAddonForTesting, loadAddon } from "./addon.ts";
-import type { TernAddon } from "./addon.ts";
+import { loadAddon, setAddonForTesting } from "./addon.ts";
+import type { HighlightSpanJs, TernAddon } from "./addon.ts";
 import type {
   KeyEvent,
   MouseEventJs,
@@ -156,7 +181,8 @@ import type {
 
 /** The push callback registered by the fake `start_event_stream` (the
  * Renderer constructor registers it; tests feed events through it). */
-let streamCallback: ((err: Error | null, event: TernEventJs) => void) | null = null;
+let streamCallback: ((err: Error | null, event: TernEventJs) => void) | null =
+  null;
 
 /** The last `(col, row)` passed to the fake `hit_test`, or `null`. */
 let lastHitTest: [number, number] | null = null;
@@ -175,7 +201,9 @@ let lastClipboard: string | null = null;
 let lastRendererOptions: unknown = null;
 
 /** The native node types materialized through the fake `create_node`. */
-const createdNodes: Array<{ type: string; props: Record<string, unknown> | null }> = [];
+const createdNodes: Array<
+  { type: string; props: Record<string, unknown> | null }
+> = [];
 
 /** Per-handle `content_size` overrides for the panel-drag geometry tests
  * (keyed by the `FakeNodeHandle` instance backing the node). */
@@ -188,7 +216,8 @@ let lastSnapshotSize: [number | undefined, number | undefined] | null = null;
 /** The last `(width, height)` passed to the fake
  * `render_to_buffer_styled`, or `null` when the styled snapshot method was
  * never called. */
-let lastStyledSnapshotSize: [number | undefined, number | undefined] | null = null;
+let lastStyledSnapshotSize: [number | undefined, number | undefined] | null =
+  null;
 
 /** The last `FakeTuiRenderer` constructed (via the fake addon), or `null`.
  * Tests read its `renderCalls` to assert native render counts. */
@@ -257,7 +286,8 @@ class FakeTuiRenderer {
   /** The renderer's selection overlay: the inclusive cell rect
    * `{ col1, row1, col2, row2 }` in viewport coordinates, or `null` when
    * no selection is set. Mirrors the real per-renderer selection state. */
-  selection: { col1: number; row1: number; col2: number; row2: number } | null = null;
+  selection: { col1: number; row1: number; col2: number; row2: number } | null =
+    null;
   /** The rows of the last painted frame (a `render` or `render_to_buffer`
    * snapshot), the fake's stand-in for the native retained buffer that
    * `selection_text` / `selection_word_range` read. */
@@ -272,7 +302,9 @@ class FakeTuiRenderer {
   root(): NodeHandle {
     return this.rootHandle as unknown as NodeHandle;
   }
-  start_event_stream(callback: (err: Error | null, event: TernEventJs) => void): void {
+  start_event_stream(
+    callback: (err: Error | null, event: TernEventJs) => void,
+  ): void {
     streamCallback = callback;
   }
   hit_test(col: number, row: number): bigint[] {
@@ -287,7 +319,11 @@ class FakeTuiRenderer {
     this.size = { ...FAKE_TERMINAL_SIZE };
     // Record the frame a render paints, so `selection_text` reads the last
     // painted frame (the real renderer retains the painted buffer).
-    this.lastRows = paintSceneRows(this.rootHandle, this.size.width, this.size.height);
+    this.lastRows = paintSceneRows(
+      this.rootHandle,
+      this.size.width,
+      this.size.height,
+    );
   }
   render_to_buffer(width?: number, height?: number): string[] {
     lastSnapshotSize = [width, height];
@@ -356,8 +392,20 @@ class FakeTuiRenderer {
   /** The renderer's caret override: `{ x, y, shape, visible, blink }` in
    * native terms, or `null` when no cursor is set (the legacy position-only
    * flush). Mirrors the real per-renderer cursor state. */
-  cursor: { x: number; y: number; shape: string; visible: boolean; blink: boolean } | null = null;
-  set_cursor(x: number, y: number, shape: string, visible: boolean, blink: boolean): void {
+  cursor: {
+    x: number;
+    y: number;
+    shape: string;
+    visible: boolean;
+    blink: boolean;
+  } | null = null;
+  set_cursor(
+    x: number,
+    y: number,
+    shape: string,
+    visible: boolean,
+    blink: boolean,
+  ): void {
     this.cursor = { x, y, shape, visible, blink };
   }
   clear_cursor(): void {
@@ -444,7 +492,10 @@ function paintSceneRows(
 ): string[] {
   const w = width ?? 6;
   const h = height ?? 3;
-  const glyphs: Record<string, readonly [string, string, string, string, string, string]> = {
+  const glyphs: Record<
+    string,
+    readonly [string, string, string, string, string, string]
+  > = {
     rounded: ["┌", "┐", "└", "┘", "─", "│"],
     plain: ["+", "+", "+", "+", "-", "|"],
     double: ["╔", "╗", "╚", "╝", "═", "║"],
@@ -461,9 +512,13 @@ function paintSceneRows(
         // composition — the canvas element's braille rows, a bare flex column
         // — stacks like the real compositor. A single-child box (every legacy
         // golden) paints exactly as before (row `pad` / row 0).
-        const pad = typeof child.props.padding === "number" ? child.props.padding : 0;
+        const pad = typeof child.props.padding === "number"
+          ? child.props.padding
+          : 0;
         child.children.forEach((textChild, ti) => {
-          const text = typeof textChild?.props.text === "string" ? textChild.props.text : "";
+          const text = typeof textChild?.props.text === "string"
+            ? textChild.props.text
+            : "";
           const runs = fakeClusterRuns(text);
           const innerWidth = runs.reduce((sum, run) => sum + run.width, 0);
           const bw = innerWidth + 2 * pad;
@@ -474,10 +529,14 @@ function paintSceneRows(
             let c = " ";
             if (g !== undefined) {
               if (y === 0) c = x === 0 ? g[0] : x === bw - 1 ? g[1] : g[4];
-              else if (y === bh - 1) c = x === 0 ? g[2] : x === bw - 1 ? g[3] : g[4];
-              else c = x === 0 || x === bw - 1 ? g[5] : " ";
+              else if (y === bh - 1) {
+                c = x === 0 ? g[2] : x === bw - 1 ? g[3] : g[4];
+              } else c = x === 0 || x === bw - 1 ? g[5] : " ";
             }
-            if (g !== undefined && y === contentRow && x >= pad && x < pad + innerWidth) {
+            if (
+              g !== undefined && y === contentRow && x >= pad &&
+              x < pad + innerWidth
+            ) {
               c = clusterTextAt(runs, x - pad);
             } else if (g === undefined && y === ti && x < innerWidth) {
               // A borderless leaf (bare text / textarea / input / canvas)
@@ -545,8 +604,12 @@ function leafStyle(leaf: FakeNodeHandle | undefined): FakeCellStyle | null {
   // Same for the underline aliases: the JS layer translates camelCase
   // `underlineStyle` / `underlineColor` to the scene-facing
   // `underline_style` / `underline_color` keys, which the fake lifts.
-  if (typeof p.underline_style === "string") style.underlineStyle = p.underline_style;
-  if (typeof p.underline_color === "string") style.underlineColor = p.underline_color;
+  if (typeof p.underline_style === "string") {
+    style.underlineStyle = p.underline_style;
+  }
+  if (typeof p.underline_color === "string") {
+    style.underlineColor = p.underline_color;
+  }
   return Object.keys(style).length === 0 ? null : style;
 }
 
@@ -594,7 +657,10 @@ function paintSceneRuns(
 ): StyleRunJs[][] {
   const w = width ?? 6;
   const h = height ?? 3;
-  const glyphs: Record<string, readonly [string, string, string, string, string, string]> = {
+  const glyphs: Record<
+    string,
+    readonly [string, string, string, string, string, string]
+  > = {
     rounded: ["┌", "┐", "└", "┘", "─", "│"],
     plain: ["+", "+", "+", "+", "-", "|"],
     double: ["╔", "╗", "╚", "╝", "═", "║"],
@@ -611,9 +677,13 @@ function paintSceneRuns(
         // paints content row `pad + ti` (borderless: row `ti`), so a
         // multi-leaf composition stacks like the real compositor; a
         // single-child box keeps the original geometry.
-        const pad = typeof child.props.padding === "number" ? child.props.padding : 0;
+        const pad = typeof child.props.padding === "number"
+          ? child.props.padding
+          : 0;
         child.children.forEach((textChild, ti) => {
-          const text = typeof textChild?.props.text === "string" ? textChild.props.text : "";
+          const text = typeof textChild?.props.text === "string"
+            ? textChild.props.text
+            : "";
           const runs = fakeClusterRuns(text);
           const innerWidth = runs.reduce((sum, run) => sum + run.width, 0);
           const bw = innerWidth + 2 * pad;
@@ -624,10 +694,14 @@ function paintSceneRuns(
             let c = " ";
             if (g !== undefined) {
               if (y === 0) c = x === 0 ? g[0] : x === bw - 1 ? g[1] : g[4];
-              else if (y === bh - 1) c = x === 0 ? g[2] : x === bw - 1 ? g[3] : g[4];
-              else c = x === 0 || x === bw - 1 ? g[5] : " ";
+              else if (y === bh - 1) {
+                c = x === 0 ? g[2] : x === bw - 1 ? g[3] : g[4];
+              } else c = x === 0 || x === bw - 1 ? g[5] : " ";
             }
-            if (g !== undefined && c !== " " && !(y === contentRow && x >= pad && x < pad + innerWidth)) {
+            if (
+              g !== undefined && c !== " " &&
+              !(y === contentRow && x >= pad && x < pad + innerWidth)
+            ) {
               // A `border_color` on the box paints its border glyphs with that
               // color as their fg (the real compositor swaps the cell style's
               // fg — see paint_box), so the styled runs report it; interior and
@@ -635,7 +709,10 @@ function paintSceneRuns(
               const borderColor = child.props.border_color;
               if (typeof borderColor === "string") style = { fg: borderColor };
             }
-            if (g !== undefined && y === contentRow && x >= pad && x < pad + innerWidth) {
+            if (
+              g !== undefined && y === contentRow && x >= pad &&
+              x < pad + innerWidth
+            ) {
               c = clusterTextAt(runs, x - pad);
               style = leafStyle(textChild);
             } else if (g === undefined && y === ti && x < innerWidth) {
@@ -804,7 +881,13 @@ Deno.test("re-exported napi types are declared", () => {
   // Compile-time contract: the generated napi declarations must be reachable
   // through @tern-tui/core. `KeyEvent`/`TuiRendererOptions`/`NodeHandle`/
   // `TuiRenderer` are type-only; this function body only needs to type-check.
-  const ev: KeyEvent = { name: "char", char: "q", ctrl: false, alt: false, shift: false };
+  const ev: KeyEvent = {
+    name: "char",
+    char: "q",
+    ctrl: false,
+    alt: false,
+    shift: false,
+  };
   const opts: TuiRendererOptions = { exit_on_ctrl_c: true };
   let handle: NodeHandle | undefined;
   let renderer: TuiRenderer | undefined;
@@ -824,7 +907,9 @@ Deno.test("Text builds a text node with props", () => {
   if (node.props.text !== "hello") throw new Error(`text = ${node.props.text}`);
   if (node.props.bold !== true) throw new Error(`bold = ${node.props.bold}`);
   if (node.props.fg !== "#ff0000") throw new Error(`fg = ${node.props.fg}`);
-  if (node.children.length !== 0) throw new Error("text nodes have no children");
+  if (node.children.length !== 0) {
+    throw new Error("text nodes have no children");
+  }
 });
 
 Deno.test("Text() with no props defaults to an empty prop map", () => {
@@ -843,9 +928,13 @@ Deno.test("Box builds a box node with children", () => {
   if (node.props.border_style !== "rounded") {
     throw new Error(`border_style = ${node.props.border_style}`);
   }
-  if (node.props.padding !== 1) throw new Error(`padding = ${node.props.padding}`);
+  if (node.props.padding !== 1) {
+    throw new Error(`padding = ${node.props.padding}`);
+  }
   const children = node.children;
-  if (children.length !== 2) throw new Error(`children.length = ${children.length}`);
+  if (children.length !== 2) {
+    throw new Error(`children.length = ${children.length}`);
+  }
   if (children[0] !== a || children[1] !== b) {
     throw new Error("children order not preserved");
   }
@@ -873,7 +962,9 @@ Deno.test("props and children getters return copies", () => {
   if (node.props.width !== 5) throw new Error("props getter must be a copy");
   const kids = node.children as Node[];
   kids.length = 0;
-  if (node.children.length !== 1) throw new Error("children getter must be a copy");
+  if (node.children.length !== 1) {
+    throw new Error("children getter must be a copy");
+  }
 });
 
 Deno.test("addChild records children on a detached parent", () => {
@@ -913,7 +1004,9 @@ Deno.test("insertBefore before-first and between siblings reflects the new order
   let kids = parent.children;
   if (kids.length !== 4) throw new Error(`children.length = ${kids.length}`);
   if (kids[0] !== x || kids[1] !== a || kids[2] !== b || kids[3] !== c) {
-    throw new Error("insertBefore before-first must place the child ahead of the anchor");
+    throw new Error(
+      "insertBefore before-first must place the child ahead of the anchor",
+    );
   }
 
   // Between siblings: insert y between a and b.
@@ -921,14 +1014,21 @@ Deno.test("insertBefore before-first and between siblings reflects the new order
   parent.insertBefore(y, b);
   kids = parent.children;
   if (kids.length !== 5) throw new Error(`children.length = ${kids.length}`);
-  if (kids[0] !== x || kids[1] !== a || kids[2] !== y || kids[3] !== b || kids[4] !== c) {
-    throw new Error("insertBefore between siblings must preserve the surrounding order");
+  if (
+    kids[0] !== x || kids[1] !== a || kids[2] !== y || kids[3] !== b ||
+    kids[4] !== c
+  ) {
+    throw new Error(
+      "insertBefore between siblings must preserve the surrounding order",
+    );
   }
 
   // The detached parent (and the inserted children) stay unattached; the
   // reorder is recorded positionally and lands in the scene on attach.
   if (parent.attached) throw new Error("detached parent must stay unattached");
-  if (x.attached || y.attached) throw new Error("inserted children must stay unattached");
+  if (x.attached || y.attached) {
+    throw new Error("inserted children must stay unattached");
+  }
 });
 
 Deno.test("insertBefore rejects an anchor that is not a child of this node", () => {
@@ -945,7 +1045,9 @@ Deno.test("insertBefore rejects an anchor that is not a child of this node", () 
   }
   if (!threw) throw new Error("inserting before a foreign anchor must throw");
   const kids = parent.children;
-  if (kids.length !== 1) throw new Error("failed insert must not mutate children");
+  if (kids.length !== 1) {
+    throw new Error("failed insert must not mutate children");
+  }
   if (kids[0] !== a) throw new Error("failed insert must not reorder children");
 });
 
@@ -963,8 +1065,12 @@ Deno.test("insertBefore rejects duplicate children", () => {
   }
   if (!threw) throw new Error("inserting an existing child must throw");
   const kids = parent.children;
-  if (kids.length !== 2) throw new Error("failed insert must not mutate children");
-  if (kids[0] !== a || kids[1] !== b) throw new Error("failed insert must not reorder children");
+  if (kids.length !== 2) {
+    throw new Error("failed insert must not mutate children");
+  }
+  if (kids[0] !== a || kids[1] !== b) {
+    throw new Error("failed insert must not reorder children");
+  }
 });
 
 Deno.test("setProps works on a detached template", () => {
@@ -1004,7 +1110,9 @@ Deno.test("setProp on a detached template records the prop for materialization",
     }
     if (created.props?.text !== "new" || created.props?.bold !== true) {
       throw new Error(
-        `materialized props must carry the setProp writes, got ${JSON.stringify(created.props)}`,
+        `materialized props must carry the setProp writes, got ${
+          JSON.stringify(created.props)
+        }`,
       );
     }
   });
@@ -1016,16 +1124,24 @@ Deno.test("setProp on an attached node routes through the native single-key path
     const child = Text({ text: "a" });
     renderer.root.addChild(child);
     const handle = fakeHandleOf(child);
-    if (handle === null) throw new Error("attached child must have a native handle");
+    if (handle === null) {
+      throw new Error("attached child must have a native handle");
+    }
     child.setProp("fg", "#ff0000");
     if (
       handle.propWrites.length !== 1 ||
       handle.propWrites[0]![0] !== "fg" ||
       handle.propWrites[0]![1] !== "#ff0000"
     ) {
-      throw new Error(`expected one set_prop("fg", ...), got ${JSON.stringify(handle.propWrites)}`);
+      throw new Error(
+        `expected one set_prop("fg", ...), got ${
+          JSON.stringify(handle.propWrites)
+        }`,
+      );
     }
-    if (handle.fullWrites !== 0) throw new Error("setProp must not call the full set_props");
+    if (handle.fullWrites !== 0) {
+      throw new Error("setProp must not call the full set_props");
+    }
     if (child.props.fg !== "#ff0000") {
       throw new Error("node.props must mirror the single-key write");
     }
@@ -1038,22 +1154,30 @@ Deno.test("setProp with an equal value performs no native call", () => {
     const child = Text({ text: "a" });
     renderer.root.addChild(child);
     const handle = fakeHandleOf(child);
-    if (handle === null) throw new Error("attached child must have a native handle");
+    if (handle === null) {
+      throw new Error("attached child must have a native handle");
+    }
     child.setProp("text", "a"); // equal → skipped at the TS mirror
     const equalWrites = handle.propWrites.slice();
     if (equalWrites.length !== 0) {
       throw new Error(
-        `an equal setProp must not cross into the native layer, got ${JSON.stringify(equalWrites)}`,
+        `an equal setProp must not cross into the native layer, got ${
+          JSON.stringify(equalWrites)
+        }`,
       );
     }
     child.setProp("text", "b"); // changed → exactly one native write
     const writes = handle.propWrites.slice();
-    if (writes.length !== 1 || writes[0] === undefined || writes[0][1] !== "b") {
+    if (
+      writes.length !== 1 || writes[0] === undefined || writes[0][1] !== "b"
+    ) {
       throw new Error(
         `expected one set_prop("text", "b"), got ${JSON.stringify(writes)}`,
       );
     }
-    if (child.props.text !== "b") throw new Error("node.props must reflect the change");
+    if (child.props.text !== "b") {
+      throw new Error("node.props must reflect the change");
+    }
   });
 });
 
@@ -1063,7 +1187,9 @@ Deno.test("setProps on an attached node sends only changed keys through set_prop
     const child = Text({ text: "a", bold: true });
     renderer.root.addChild(child);
     const handle = fakeHandleOf(child);
-    if (handle === null) throw new Error("attached child must have a native handle");
+    if (handle === null) {
+      throw new Error("attached child must have a native handle");
+    }
     child.setProps({ text: "b", bold: true });
     if (
       handle.propWrites.length !== 1 ||
@@ -1071,7 +1197,9 @@ Deno.test("setProps on an attached node sends only changed keys through set_prop
       handle.propWrites[0]![1] !== "b"
     ) {
       throw new Error(
-        `only the changed key may go through set_prop, got ${JSON.stringify(handle.propWrites)}`,
+        `only the changed key may go through set_prop, got ${
+          JSON.stringify(handle.propWrites)
+        }`,
       );
     }
     if (handle.fullWrites !== 0) {
@@ -1086,10 +1214,17 @@ Deno.test("setProps on an attached node sends only changed keys through set_prop
 Deno.test("percentage size props pass through as strings and snapshot headlessly", () => {
   withFakeAddon(() => {
     const renderer = createRenderer();
-    const child = Box({ width: "50%", min_width: "25%", max_width: "75%", height: 10 });
+    const child = Box({
+      width: "50%",
+      min_width: "25%",
+      max_width: "75%",
+      height: 10,
+    });
     renderer.root.addChild(child);
     const handle = fakeHandleOf(child);
-    if (handle === null) throw new Error("attached child must have a native handle");
+    if (handle === null) {
+      throw new Error("attached child must have a native handle");
+    }
     // The `"N%"` strings cross the JS -> native boundary verbatim: the
     // binding's json_to_prop_value maps them to PropValue::Str, which
     // tern-layout reads as a percentage of the containing block's size.
@@ -1100,7 +1235,9 @@ Deno.test("percentage size props pass through as strings and snapshot headlessly
       handle.props.height !== 10
     ) {
       throw new Error(
-        `percentage size props must reach the native handle, got ${JSON.stringify(handle.props)}`,
+        `percentage size props must reach the native handle, got ${
+          JSON.stringify(handle.props)
+        }`,
       );
     }
     if (child.props.width !== "50%" || child.props.min_width !== "25%") {
@@ -1108,10 +1245,17 @@ Deno.test("percentage size props pass through as strings and snapshot headlessly
     }
     // A percentage-updated setProps goes through the single-key path (the
     // other keys are kept, so no key is removed and no full-map set_props).
-    child.setProps({ width: "60%", min_width: "25%", max_width: "75%", height: 10 });
+    child.setProps({
+      width: "60%",
+      min_width: "25%",
+      max_width: "75%",
+      height: 10,
+    });
     if (handle.propWrites.length !== 1 || handle.propWrites[0]![1] !== "60%") {
       throw new Error(
-        `expected one set_prop("width", "60%"), got ${JSON.stringify(handle.propWrites)}`,
+        `expected one set_prop("width", "60%"), got ${
+          JSON.stringify(handle.propWrites)
+        }`,
       );
     }
     if (handle.fullWrites !== 0) {
@@ -1158,12 +1302,19 @@ Deno.test("grid props pass through to the scene props verbatim", () => {
       gridHandle.props.grid_auto_flow !== "row-dense"
     ) {
       throw new Error(
-        `grid container props must reach the native handle, got ${JSON.stringify(gridHandle.props)}`,
+        `grid container props must reach the native handle, got ${
+          JSON.stringify(gridHandle.props)
+        }`,
       );
     }
-    if (itemHandle.props.grid_row !== 2 || itemHandle.props.grid_column !== "span 2") {
+    if (
+      itemHandle.props.grid_row !== 2 ||
+      itemHandle.props.grid_column !== "span 2"
+    ) {
       throw new Error(
-        `grid item placement must reach the native handle, got ${JSON.stringify(itemHandle.props)}`,
+        `grid item placement must reach the native handle, got ${
+          JSON.stringify(itemHandle.props)
+        }`,
       );
     }
     if (
@@ -1179,9 +1330,13 @@ Deno.test("grid props pass through to the scene props verbatim", () => {
     // A grid-prop setProps goes through the single-key path (the other keys
     // are kept, so no key is removed and no full-map set_props).
     item.setProps({ grid_row: 3, grid_column: "span 2" });
-    if (itemHandle.propWrites.length !== 1 || itemHandle.propWrites[0]![1] !== 3) {
+    if (
+      itemHandle.propWrites.length !== 1 || itemHandle.propWrites[0]![1] !== 3
+    ) {
       throw new Error(
-        `expected one set_prop("grid_row", 3), got ${JSON.stringify(itemHandle.propWrites)}`,
+        `expected one set_prop("grid_row", 3), got ${
+          JSON.stringify(itemHandle.propWrites)
+        }`,
       );
     }
     if (itemHandle.fullWrites !== 0) {
@@ -1204,12 +1359,16 @@ Deno.test("setProps with equal props performs no native call", () => {
     const child = Text({ text: "a", bold: true });
     renderer.root.addChild(child);
     const handle = fakeHandleOf(child);
-    if (handle === null) throw new Error("attached child must have a native handle");
+    if (handle === null) {
+      throw new Error("attached child must have a native handle");
+    }
     child.setProps({ text: "a", bold: true }); // fully equal → nothing to write
     if (handle.propWrites.length !== 0 || handle.fullWrites !== 0) {
       throw new Error(
         `an equal setProps must not touch the native layer ` +
-          `(propWrites=${JSON.stringify(handle.propWrites)}, fullWrites=${handle.fullWrites})`,
+          `(propWrites=${
+            JSON.stringify(handle.propWrites)
+          }, fullWrites=${handle.fullWrites})`,
       );
     }
     if (child.props.text !== "a" || child.props.bold !== true) {
@@ -1224,15 +1383,25 @@ Deno.test("setProps with a removed key falls back to the full-map path", () => {
     const child = Text({ text: "a", bold: true });
     renderer.root.addChild(child);
     const handle = fakeHandleOf(child);
-    if (handle === null) throw new Error("attached child must have a native handle");
+    if (handle === null) {
+      throw new Error("attached child must have a native handle");
+    }
     child.setProps({ text: "a" }); // bold removed
     if (handle.fullWrites !== 1) {
-      throw new Error(`a removal needs the full-map replace, got fullWrites=${handle.fullWrites}`);
+      throw new Error(
+        `a removal needs the full-map replace, got fullWrites=${handle.fullWrites}`,
+      );
     }
     if (handle.propWrites.length !== 0) {
-      throw new Error(`the removal path must not use set_prop, got ${JSON.stringify(handle.propWrites)}`);
+      throw new Error(
+        `the removal path must not use set_prop, got ${
+          JSON.stringify(handle.propWrites)
+        }`,
+      );
     }
-    if ("bold" in child.props) throw new Error("removed key must leave node.props");
+    if ("bold" in child.props) {
+      throw new Error("removed key must leave node.props");
+    }
   });
 });
 
@@ -1242,7 +1411,9 @@ Deno.test("setProps strips undefined values like the binding drops them", () => 
     const child = Text({ text: "a", bold: true });
     renderer.root.addChild(child);
     const handle = fakeHandleOf(child);
-    if (handle === null) throw new Error("attached child must have a native handle");
+    if (handle === null) {
+      throw new Error("attached child must have a native handle");
+    }
     // `undefined` has no scene representation: it must be treated as absent,
     // so this is a removal (bold → undefined) → full-map fallback, and the
     // mirror must not retain the phantom key. Built via a Record because
@@ -1250,20 +1421,30 @@ Deno.test("setProps strips undefined values like the binding drops them", () => 
     const next: Record<string, unknown> = { text: "a" };
     next.bold = undefined;
     child.setProps(next as NodeProps);
-    if (handle.fullWrites !== 1) throw new Error("undefined values must count as removals");
-    if ("bold" in child.props) throw new Error("undefined-valued keys must be stripped");
-    if (child.props.text !== "a") throw new Error("remaining props must be intact");
+    if (handle.fullWrites !== 1) {
+      throw new Error("undefined values must count as removals");
+    }
+    if ("bold" in child.props) {
+      throw new Error("undefined-valued keys must be stripped");
+    }
+    if (child.props.text !== "a") {
+      throw new Error("remaining props must be intact");
+    }
   });
 });
 
 Deno.test("StreamingText builds a streaming_text node", () => {
   const node = StreamingText();
-  if (!(node instanceof Node)) throw new Error("StreamingText() must return a Node");
+  if (!(node instanceof Node)) {
+    throw new Error("StreamingText() must return a Node");
+  }
   if (node.type !== "streaming_text") throw new Error(`type = ${node.type}`);
   if (Object.keys(node.props).length !== 0) {
     throw new Error(`expected empty props, got ${JSON.stringify(node.props)}`);
   }
-  if (node.children.length !== 0) throw new Error("streaming_text nodes have no children");
+  if (node.children.length !== 0) {
+    throw new Error("streaming_text nodes have no children");
+  }
   const styled = StreamingText({ fg: "#00ff00", bold: true });
   if (styled.props.fg !== "#00ff00" || styled.props.bold !== true) {
     throw new Error("StreamingText must forward props");
@@ -1278,14 +1459,24 @@ Deno.test("appendSpan on a detached node records spans", () => {
   if (spans.length !== 2) throw new Error(`spans.length = ${spans.length}`);
   const first = spans[0];
   const second = spans[1];
-  if (first === undefined || second === undefined) throw new Error("recorded spans missing");
+  if (first === undefined || second === undefined) {
+    throw new Error("recorded spans missing");
+  }
   if (first.text !== "hello") throw new Error(`spans[0].text = ${first.text}`);
-  if (first.style?.bold !== true) throw new Error("span style must be recorded");
-  if (second.text !== "world") throw new Error(`spans[1].text = ${second.text}`);
-  if (second.style !== undefined) throw new Error("omitted style must stay undefined");
+  if (first.style?.bold !== true) {
+    throw new Error("span style must be recorded");
+  }
+  if (second.text !== "world") {
+    throw new Error(`spans[1].text = ${second.text}`);
+  }
+  if (second.style !== undefined) {
+    throw new Error("omitted style must stay undefined");
+  }
   if (node.attached) throw new Error("node must stay unattached");
   (spans as Span[]).length = 0;
-  if (node.spans.length !== 2) throw new Error("spans getter must return a copy");
+  if (node.spans.length !== 2) {
+    throw new Error("spans getter must return a copy");
+  }
 });
 
 Deno.test("setProps still works on streaming nodes", () => {
@@ -1298,7 +1489,9 @@ Deno.test("setProps still works on streaming nodes", () => {
 
 Deno.test("remove on a detached template returns false", () => {
   const node = Text({ text: "x" });
-  if (node.remove() !== false) throw new Error("detached remove must return false");
+  if (node.remove() !== false) {
+    throw new Error("detached remove must return false");
+  }
   if (node.attached) throw new Error("node must stay unattached");
 });
 
@@ -1312,9 +1505,13 @@ Deno.test("remove detaches the node from its parent's children list", () => {
   parent.addChild(c);
 
   // A parentless node (here the detached `parent` itself) cannot be removed.
-  if (parent.remove() !== false) throw new Error("parentless remove must return false");
+  if (parent.remove() !== false) {
+    throw new Error("parentless remove must return false");
+  }
 
-  if (b.remove() !== true) throw new Error("remove must return true when the node is in a tree");
+  if (b.remove() !== true) {
+    throw new Error("remove must return true when the node is in a tree");
+  }
   const kids = parent.children;
   if (kids.length !== 2) throw new Error(`children.length = ${kids.length}`);
   if (kids[0] !== a || kids[1] !== c) {
@@ -1351,7 +1548,9 @@ Deno.test("remove invalidates the whole subtree and re-attach restores it", () =
   parent.addChild(other);
   const deep = childBox.children[0]!;
 
-  if (childBox.remove() !== true) throw new Error("subtree root remove must return true");
+  if (childBox.remove() !== true) {
+    throw new Error("subtree root remove must return true");
+  }
   const kids = parent.children;
   if (kids.length !== 1 || kids[0] !== other) {
     throw new Error("removed subtree must leave only the remaining sibling");
@@ -1401,7 +1600,9 @@ Deno.test("the scene root cannot be removed", () => {
   // wrapRoot is @internal; the fake handle is never touched on this path
   // (remove() short-circuits on the root's missing parent).
   const root = Node.wrapRoot({} as never);
-  if (root.remove() !== false) throw new Error("the scene root must not be removable");
+  if (root.remove() !== false) {
+    throw new Error("the scene root must not be removable");
+  }
   if (!root.attached) throw new Error("the scene root must stay attached");
 });
 
@@ -1424,12 +1625,16 @@ Deno.test("createRenderer forwards useAltScreen and title options", () => {
     const renderer = createRenderer({ useAltScreen: false, title: "tern app" });
     // The Renderer routes the camelCase options to the snake_case native
     // constructor options, with the documented defaults for the unset ones.
-    if (JSON.stringify(lastRendererOptions) !== JSON.stringify({
-      exit_on_ctrl_c: false,
-      use_alt_screen: false,
-      title: "tern app",
-    })) {
-      throw new Error(`native options = ${JSON.stringify(lastRendererOptions)}`);
+    if (
+      JSON.stringify(lastRendererOptions) !== JSON.stringify({
+        exit_on_ctrl_c: false,
+        use_alt_screen: false,
+        title: "tern app",
+      })
+    ) {
+      throw new Error(
+        `native options = ${JSON.stringify(lastRendererOptions)}`,
+      );
     }
     renderer.destroy();
   });
@@ -1455,20 +1660,27 @@ Deno.test("createRenderer defaults useAltScreen to true", () => {
 
 Deno.test("createRenderer forwards headless and size to the native TuiRenderer, and the renderer works headlessly", () => {
   withFakeAddon(() => {
-    const renderer = createRenderer({ headless: true, size: { width: 40, height: 10 } });
+    const renderer = createRenderer({
+      headless: true,
+      size: { width: 40, height: 10 },
+    });
     // The camelCase headless surface routes to the snake_case native
     // constructor options: `headless` plus the virtual `width`/`height`
     // viewport, alongside the documented defaults for the unset options.
     // The fake records exactly what the real TuiRenderer constructor would
     // receive (the headless option shape of the binding's index.d.ts).
-    if (JSON.stringify(lastRendererOptions) !== JSON.stringify({
-      exit_on_ctrl_c: false,
-      use_alt_screen: true,
-      headless: true,
-      width: 40,
-      height: 10,
-    })) {
-      throw new Error(`native options = ${JSON.stringify(lastRendererOptions)}`);
+    if (
+      JSON.stringify(lastRendererOptions) !== JSON.stringify({
+        exit_on_ctrl_c: false,
+        use_alt_screen: true,
+        headless: true,
+        width: 40,
+        height: 10,
+      })
+    ) {
+      throw new Error(
+        `native options = ${JSON.stringify(lastRendererOptions)}`,
+      );
     }
     // A headless renderer is fully usable without a TTY: the scene paints
     // into the virtual buffer and the snapshot paths return rows at the
@@ -1483,7 +1695,9 @@ Deno.test("createRenderer forwards headless and size to the native TuiRenderer, 
       throw new Error(`headless size = ${JSON.stringify(renderer.size)}`);
     }
     renderer.destroy();
-    if (!renderer.destroyed) throw new Error("headless renderer must report destroyed");
+    if (!renderer.destroyed) {
+      throw new Error("headless renderer must report destroyed");
+    }
   });
 });
 
@@ -1495,7 +1709,11 @@ Deno.test("createRenderer omits headless and size when unset", () => {
     // is nothing to say) — and the virtual viewport keys appear only when
     // `size` is given, mirroring how `title` is omitted when unset.
     if (options.headless !== undefined) {
-      throw new Error(`headless must be omitted when unset: ${JSON.stringify(options.headless)}`);
+      throw new Error(
+        `headless must be omitted when unset: ${
+          JSON.stringify(options.headless)
+        }`,
+      );
     }
     if ("width" in options || "height" in options) {
       throw new Error("width/height must be omitted when size is unset");
@@ -1509,19 +1727,33 @@ Deno.test("renderer capabilities getter routes to the native addon", () => {
     const renderer = createRenderer();
     const caps = renderer.capabilities;
     // The backend color report.
-    if (caps.truecolor !== true) throw new Error(`truecolor = ${caps.truecolor}`);
+    if (caps.truecolor !== true) {
+      throw new Error(`truecolor = ${caps.truecolor}`);
+    }
     if (caps.colors !== 16_777_216) throw new Error(`colors = ${caps.colors}`);
     // The interactive probe report: the fake answers like a kitty terminal
     // that supports every queried protocol, so every field surfaces.
     if (caps.terminalIdentity !== "kitty(0.36.0)") {
-      throw new Error(`terminalIdentity = ${JSON.stringify(caps.terminalIdentity)}`);
+      throw new Error(
+        `terminalIdentity = ${JSON.stringify(caps.terminalIdentity)}`,
+      );
     }
-    if (caps.kittyKeyboard !== true) throw new Error(`kittyKeyboard = ${caps.kittyKeyboard}`);
-    if (caps.kittyUnderline !== true) throw new Error(`kittyUnderline = ${caps.kittyUnderline}`);
+    if (caps.kittyKeyboard !== true) {
+      throw new Error(`kittyKeyboard = ${caps.kittyKeyboard}`);
+    }
+    if (caps.kittyUnderline !== true) {
+      throw new Error(`kittyUnderline = ${caps.kittyUnderline}`);
+    }
     if (caps.osc52 !== true) throw new Error(`osc52 = ${caps.osc52}`);
-    if (caps.bracketedPaste !== true) throw new Error(`bracketedPaste = ${caps.bracketedPaste}`);
-    if (caps.focusEvents !== true) throw new Error(`focusEvents = ${caps.focusEvents}`);
-    if (caps.scrollRegion !== true) throw new Error(`scrollRegion = ${caps.scrollRegion}`);
+    if (caps.bracketedPaste !== true) {
+      throw new Error(`bracketedPaste = ${caps.bracketedPaste}`);
+    }
+    if (caps.focusEvents !== true) {
+      throw new Error(`focusEvents = ${caps.focusEvents}`);
+    }
+    if (caps.scrollRegion !== true) {
+      throw new Error(`scrollRegion = ${caps.scrollRegion}`);
+    }
     if (caps.probed !== true) throw new Error(`probed = ${caps.probed}`);
     renderer.destroy();
   });
@@ -1563,13 +1795,17 @@ Deno.test("renderer size reports the last render or snapshotFrame viewport", () 
     renderer.snapshotFrame(6, 3);
     size = renderer.size;
     if (size.width !== 6 || size.height !== 3) {
-      throw new Error(`size after snapshotFrame(6, 3) = ${JSON.stringify(size)}`);
+      throw new Error(
+        `size after snapshotFrame(6, 3) = ${JSON.stringify(size)}`,
+      );
     }
     // A render at the current terminal size supersedes the snapshot again.
     renderer.render();
     size = renderer.size;
     if (size.width !== 80 || size.height !== 24) {
-      throw new Error(`size after post-snapshot render = ${JSON.stringify(size)}`);
+      throw new Error(
+        `size after post-snapshot render = ${JSON.stringify(size)}`,
+      );
     }
     renderer.destroy();
   });
@@ -1580,7 +1816,9 @@ Deno.test("renderer setClipboard routes the text and implies the exact OSC 52 es
     const renderer = createRenderer();
     renderer.setClipboard("foo");
     if (lastClipboard !== "foo") {
-      throw new Error(`set_clipboard called with ${JSON.stringify(lastClipboard)}`);
+      throw new Error(
+        `set_clipboard called with ${JSON.stringify(lastClipboard)}`,
+      );
     }
     // The JS-level bytes assertion: for the text just handed to the native
     // layer, the escape it must emit is exactly ESC ] 52 ; c ; <base64> BEL,
@@ -1606,7 +1844,9 @@ Deno.test("renderer setSelection and clearSelection route to the native addon", 
     const native = lastFakeRenderer;
     if (native === null) throw new Error("fake renderer not constructed");
     renderer.setSelection(1, 0, 3, 2);
-    if (native.selection === null) throw new Error("selection not set on native");
+    if (native.selection === null) {
+      throw new Error("selection not set on native");
+    }
     if (
       native.selection.col1 !== 1 || native.selection.row1 !== 0 ||
       native.selection.col2 !== 3 || native.selection.row2 !== 2
@@ -1626,7 +1866,13 @@ Deno.test("renderer setCursor and clearCursor route to the native addon", () => 
     const renderer = createRenderer();
     const native = lastFakeRenderer;
     if (native === null) throw new Error("fake renderer not constructed");
-    renderer.setCursor({ x: 3, y: 2, shape: "bar", visible: true, blink: true });
+    renderer.setCursor({
+      x: 3,
+      y: 2,
+      shape: "bar",
+      visible: true,
+      blink: true,
+    });
     if (native.cursor === null) throw new Error("cursor not set on native");
     if (
       native.cursor.x !== 3 || native.cursor.y !== 2 ||
@@ -1649,7 +1895,13 @@ Deno.test("renderer setCursor forwards every shape and visibility", () => {
     const renderer = createRenderer();
     const native = lastFakeRenderer;
     if (native === null) throw new Error("fake renderer not constructed");
-    renderer.setCursor({ x: 0, y: 0, shape: "underline", visible: false, blink: false });
+    renderer.setCursor({
+      x: 0,
+      y: 0,
+      shape: "underline",
+      visible: false,
+      blink: false,
+    });
     if (native.cursor === null) throw new Error("cursor not set on native");
     if (
       native.cursor.shape !== "underline" || native.cursor.visible !== false ||
@@ -1657,7 +1909,13 @@ Deno.test("renderer setCursor forwards every shape and visibility", () => {
     ) {
       throw new Error(`native cursor = ${JSON.stringify(native.cursor)}`);
     }
-    renderer.setCursor({ x: 7, y: 1, shape: "block", visible: true, blink: false });
+    renderer.setCursor({
+      x: 7,
+      y: 1,
+      shape: "block",
+      visible: true,
+      blink: false,
+    });
     const cursor = native.cursor;
     if (cursor === null) throw new Error("cursor not set on native");
     // Widen through locals so later comparisons are not affected by the
@@ -1682,26 +1940,40 @@ Deno.test("renderer selectionText extracts the selected region from the last pai
     renderer.snapshotFrame(11, 1);
     // No selection set: empty.
     if (renderer.selectionText() !== "") {
-      throw new Error(`selectionText without a selection = ${JSON.stringify(renderer.selectionText())}`);
+      throw new Error(
+        `selectionText without a selection = ${
+          JSON.stringify(renderer.selectionText())
+        }`,
+      );
     }
     renderer.setSelection(6, 0, 10, 0); // "world"
     if (renderer.selectionText() !== "world") {
-      throw new Error(`selectionText = ${JSON.stringify(renderer.selectionText())}`);
+      throw new Error(
+        `selectionText = ${JSON.stringify(renderer.selectionText())}`,
+      );
     }
     // Reversed endpoints normalize to the same rect.
     renderer.setSelection(10, 0, 6, 0);
     if (renderer.selectionText() !== "world") {
-      throw new Error(`reversed selectionText = ${JSON.stringify(renderer.selectionText())}`);
+      throw new Error(
+        `reversed selectionText = ${JSON.stringify(renderer.selectionText())}`,
+      );
     }
     // A sub-run.
     renderer.setSelection(0, 0, 4, 0);
     if (renderer.selectionText() !== "hello") {
-      throw new Error(`sub-run selectionText = ${JSON.stringify(renderer.selectionText())}`);
+      throw new Error(
+        `sub-run selectionText = ${JSON.stringify(renderer.selectionText())}`,
+      );
     }
     // Clearing the selection empties the extraction.
     renderer.clearSelection();
     if (renderer.selectionText() !== "") {
-      throw new Error(`selectionText after clear = ${JSON.stringify(renderer.selectionText())}`);
+      throw new Error(
+        `selectionText after clear = ${
+          JSON.stringify(renderer.selectionText())
+        }`,
+      );
     }
     renderer.destroy();
   });
@@ -1714,14 +1986,20 @@ Deno.test("renderer selectionText reads the frame the last snapshot or render pa
     renderer.snapshotFrame(5, 1);
     renderer.setSelection(0, 0, 4, 0);
     if (renderer.selectionText() !== "hello") {
-      throw new Error(`snapshot selectionText = ${JSON.stringify(renderer.selectionText())}`);
+      throw new Error(
+        `snapshot selectionText = ${JSON.stringify(renderer.selectionText())}`,
+      );
     }
     // A render repaints at the terminal size (the fake's 80x24): the wider
     // frame keeps the text at the origin, so the same selection extracts the
     // same run from the freshly painted frame.
     renderer.render();
     if (renderer.selectionText() !== "hello") {
-      throw new Error(`post-render selectionText = ${JSON.stringify(renderer.selectionText())}`);
+      throw new Error(
+        `post-render selectionText = ${
+          JSON.stringify(renderer.selectionText())
+        }`,
+      );
     }
     renderer.destroy();
   });
@@ -1733,8 +2011,13 @@ Deno.test("renderer selectionWordRange returns the word run or null at whitespac
     renderer.root.addChild(Box({}, Text({ text: "hello world" })));
     renderer.snapshotFrame(11, 1);
     const range = renderer.selectionWordRange(7, 0);
-    if (range === null) throw new Error("word range at 'world' must not be null");
-    if (range.col1 !== 6 || range.row1 !== 0 || range.col2 !== 10 || range.row2 !== 0) {
+    if (range === null) {
+      throw new Error("word range at 'world' must not be null");
+    }
+    if (
+      range.col1 !== 6 || range.row1 !== 0 || range.col2 !== 10 ||
+      range.row2 !== 0
+    ) {
       throw new Error(`word range = ${JSON.stringify(range)}`);
     }
     // The boundary between the words is whitespace: null.
@@ -1761,7 +2044,9 @@ Deno.test("push events dispatch resize events to onResize and unsubscribe stops 
     const unsub = renderer.onResize((size) => resized.push(size));
     const resize: TernEventJs = { type: "resize", width: 120, height: 40 };
     pushEvent(resize);
-    if (resized.length !== 1) throw new Error(`onResize calls = ${resized.length}`);
+    if (resized.length !== 1) {
+      throw new Error(`onResize calls = ${resized.length}`);
+    }
     if (resized[0]!.width !== 120 || resized[0]!.height !== 40) {
       throw new Error(`resize payload = ${JSON.stringify(resized[0])}`);
     }
@@ -1780,7 +2065,13 @@ Deno.test("push events dispatch key events to onKey with the KeyEvent payload", 
     renderer.startEventStream();
     const keys: KeyEvent[] = [];
     renderer.onKey((event) => keys.push(event));
-    const key: KeyEvent = { name: "char", char: "q", ctrl: false, alt: false, shift: false };
+    const key: KeyEvent = {
+      name: "char",
+      char: "q",
+      ctrl: false,
+      alt: false,
+      shift: false,
+    };
     pushEvent({ type: "key", key });
     if (keys.length !== 1 || keys[0] !== key) {
       throw new Error("onKey must receive the unwrapped KeyEvent payload");
@@ -1809,7 +2100,9 @@ Deno.test("push events deliver a release-kind key event to onKey unchanged", () 
     };
     pushEvent({ type: "key", key: release });
     if (keys.length !== 1 || keys[0] !== release) {
-      throw new Error("onKey must receive the release-kind KeyEvent payload unchanged");
+      throw new Error(
+        "onKey must receive the release-kind KeyEvent payload unchanged",
+      );
     }
     if (keys[0]!.kind !== "release") {
       throw new Error(`kind = ${keys[0]!.kind}, expected "release"`);
@@ -1819,13 +2112,25 @@ Deno.test("push events deliver a release-kind key event to onKey unchanged", () 
     }
     // A press event without an explicit kind still flows (kind defaults to
     // press; kind-unaware handlers keep working).
-    const press: KeyEvent = { name: "char", char: "y", ctrl: false, alt: false, shift: false };
+    const press: KeyEvent = {
+      name: "char",
+      char: "y",
+      ctrl: false,
+      alt: false,
+      shift: false,
+    };
     pushEvent({ type: "key", key: press });
     if (keys[0] !== release || keys[1] !== press) {
-      throw new Error("press and release must both arrive, unchanged, in order");
+      throw new Error(
+        "press and release must both arrive, unchanged, in order",
+      );
     }
     if (keys[1]!.kind !== undefined) {
-      throw new Error(`press without kind must arrive unchanged, got ${JSON.stringify(keys[1])}`);
+      throw new Error(
+        `press without kind must arrive unchanged, got ${
+          JSON.stringify(keys[1])
+        }`,
+      );
     }
   });
 });
@@ -1838,8 +2143,13 @@ Deno.test("push events dispatch focus events to onFocus", () => {
     renderer.onFocus((event) => focusEvents.push(event));
     pushEvent({ type: "focus", focus_gained: true });
     pushEvent({ type: "focus", focus_gained: false });
-    if (focusEvents.length !== 2) throw new Error(`onFocus calls = ${focusEvents.length}`);
-    if (focusEvents[0]!.focus_gained !== true || focusEvents[1]!.focus_gained !== false) {
+    if (focusEvents.length !== 2) {
+      throw new Error(`onFocus calls = ${focusEvents.length}`);
+    }
+    if (
+      focusEvents[0]!.focus_gained !== true ||
+      focusEvents[1]!.focus_gained !== false
+    ) {
       throw new Error(`focus payloads = ${JSON.stringify(focusEvents)}`);
     }
     // Unsubscribe contract mirrors onKey: the removed handler never fires.
@@ -1895,13 +2205,17 @@ Deno.test("onMouse toggles any-event mouse exactly on the 0->1 and 1->0 transiti
     // 0 -> 1: the first subscribe enables the mode, exactly once.
     const unsub1 = renderer.onMouse(() => {});
     if (n() !== 1 || calls[0] !== true) {
-      throw new Error(`first subscribe must toggle once true, got ${callsJson()}`);
+      throw new Error(
+        `first subscribe must toggle once true, got ${callsJson()}`,
+      );
     }
 
     // 1 -> 2: a further subscribe must not re-toggle.
     const unsub2 = renderer.onMouse(() => {});
     if (n() !== 1) {
-      throw new Error(`1->1 re-subscribe must not re-toggle, got ${callsJson()}`);
+      throw new Error(
+        `1->1 re-subscribe must not re-toggle, got ${callsJson()}`,
+      );
     }
 
     // 2 -> 1: unsubscribing one of two must not toggle.
@@ -1913,7 +2227,9 @@ Deno.test("onMouse toggles any-event mouse exactly on the 0->1 and 1->0 transiti
     // 1 -> 2 again: re-subscribing while one remains must not re-toggle.
     const unsub3 = renderer.onMouse(() => {});
     if (n() !== 1) {
-      throw new Error(`re-subscribe with one active must not re-toggle, got ${callsJson()}`);
+      throw new Error(
+        `re-subscribe with one active must not re-toggle, got ${callsJson()}`,
+      );
     }
 
     // 2 -> 0: only the last unsubscribe disables the mode, exactly once.
@@ -1923,17 +2239,23 @@ Deno.test("onMouse toggles any-event mouse exactly on the 0->1 and 1->0 transiti
     }
     unsub3();
     if (n() !== 2 || calls[1] !== false) {
-      throw new Error(`last unsubscribe must toggle once false, got ${callsJson()}`);
+      throw new Error(
+        `last unsubscribe must toggle once false, got ${callsJson()}`,
+      );
     }
 
     // 0 -> 1 again: a fresh subscribe re-enables.
     const unsub4 = renderer.onMouse(() => {});
     if (n() !== 3 || calls[2] !== true) {
-      throw new Error(`subscribe after empty must toggle true again, got ${callsJson()}`);
+      throw new Error(
+        `subscribe after empty must toggle true again, got ${callsJson()}`,
+      );
     }
     unsub4();
     if (n() !== 4 || calls[3] !== false) {
-      throw new Error(`last unsubscribe must toggle false again, got ${callsJson()}`);
+      throw new Error(
+        `last unsubscribe must toggle false again, got ${callsJson()}`,
+      );
     }
   });
 });
@@ -1967,12 +2289,22 @@ Deno.test("the events async iterable yields every pushed event without loss", as
     const renderer = createRenderer();
     renderer.startEventStream();
     const events: TernEventJs[] = [
-      { type: "key", key: { name: "enter", ctrl: false, alt: false, shift: false } },
+      {
+        type: "key",
+        key: { name: "enter", ctrl: false, alt: false, shift: false },
+      },
       { type: "resize", width: 80, height: 24 },
       { type: "focus", focus_gained: true },
       {
         type: "mouse",
-        mouse: { kind: "moved", column: 1, row: 2, ctrl: false, alt: false, shift: false },
+        mouse: {
+          kind: "moved",
+          column: 1,
+          row: 2,
+          ctrl: false,
+          alt: false,
+          shift: false,
+        },
       },
       { type: "paste", paste: "pasted 文本" },
     ];
@@ -1988,7 +2320,9 @@ Deno.test("the events async iterable yields every pushed event without loss", as
         if (received.length === events.length) break;
       }
       if (received.length !== events.length) {
-        throw new Error(`received ${received.length} events, expected ${events.length}`);
+        throw new Error(
+          `received ${received.length} events, expected ${events.length}`,
+        );
       }
       for (let i = 0; i < events.length; i++) {
         if (received[i] !== events[i]) {
@@ -2059,7 +2393,9 @@ Deno.test("destroy closes the events stream", async () => {
       for await (const event of renderer.events) {
         received.push(event);
       }
-      if (received.length !== 0) throw new Error("a closed stream must yield nothing");
+      if (received.length !== 0) {
+        throw new Error("a closed stream must yield nothing");
+      }
     })();
   });
   await consumer;
@@ -2150,18 +2486,28 @@ Deno.test("Renderer.snapshotFrame paints the scene to golden rows via render_to_
     //   │Hi│
     //   └──┘
     // with trailing blanks padded to the 6-column viewport width.
-    renderer.root.addChild(Box({ border_style: "rounded", padding: 1 }, Text({ text: "Hi" })));
+    renderer.root.addChild(
+      Box({ border_style: "rounded", padding: 1 }, Text({ text: "Hi" })),
+    );
     const frame = renderer.snapshotFrame(6, 3);
     const expected = ["┌──┐  ", "│Hi│  ", "└──┘  "];
     if (!framesEqual(frame, expected)) {
       throw new Error(`unexpected frame rows: ${JSON.stringify(frame)}`);
     }
     // The viewport was forwarded to the native method.
-    if (lastSnapshotSize === null || lastSnapshotSize[0] !== 6 || lastSnapshotSize[1] !== 3) {
-      throw new Error(`viewport not forwarded: ${JSON.stringify(lastSnapshotSize)}`);
+    if (
+      lastSnapshotSize === null || lastSnapshotSize[0] !== 6 ||
+      lastSnapshotSize[1] !== 3
+    ) {
+      throw new Error(
+        `viewport not forwarded: ${JSON.stringify(lastSnapshotSize)}`,
+      );
     }
     // The scene was materialized through the fake addon (box + text).
-    if (createdNodes.length !== 2 || createdNodes[0]?.type !== "box" || createdNodes[1]?.type !== "text") {
+    if (
+      createdNodes.length !== 2 || createdNodes[0]?.type !== "box" ||
+      createdNodes[1]?.type !== "text"
+    ) {
       throw new Error(`created nodes = ${JSON.stringify(createdNodes)}`);
     }
     renderer.destroy();
@@ -2192,10 +2538,16 @@ Deno.test("scrollOptimization on/off renderers snapshot identical golden frames 
     // The camelCase flag routes to the snake_case native constructor option
     // in both directions.
     if (onOptions.scroll_optimization !== true) {
-      throw new Error(`scrollOptimization: true not forwarded: ${JSON.stringify(onOptions)}`);
+      throw new Error(
+        `scrollOptimization: true not forwarded: ${JSON.stringify(onOptions)}`,
+      );
     }
     if (offOptions.scroll_optimization !== false) {
-      throw new Error(`scrollOptimization: false not forwarded: ${JSON.stringify(offOptions)}`);
+      throw new Error(
+        `scrollOptimization: false not forwarded: ${
+          JSON.stringify(offOptions)
+        }`,
+      );
     }
 
     // Identical scenes: a borderless box stacking three text leaves as a
@@ -2203,10 +2555,20 @@ Deno.test("scrollOptimization on/off renderers snapshot identical golden frames 
     // region takes. The row leaves are mutated for the scroll / mutation
     // edits below.
     const onBox = on.root.addChild(
-      Box({}, Text({ text: "aaaaa" }), Text({ text: "bbbbb" }), Text({ text: "ccccc" })),
+      Box(
+        {},
+        Text({ text: "aaaaa" }),
+        Text({ text: "bbbbb" }),
+        Text({ text: "ccccc" }),
+      ),
     );
     const offBox = off.root.addChild(
-      Box({}, Text({ text: "aaaaa" }), Text({ text: "bbbbb" }), Text({ text: "ccccc" })),
+      Box(
+        {},
+        Text({ text: "aaaaa" }),
+        Text({ text: "bbbbb" }),
+        Text({ text: "ccccc" }),
+      ),
     );
     const W = 40;
     const H = 10;
@@ -2222,7 +2584,9 @@ Deno.test("scrollOptimization on/off renderers snapshot identical golden frames 
     off.render();
     const f1on = on.snapshotFrame(W, H);
     const f1off = off.snapshotFrame(W, H);
-    if (!framesEqual(f1on, f1off)) throw new Error("initial frames differ across the flag");
+    if (!framesEqual(f1on, f1off)) {
+      throw new Error("initial frames differ across the flag");
+    }
     if (!framesEqual(f1on, golden("aaaaa", "bbbbb", "ccccc"))) {
       throw new Error("initial frame is not the full repaint");
     }
@@ -2240,7 +2604,9 @@ Deno.test("scrollOptimization on/off renderers snapshot identical golden frames 
     off.render();
     const f2on = on.snapshotFrame(W, H);
     const f2off = off.snapshotFrame(W, H);
-    if (!framesEqual(f2on, f2off)) throw new Error("scrolled frames differ across the flag");
+    if (!framesEqual(f2on, f2off)) {
+      throw new Error("scrolled frames differ across the flag");
+    }
     if (!framesEqual(f2on, golden("bbbbb", "ccccc", "ddddd"))) {
       throw new Error("scrolled frame is not the full repaint");
     }
@@ -2255,7 +2621,9 @@ Deno.test("scrollOptimization on/off renderers snapshot identical golden frames 
     off.render();
     const f3on = on.snapshotFrame(W, H);
     const f3off = off.snapshotFrame(W, H);
-    if (!framesEqual(f3on, f3off)) throw new Error("mutated frames differ across the flag");
+    if (!framesEqual(f3on, f3off)) {
+      throw new Error("mutated frames differ across the flag");
+    }
     if (!framesEqual(f3on, golden("bbbbb", "XXXXX", "ddddd"))) {
       throw new Error("final frame is not the full repaint of the final scene");
     }
@@ -2272,8 +2640,13 @@ Deno.test("Renderer.snapshotFrame defaults the viewport to the native shared siz
     // No viewport args: the native method falls back to its shared viewport,
     // so the JS layer must delegate with undefined, undefined.
     renderer.snapshotFrame();
-    if (lastSnapshotSize === null || lastSnapshotSize[0] !== undefined || lastSnapshotSize[1] !== undefined) {
-      throw new Error(`default viewport not forwarded: ${JSON.stringify(lastSnapshotSize)}`);
+    if (
+      lastSnapshotSize === null || lastSnapshotSize[0] !== undefined ||
+      lastSnapshotSize[1] !== undefined
+    ) {
+      throw new Error(
+        `default viewport not forwarded: ${JSON.stringify(lastSnapshotSize)}`,
+      );
     }
     renderer.destroy();
   });
@@ -2300,7 +2673,9 @@ Deno.test("snapshotFrame golden keeps a ZWJ family emoji intact on the caret lin
     // A single-line textarea "a👨‍👩‍👧‍👦b" with the caret at display column
     // 1 — the grapheme-cluster boundary between 'a' and the family emoji.
     // The caret rides the first (only) display row, which is the caret line.
-    renderer.root.addChild(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }));
+    renderer.root.addChild(
+      Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }),
+    );
     const frame = renderer.snapshotFrame(6, 1);
     // The caret line paints the full cluster as ONE 2-column glyph — 'a' at
     // column 0, the emoji at column 1 with its continuation cell masked to a
@@ -2337,7 +2712,10 @@ Deno.test("Renderer.snapshotStyled paints the scene to golden styled runs via re
     // `render_to_buffer_styled_*` Rust unit tests in
     // src/bindings/tern-node/src/lib.rs).
     renderer.root.addChild(
-      Box({ border_style: "rounded", padding: 1 }, Text({ text: "Hi", fg: "#ff0000", bold: true })),
+      Box(
+        { border_style: "rounded", padding: 1 },
+        Text({ text: "Hi", fg: "#ff0000", bold: true }),
+      ),
     );
     const frame = renderer.snapshotStyled(6, 3);
     // Adjacent cells with identical style merge into one run: the unstyled
@@ -2346,7 +2724,9 @@ Deno.test("Renderer.snapshotStyled paints the scene to golden styled runs via re
     // unstyled `│` cells.
     const expected: StyleRunJs[][] = [
       [{ text: "┌──┐  " }],
-      [{ text: "│" }, { text: "Hi", fg: "#ff0000", bold: true }, { text: "│  " }],
+      [{ text: "│" }, { text: "Hi", fg: "#ff0000", bold: true }, {
+        text: "│  ",
+      }],
       [{ text: "└──┘  " }],
     ];
     if (!styledFramesEqual(frame, expected)) {
@@ -2358,7 +2738,9 @@ Deno.test("Renderer.snapshotStyled paints the scene to golden styled runs via re
       lastStyledSnapshotSize[0] !== 6 ||
       lastStyledSnapshotSize[1] !== 3
     ) {
-      throw new Error(`viewport not forwarded: ${JSON.stringify(lastStyledSnapshotSize)}`);
+      throw new Error(
+        `viewport not forwarded: ${JSON.stringify(lastStyledSnapshotSize)}`,
+      );
     }
     renderer.destroy();
   });
@@ -2375,7 +2757,10 @@ Deno.test("Box borderColor paints the border cells' fg in snapshotStyled runs", 
     // tests in src/bindings/tern-node/src/lib.rs). The glyphs and the inner
     // text stay unchanged.
     renderer.root.addChild(
-      Box({ border_style: "rounded", borderColor: "#ff0000", padding: 1 }, Text({ text: "Hi" })),
+      Box(
+        { border_style: "rounded", borderColor: "#ff0000", padding: 1 },
+        Text({ text: "Hi" }),
+      ),
     );
     const frame = renderer.snapshotStyled(6, 3);
     const expected: StyleRunJs[][] = [
@@ -2394,9 +2779,13 @@ Deno.test("Box borderColor paints the border cells' fg in snapshotStyled runs", 
     // The camelCase alias reaches the native layer as the snake_case style
     // key: the fake node mirror carries `border_color`.
     const boxNode = renderer.root.children[0];
-    if (boxNode === undefined) throw new Error("the box child must be materialized");
+    if (boxNode === undefined) {
+      throw new Error("the box child must be materialized");
+    }
     if (boxNode.props.border_color !== "#ff0000") {
-      throw new Error(`border_color = ${JSON.stringify(boxNode.props.border_color)}`);
+      throw new Error(
+        `border_color = ${JSON.stringify(boxNode.props.border_color)}`,
+      );
     }
     renderer.destroy();
   });
@@ -2420,7 +2809,9 @@ Deno.test("Text hyperlink paints the link target onto the styled run", () => {
     const frame = renderer.snapshotStyled(6, 3);
     const expected: StyleRunJs[][] = [
       [{ text: "┌──┐  " }],
-      [{ text: "│" }, { text: "Hi", hyperlink: "https://example.com" }, { text: "│  " }],
+      [{ text: "│" }, { text: "Hi", hyperlink: "https://example.com" }, {
+        text: "│  ",
+      }],
       [{ text: "└──┘  " }],
     ];
     if (!styledFramesEqual(frame, expected)) {
@@ -2430,14 +2821,22 @@ Deno.test("Text hyperlink paints the link target onto the styled run", () => {
     // (the key convert.rs recognizes): the fake node mirror carries `href`,
     // and the alias is consumed — exactly like `border_color`.
     const boxNode = renderer.root.children[0];
-    if (boxNode === undefined) throw new Error("the box child must be materialized");
+    if (boxNode === undefined) {
+      throw new Error("the box child must be materialized");
+    }
     const textNode = boxNode.children[0];
-    if (textNode === undefined) throw new Error("the text leaf must be materialized");
+    if (textNode === undefined) {
+      throw new Error("the text leaf must be materialized");
+    }
     if (textNode.props.href !== "https://example.com") {
       throw new Error(`href = ${JSON.stringify(textNode.props.href)}`);
     }
     if ("hyperlink" in textNode.props) {
-      throw new Error(`the camelCase alias must be consumed, got ${JSON.stringify(textNode.props)}`);
+      throw new Error(
+        `the camelCase alias must be consumed, got ${
+          JSON.stringify(textNode.props)
+        }`,
+      );
     }
     renderer.destroy();
   });
@@ -2456,7 +2855,11 @@ Deno.test("Text underline style and color paint onto the styled run", () => {
     renderer.root.addChild(
       Box(
         { border_style: "rounded", padding: 1 },
-        Text({ text: "Hi", underlineStyle: "curly", underlineColor: "#ff0000" }),
+        Text({
+          text: "Hi",
+          underlineStyle: "curly",
+          underlineColor: "#ff0000",
+        }),
       ),
     );
     const frame = renderer.snapshotStyled(6, 3);
@@ -2477,20 +2880,36 @@ Deno.test("Text underline style and color paint onto the styled run", () => {
     // `underline_style` / `underline_color`, and the aliases are consumed —
     // exactly like `href`.
     const boxNode = renderer.root.children[0];
-    if (boxNode === undefined) throw new Error("the box child must be materialized");
+    if (boxNode === undefined) {
+      throw new Error("the box child must be materialized");
+    }
     const textNode = boxNode.children[0];
-    if (textNode === undefined) throw new Error("the text leaf must be materialized");
+    if (textNode === undefined) {
+      throw new Error("the text leaf must be materialized");
+    }
     if (textNode.props.underline_style !== "curly") {
-      throw new Error(`underline_style = ${JSON.stringify(textNode.props.underline_style)}`);
+      throw new Error(
+        `underline_style = ${JSON.stringify(textNode.props.underline_style)}`,
+      );
     }
     if (textNode.props.underline_color !== "#ff0000") {
-      throw new Error(`underline_color = ${JSON.stringify(textNode.props.underline_color)}`);
+      throw new Error(
+        `underline_color = ${JSON.stringify(textNode.props.underline_color)}`,
+      );
     }
     if ("underlineStyle" in textNode.props) {
-      throw new Error(`the camelCase alias must be consumed, got ${JSON.stringify(textNode.props)}`);
+      throw new Error(
+        `the camelCase alias must be consumed, got ${
+          JSON.stringify(textNode.props)
+        }`,
+      );
     }
     if ("underlineColor" in textNode.props) {
-      throw new Error(`the camelCase alias must be consumed, got ${JSON.stringify(textNode.props)}`);
+      throw new Error(
+        `the camelCase alias must be consumed, got ${
+          JSON.stringify(textNode.props)
+        }`,
+      );
     }
     renderer.destroy();
   });
@@ -2514,11 +2933,15 @@ Deno.test("Text underline variants distinguish styled runs (double / curly / dot
       const frame = renderer.snapshotStyled(6, 3);
       const expected: StyleRunJs[][] = [
         [{ text: "┌──┐  " }],
-        [{ text: "│" }, { text: "Hi", underlineStyle: variant }, { text: "│  " }],
+        [{ text: "│" }, { text: "Hi", underlineStyle: variant }, {
+          text: "│  ",
+        }],
         [{ text: "└──┘  " }],
       ];
       if (!styledFramesEqual(frame, expected)) {
-        throw new Error(`variant ${variant} unexpected styled runs: ${JSON.stringify(frame)}`);
+        throw new Error(
+          `variant ${variant} unexpected styled runs: ${JSON.stringify(frame)}`,
+        );
       }
       renderer.destroy();
     }
@@ -2543,14 +2966,22 @@ Deno.test("appendSpan hyperlink translates the camelCase alias to the href style
   node.appendSpan("tern", { hyperlink: "https://example.com", bold: true });
   const first = node.spans[0];
   if (first === undefined) throw new Error("the recorded span is missing");
-  if (first.text !== "tern") throw new Error(`text = ${JSON.stringify(first.text)}`);
+  if (first.text !== "tern") {
+    throw new Error(`text = ${JSON.stringify(first.text)}`);
+  }
   if (first.style?.href !== "https://example.com") {
     throw new Error(`href = ${JSON.stringify(first.style?.href)}`);
   }
   if ("hyperlink" in (first.style ?? {})) {
-    throw new Error(`the camelCase alias must be consumed, got ${JSON.stringify(first.style)}`);
+    throw new Error(
+      `the camelCase alias must be consumed, got ${
+        JSON.stringify(first.style)
+      }`,
+    );
   }
-  if (first.style?.bold !== true) throw new Error("other style keys pass through untouched");
+  if (first.style?.bold !== true) {
+    throw new Error("other style keys pass through untouched");
+  }
 });
 
 Deno.test("appendSpan underline aliases translate to the snake_case style keys", () => {
@@ -2559,21 +2990,38 @@ Deno.test("appendSpan underline aliases translate to the snake_case style keys",
   // not the camelCase spellings), so the aliases are translated at
   // ingestion: the recorded span carries the scene-facing keys.
   const node = StreamingText();
-  node.appendSpan("tern", { underlineStyle: "curly", underlineColor: "#00ff00" });
+  node.appendSpan("tern", {
+    underlineStyle: "curly",
+    underlineColor: "#00ff00",
+  });
   const first = node.spans[0];
   if (first === undefined) throw new Error("the recorded span is missing");
-  if (first.text !== "tern") throw new Error(`text = ${JSON.stringify(first.text)}`);
+  if (first.text !== "tern") {
+    throw new Error(`text = ${JSON.stringify(first.text)}`);
+  }
   if (first.style?.underline_style !== "curly") {
-    throw new Error(`underline_style = ${JSON.stringify(first.style?.underline_style)}`);
+    throw new Error(
+      `underline_style = ${JSON.stringify(first.style?.underline_style)}`,
+    );
   }
   if (first.style?.underline_color !== "#00ff00") {
-    throw new Error(`underline_color = ${JSON.stringify(first.style?.underline_color)}`);
+    throw new Error(
+      `underline_color = ${JSON.stringify(first.style?.underline_color)}`,
+    );
   }
   if ("underlineStyle" in (first.style ?? {})) {
-    throw new Error(`the camelCase alias must be consumed, got ${JSON.stringify(first.style)}`);
+    throw new Error(
+      `the camelCase alias must be consumed, got ${
+        JSON.stringify(first.style)
+      }`,
+    );
   }
   if ("underlineColor" in (first.style ?? {})) {
-    throw new Error(`the camelCase alias must be consumed, got ${JSON.stringify(first.style)}`);
+    throw new Error(
+      `the camelCase alias must be consumed, got ${
+        JSON.stringify(first.style)
+      }`,
+    );
   }
 });
 
@@ -2589,7 +3037,11 @@ Deno.test("Renderer.snapshotStyled defaults the viewport to the native shared si
       lastStyledSnapshotSize[0] !== undefined ||
       lastStyledSnapshotSize[1] !== undefined
     ) {
-      throw new Error(`default viewport not forwarded: ${JSON.stringify(lastStyledSnapshotSize)}`);
+      throw new Error(
+        `default viewport not forwarded: ${
+          JSON.stringify(lastStyledSnapshotSize)
+        }`,
+      );
     }
     renderer.destroy();
   });
@@ -2599,16 +3051,23 @@ Deno.test("snapshotStyled run texts reconstruct the snapshotFrame rows", () => {
   withFakeAddon(() => {
     const renderer = createRenderer();
     renderer.root.addChild(
-      Box({ border_style: "rounded", padding: 1 }, Text({ text: "Hi", fg: "#ff0000" })),
+      Box(
+        { border_style: "rounded", padding: 1 },
+        Text({ text: "Hi", fg: "#ff0000" }),
+      ),
     );
     const styled = renderer.snapshotStyled(6, 3);
     const plain = renderer.snapshotFrame(6, 3);
     // The binding's documented invariant: concatenating a row's run texts
     // reconstructs the plain render_to_buffer row string exactly.
-    const reconstructed = styled.map((row) => row.map((run) => run.text).join(""));
+    const reconstructed = styled.map((row) =>
+      row.map((run) => run.text).join("")
+    );
     if (!framesEqual(reconstructed, plain)) {
       throw new Error(
-        `styled runs do not reconstruct plain rows: ${JSON.stringify(reconstructed)} vs ${JSON.stringify(plain)}`,
+        `styled runs do not reconstruct plain rows: ${
+          JSON.stringify(reconstructed)
+        } vs ${JSON.stringify(plain)}`,
       );
     }
     renderer.destroy();
@@ -2617,29 +3076,52 @@ Deno.test("snapshotStyled run texts reconstruct the snapshotFrame rows", () => {
 
 Deno.test("styledFramesEqual compares row counts, run counts, run text and style fields", () => {
   // Identical frames — the same rows, runs, texts and style fields.
-  if (!styledFramesEqual(
-    [[{ text: "│" }, { text: "Hi", fg: "#ff0000", bold: true }]],
-    [[{ text: "│" }, { text: "Hi", fg: "#ff0000", bold: true }]],
-  )) {
+  if (
+    !styledFramesEqual(
+      [[{ text: "│" }, { text: "Hi", fg: "#ff0000", bold: true }]],
+      [[{ text: "│" }, { text: "Hi", fg: "#ff0000", bold: true }]],
+    )
+  ) {
     throw new Error("identical styled frames must be equal");
   }
   // Differing run text.
-  if (styledFramesEqual([[{ text: "Hi", fg: "#ff0000" }]], [[{ text: "Bye", fg: "#ff0000" }]])) {
+  if (
+    styledFramesEqual([[{ text: "Hi", fg: "#ff0000" }]], [[{
+      text: "Bye",
+      fg: "#ff0000",
+    }]])
+  ) {
     throw new Error("differing run text must be unequal");
   }
   // Differing color field.
-  if (styledFramesEqual([[{ text: "Hi", fg: "#ff0000" }]], [[{ text: "Hi", fg: "#00ff00" }]])) {
+  if (
+    styledFramesEqual([[{ text: "Hi", fg: "#ff0000" }]], [[{
+      text: "Hi",
+      fg: "#00ff00",
+    }]])
+  ) {
     throw new Error("differing fg must be unequal");
   }
   // Differing modifier field — a run with an explicit modifier differs from
   // one that omits it (the binding only sets modifiers when applied).
-  if (styledFramesEqual([[{ text: "Hi", fg: "#ff0000" }]], [[{ text: "Hi", fg: "#ff0000", bold: true }]])) {
+  if (
+    styledFramesEqual([[{ text: "Hi", fg: "#ff0000" }]], [[{
+      text: "Hi",
+      fg: "#ff0000",
+      bold: true,
+    }]])
+  ) {
     throw new Error("differing bold must be unequal");
   }
   // Differing hyperlink field — a linked run differs from a plain one (the
   // engine's style equality participates in the hyperlink, so runs split at
   // link boundaries), and the target itself is compared.
-  if (styledFramesEqual([[{ text: "Hi" }]], [[{ text: "Hi", hyperlink: "https://example.com" }]])) {
+  if (
+    styledFramesEqual([[{ text: "Hi" }]], [[{
+      text: "Hi",
+      hyperlink: "https://example.com",
+    }]])
+  ) {
     throw new Error("differing hyperlink must be unequal");
   }
   if (
@@ -2654,7 +3136,12 @@ Deno.test("styledFramesEqual compares row counts, run counts, run text and style
   // run differs from a plain one (the engine's style equality participates
   // in both fields, so runs split at underline boundaries), and the values
   // themselves are compared.
-  if (styledFramesEqual([[{ text: "Hi" }]], [[{ text: "Hi", underlineStyle: "curly" }]])) {
+  if (
+    styledFramesEqual([[{ text: "Hi" }]], [[{
+      text: "Hi",
+      underlineStyle: "curly",
+    }]])
+  ) {
     throw new Error("differing underline style must be unequal");
   }
   if (
@@ -2665,7 +3152,12 @@ Deno.test("styledFramesEqual compares row counts, run counts, run text and style
   ) {
     throw new Error("differing underline variants must be unequal");
   }
-  if (styledFramesEqual([[{ text: "Hi" }]], [[{ text: "Hi", underlineColor: "#ff0000" }]])) {
+  if (
+    styledFramesEqual([[{ text: "Hi" }]], [[{
+      text: "Hi",
+      underlineColor: "#ff0000",
+    }]])
+  ) {
     throw new Error("differing underline color must be unequal");
   }
   if (
@@ -2681,7 +3173,9 @@ Deno.test("styledFramesEqual compares row counts, run counts, run text and style
     throw new Error("differing run counts must be unequal");
   }
   // Differing row count.
-  if (styledFramesEqual([[{ text: "Hi" }]], [[{ text: "Hi" }], [{ text: "x" }]])) {
+  if (
+    styledFramesEqual([[{ text: "Hi" }]], [[{ text: "Hi" }], [{ text: "x" }]])
+  ) {
     throw new Error("differing row counts must be unequal");
   }
 });
@@ -2704,7 +3198,9 @@ function expectEqual<T>(actual: T, expected: T, label: string): void {
  * addon constructs one per renderer; its `renderCalls` counts native
  * renders). */
 function fakeRenderer(): FakeTuiRenderer {
-  if (lastFakeRenderer === null) throw new Error("no fake renderer constructed");
+  if (lastFakeRenderer === null) {
+    throw new Error("no fake renderer constructed");
+  }
   return lastFakeRenderer;
 }
 
@@ -2804,10 +3300,14 @@ Deno.test("maxFps delays a coalesced frame scheduled inside the budget to the ca
     const t2 = performance.now();
     expectEqual(fake.renderCalls, 2, "render calls");
     if (t1 - t0 >= 50 - 10) {
-      throw new Error(`first frame was throttled: ${(t1 - t0).toFixed(1)}ms elapsed`);
+      throw new Error(
+        `first frame was throttled: ${(t1 - t0).toFixed(1)}ms elapsed`,
+      );
     }
     if (t2 - t1 < 50 - 10) {
-      throw new Error(`second frame fired after ${(t2 - t1).toFixed(1)}ms, expected >= ~50ms`);
+      throw new Error(
+        `second frame fired after ${(t2 - t1).toFixed(1)}ms, expected >= ~50ms`,
+      );
     }
     renderer.destroy();
   });
@@ -2847,7 +3347,9 @@ Deno.test("maxFps stays JS-side: never forwarded to the native renderer options"
     const renderer = createRenderer({ maxFps: 30 });
     const options = lastRendererOptions as Record<string, unknown>;
     if ("maxFps" in options || "max_fps" in options) {
-      throw new Error(`maxFps leaked into native options: ${JSON.stringify(options)}`);
+      throw new Error(
+        `maxFps leaked into native options: ${JSON.stringify(options)}`,
+      );
     }
     renderer.destroy();
   });
@@ -2860,31 +3362,47 @@ Deno.test("maxFps stays JS-side: never forwarded to the native renderer options"
 Deno.test("Input composes a box with a text leaf carrying value and caret", () => {
   const input = Input({ value: "ab", caret: 1 });
   if (input.type !== "input") throw new Error(`type = ${input.type}`);
-  if (input.props.value !== "ab") throw new Error(`value = ${input.props.value}`);
+  if (input.props.value !== "ab") {
+    throw new Error(`value = ${input.props.value}`);
+  }
   if (input.props.caret !== 1) throw new Error(`caret = ${input.props.caret}`);
   const leaf = input.children[0];
   if (leaf === undefined || leaf.type !== "text") {
     throw new Error("input must compose a text leaf");
   }
-  if (leaf.props.text !== "ab") throw new Error(`leaf text = ${leaf.props.text}`);
-  if (leaf.props.caret !== 1) throw new Error(`leaf caret = ${leaf.props.caret}`);
+  if (leaf.props.text !== "ab") {
+    throw new Error(`leaf text = ${leaf.props.text}`);
+  }
+  if (leaf.props.caret !== 1) {
+    throw new Error(`leaf caret = ${leaf.props.caret}`);
+  }
 });
 
 Deno.test("Input shows a dim placeholder when empty", () => {
   const input = Input({ placeholder: "type…" });
   const leaf = input.children[0];
   if (leaf === undefined) throw new Error("missing text leaf");
-  if (leaf.props.text !== "type…") throw new Error(`placeholder = ${leaf.props.text}`);
+  if (leaf.props.text !== "type…") {
+    throw new Error(`placeholder = ${leaf.props.text}`);
+  }
   if (leaf.props.dim !== true) throw new Error(`dim = ${leaf.props.dim}`);
   if (leaf.props.caret !== 0) throw new Error(`caret = ${leaf.props.caret}`);
 });
 
 Deno.test("editKey inserts a char at the caret", () => {
   const input = Input({ value: "ab", caret: 1 });
-  const next = editKey(input, { name: "char", char: "X", ctrl: false, alt: false, shift: false });
+  const next = editKey(input, {
+    name: "char",
+    char: "X",
+    ctrl: false,
+    alt: false,
+    shift: false,
+  });
   if (next.value !== "aXb") throw new Error(`value = ${next.value}`);
   if (next.caret !== 2) throw new Error(`caret = ${next.caret}`);
-  if (input.props.value !== "aXb") throw new Error(`node value = ${input.props.value}`);
+  if (input.props.value !== "aXb") {
+    throw new Error(`node value = ${input.props.value}`);
+  }
   if (input.children[0]?.props.text !== "aXb") {
     throw new Error(`leaf text = ${input.children[0]?.props.text}`);
   }
@@ -2892,10 +3410,17 @@ Deno.test("editKey inserts a char at the caret", () => {
 
 Deno.test("editKey backspace removes the char before the caret", () => {
   const input = Input({ value: "ab", caret: 2 });
-  const next = editKey(input, { name: "backspace", ctrl: false, alt: false, shift: false });
+  const next = editKey(input, {
+    name: "backspace",
+    ctrl: false,
+    alt: false,
+    shift: false,
+  });
   if (next.value !== "a") throw new Error(`value = ${next.value}`);
   if (next.caret !== 1) throw new Error(`caret = ${next.caret}`);
-  if (input.props.value !== "a") throw new Error(`node value = ${input.props.value}`);
+  if (input.props.value !== "a") {
+    throw new Error(`node value = ${input.props.value}`);
+  }
 });
 
 Deno.test("editKey moves the caret with arrows, home and end", () => {
@@ -2910,9 +3435,15 @@ Deno.test("editKey moves the caret with arrows, home and end", () => {
   const end = editKey(mk(), { name: "end", ...base });
   if (end.caret !== 3) throw new Error(`end caret = ${end.caret}`);
   // Movement at the boundaries is a no-op.
-  const noLeft = editKey(Input({ value: "abc", caret: 0 }), { name: "left", ...base });
+  const noLeft = editKey(Input({ value: "abc", caret: 0 }), {
+    name: "left",
+    ...base,
+  });
   if (noLeft.caret !== 0) throw new Error(`left at start = ${noLeft.caret}`);
-  const noRight = editKey(Input({ value: "abc", caret: 3 }), { name: "right", ...base });
+  const noRight = editKey(Input({ value: "abc", caret: 3 }), {
+    name: "right",
+    ...base,
+  });
   if (noRight.caret !== 3) throw new Error(`right at end = ${noRight.caret}`);
   // Unknown keys leave the input unchanged.
   const unknown = editKey(mk(), { name: "tab", ...base });
@@ -2924,18 +3455,37 @@ Deno.test("editKey moves the caret with arrows, home and end", () => {
 Deno.test("editKey is multi-width aware for the caret column", () => {
   const base = { ctrl: false, alt: false, shift: false } as const;
   // "コ" is a 2-column char: the caret after it sits at display column 2.
-  const left = editKey(Input({ value: "コa", caret: 2 }), { name: "left", ...base });
-  if (left.caret !== 0) throw new Error(`left over a wide char = ${left.caret}`);
-  const right = editKey(Input({ value: "コa", caret: 0 }), { name: "right", ...base });
-  if (right.caret !== 2) throw new Error(`right past a wide char = ${right.caret}`);
+  const left = editKey(Input({ value: "コa", caret: 2 }), {
+    name: "left",
+    ...base,
+  });
+  if (left.caret !== 0) {
+    throw new Error(`left over a wide char = ${left.caret}`);
+  }
+  const right = editKey(Input({ value: "コa", caret: 0 }), {
+    name: "right",
+    ...base,
+  });
+  if (right.caret !== 2) {
+    throw new Error(`right past a wide char = ${right.caret}`);
+  }
   // Inserting at column 2 lands between コ and a, and the caret advances by
   // the inserted char's width.
-  const ins = editKey(Input({ value: "コa", caret: 2 }), { name: "char", char: "b", ...base });
+  const ins = editKey(Input({ value: "コa", caret: 2 }), {
+    name: "char",
+    char: "b",
+    ...base,
+  });
   if (ins.value !== "コba") throw new Error(`inserted value = ${ins.value}`);
   if (ins.caret !== 3) throw new Error(`inserted caret = ${ins.caret}`);
   // Backspace over a wide char removes the whole glyph and steps two columns.
-  const bs = editKey(Input({ value: "コ", caret: 2 }), { name: "backspace", ...base });
-  if (bs.value !== "" || bs.caret !== 0) throw new Error(`backspace wide = ${bs.value}/${bs.caret}`);
+  const bs = editKey(Input({ value: "コ", caret: 2 }), {
+    name: "backspace",
+    ...base,
+  });
+  if (bs.value !== "" || bs.caret !== 0) {
+    throw new Error(`backspace wide = ${bs.value}/${bs.caret}`);
+  }
 });
 
 /** The ZWJ family emoji — ONE extended grapheme cluster of 11 code units
@@ -2963,7 +3513,9 @@ Deno.test("editKey steps the cursor over a ZWJ family emoji one cluster at a tim
   if (l3.caret !== 0) throw new Error(`left over a = ${l3.caret}`);
   // Movement never mutates the value.
   const moved = editKey(mk(3), { name: "left", ...base });
-  if (moved.value !== `a${FAMILY_EMOJI}b`) throw new Error(`value mutated = ${moved.value}`);
+  if (moved.value !== `a${FAMILY_EMOJI}b`) {
+    throw new Error(`value mutated = ${moved.value}`);
+  }
   // home/end land on the boundaries (end = the 4-column display width).
   const end = editKey(mk(0), { name: "end", ...base });
   if (end.caret !== 4) throw new Error(`end caret = ${end.caret}`);
@@ -2989,7 +3541,10 @@ Deno.test("editKey backspace removes a ZWJ family emoji as one cluster", () => {
   if (step2.value !== "a" || step2.caret !== 1) {
     throw new Error(`backspace emoji = ${JSON.stringify(step2)}`);
   }
-  const step3 = editKey(Input({ value: "a", caret: 1 }), { name: "backspace", ...base });
+  const step3 = editKey(Input({ value: "a", caret: 1 }), {
+    name: "backspace",
+    ...base,
+  });
   if (step3.value !== "" || step3.caret !== 0) {
     throw new Error(`backspace a = ${JSON.stringify(step3)}`);
   }
@@ -3008,14 +3563,18 @@ Deno.test("editKey steps over a base+combining sequence as one cluster", () => {
   const r1 = editKey(mk(0), { name: "right", ...base });
   if (r1.caret !== 1) throw new Error(`right over a = ${r1.caret}`);
   const r2 = editKey(mk(1), { name: "right", ...base });
-  if (r2.caret !== 2) throw new Error(`right over the combining cluster = ${r2.caret}`);
+  if (r2.caret !== 2) {
+    throw new Error(`right over the combining cluster = ${r2.caret}`);
+  }
   const r3 = editKey(mk(2), { name: "right", ...base });
   if (r3.caret !== 3) throw new Error(`right over b = ${r3.caret}`);
   // Left steps 2 → 1 → 0 — never a column between the base and its mark.
   const l1 = editKey(mk(2), { name: "left", ...base });
   if (l1.caret !== 1) throw new Error(`left over b = ${l1.caret}`);
   const l2 = editKey(mk(1), { name: "left", ...base });
-  if (l2.caret !== 0) throw new Error(`left over the combining cluster = ${l2.caret}`);
+  if (l2.caret !== 0) {
+    throw new Error(`left over the combining cluster = ${l2.caret}`);
+  }
 });
 
 Deno.test("editKey backspace removes a base+combining sequence whole", () => {
@@ -3036,7 +3595,10 @@ Deno.test("editKey backspace removes a base+combining sequence whole", () => {
   if (step2.value !== "a" || step2.caret !== 1) {
     throw new Error(`backspace combining = ${JSON.stringify(step2)}`);
   }
-  const step3 = editKey(Input({ value: "a", caret: 1 }), { name: "backspace", ...base });
+  const step3 = editKey(Input({ value: "a", caret: 1 }), {
+    name: "backspace",
+    ...base,
+  });
   if (step3.value !== "" || step3.caret !== 0) {
     throw new Error(`backspace a = ${JSON.stringify(step3)}`);
   }
@@ -3047,7 +3609,9 @@ Deno.test("pasteInto inserts text at the caret and advances the caret", () => {
   const next = pasteInto(input, "XY");
   if (next.value !== "aXYb") throw new Error(`value = ${next.value}`);
   if (next.caret !== 3) throw new Error(`caret = ${next.caret}`);
-  if (input.props.value !== "aXYb") throw new Error(`node value = ${input.props.value}`);
+  if (input.props.value !== "aXYb") {
+    throw new Error(`node value = ${input.props.value}`);
+  }
   if (input.children[0]?.props.text !== "aXYb") {
     throw new Error(`leaf text = ${input.children[0]?.props.text}`);
   }
@@ -3093,18 +3657,30 @@ Deno.test("pasteInto before a ZWJ cluster inserts at the cluster boundary", () =
   // Caret at display column 1 = the boundary between 'a' and the family
   // emoji (the emoji's lead column): the paste lands there and the caret
   // advances by the pasted text's cluster width.
-  const atBoundary = pasteInto(Input({ value: `a${FAMILY_EMOJI}b`, caret: 1 }), "X");
-  if (atBoundary.value !== `aX${FAMILY_EMOJI}b`) throw new Error(`value = ${atBoundary.value}`);
+  const atBoundary = pasteInto(
+    Input({ value: `a${FAMILY_EMOJI}b`, caret: 1 }),
+    "X",
+  );
+  if (atBoundary.value !== `aX${FAMILY_EMOJI}b`) {
+    throw new Error(`value = ${atBoundary.value}`);
+  }
   if (atBoundary.caret !== 2) throw new Error(`caret = ${atBoundary.caret}`);
   // A caret column inside the emoji's display span (col 2 — its
   // continuation) snaps back to the cluster's start: the paste lands before
   // the cluster, never mid-cluster.
-  const snapped = pasteInto(Input({ value: `a${FAMILY_EMOJI}b`, caret: 2 }), "X");
-  if (snapped.value !== `aX${FAMILY_EMOJI}b`) throw new Error(`snap value = ${snapped.value}`);
+  const snapped = pasteInto(
+    Input({ value: `a${FAMILY_EMOJI}b`, caret: 2 }),
+    "X",
+  );
+  if (snapped.value !== `aX${FAMILY_EMOJI}b`) {
+    throw new Error(`snap value = ${snapped.value}`);
+  }
   if (snapped.caret !== 3) throw new Error(`snap caret = ${snapped.caret}`);
   // Pasting the ZWJ cluster advances the caret by its 2-column width.
   const wide = pasteInto(Input({ value: "ab", caret: 1 }), FAMILY_EMOJI);
-  if (wide.value !== `a${FAMILY_EMOJI}b`) throw new Error(`wide value = ${wide.value}`);
+  if (wide.value !== `a${FAMILY_EMOJI}b`) {
+    throw new Error(`wide value = ${wide.value}`);
+  }
   if (wide.caret !== 3) throw new Error(`wide caret = ${wide.caret}`);
 });
 
@@ -3148,18 +3724,47 @@ Deno.test("pasteInto before a ZWJ cluster inserts at the cluster boundary", () =
 /** The family emoji / flags / combining clusters from the Rust fuzz pool —
  * each entry is one complete extended grapheme cluster. */
 const EDIT_FRAGMENTS = [
-  "a", "b", "c", "x", "Hello", "word", "123", "text", "line", "42",
-  "コ", "日", "世", "界", "中", "漢字", "ワイド",
+  "a",
+  "b",
+  "c",
+  "x",
+  "Hello",
+  "word",
+  "123",
+  "text",
+  "line",
+  "42",
+  "コ",
+  "日",
+  "世",
+  "界",
+  "中",
+  "漢字",
+  "ワイド",
   "👨\u200D👩\u200D👧\u200D👦", // ZWJ family — one cluster, 2 cols
   "🇷🇺", // flag — one cluster, 2 cols
   "e\u{301}", // base + combining acute — one cluster, 1 col
   "a\u{301}",
-  "🚀", "🍣",
-  "z", "multi", "word",
+  "🚀",
+  "🍣",
+  "z",
+  "multi",
+  "word",
 ];
 
 /** Single-cluster characters used for char-insert ops. */
-const EDIT_CHARS = ["a", "b", "x", "1", "コ", "日", "世", "🚀", "🍣", "e\u{301}"];
+const EDIT_CHARS = [
+  "a",
+  "b",
+  "x",
+  "1",
+  "コ",
+  "日",
+  "世",
+  "🚀",
+  "🍣",
+  "e\u{301}",
+];
 
 /** The fixed default seed; `TERN_EDIT_SEED` overrides it (CI rotation). */
 const EDIT_DEFAULT_SEED = 0xed17_5eed_c0de_1ce;
@@ -3174,7 +3779,8 @@ class EditRng {
     this.#state = seed & 0xffff_ffff_ffff_ffffn;
   }
   #next(): bigint {
-    this.#state = (this.#state + 0x9e37_79b9_7f4a_7c15n) & 0xffff_ffff_ffff_ffffn;
+    this.#state = (this.#state + 0x9e37_79b9_7f4a_7c15n) &
+      0xffff_ffff_ffff_ffffn;
     let z = this.#state;
     z = ((z ^ (z >> 30n)) * 0xbf58_476d_1ce4_e5b9n) & 0xffff_ffff_ffff_ffffn;
     z = ((z ^ (z >> 27n)) * 0x94d0_49bb_1331_11ebn) & 0xffff_ffff_ffff_ffffn;
@@ -3264,7 +3870,8 @@ function editClusters(value: string): {
   width: number;
   text: string;
 }[] {
-  const runs: { start: number; len: number; width: number; text: string }[] = [];
+  const runs: { start: number; len: number; width: number; text: string }[] =
+    [];
   const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
   let start = 0;
   for (const seg of segmenter.segment(value)) {
@@ -3308,7 +3915,11 @@ function editRandomValue(rng: EditRng): string {
 /** The invariant core shared by every edit fuzz suite: assert the cursor
  * rests on a cluster boundary of `value` and stays within the painted
  * width. `label` names the failing edit for the error message. */
-function assertEditCursorInvariant(value: string, caret: number, label: string): void {
+function assertEditCursorInvariant(
+  value: string,
+  caret: number,
+  label: string,
+): void {
   const columns = editBoundaryColumns(value);
   if (!columns.includes(caret)) {
     throw new Error(
@@ -3317,7 +3928,11 @@ function assertEditCursorInvariant(value: string, caret: number, label: string):
     );
   }
   if (caret < 0 || caret > editTotalWidth(value)) {
-    throw new Error(`${label}: cursor ${caret} outside the painted width of ${JSON.stringify(value)}`);
+    throw new Error(
+      `${label}: cursor ${caret} outside the painted width of ${
+        JSON.stringify(value)
+      }`,
+    );
   }
 }
 
@@ -3334,7 +3949,11 @@ Deno.test("grapheme invariant fuzz: cursor always on a cluster boundary", () => 
       const key = rng.below(6);
       let next;
       if (key === 0) {
-        next = editKey(input, { name: "char", char: rng.pick(EDIT_CHARS), ...base });
+        next = editKey(input, {
+          name: "char",
+          char: rng.pick(EDIT_CHARS),
+          ...base,
+        });
       } else if (key === 1) {
         next = editKey(input, { name: "backspace", ...base });
       } else if (key === 2) {
@@ -3355,7 +3974,9 @@ Deno.test("grapheme invariant fuzz: cursor always on a cluster boundary", () => 
       const props = input.props;
       if (props.value !== next.value || props.caret !== next.caret) {
         throw new Error(
-          `round ${round} step ${step}: node props ${JSON.stringify(props)} diverge from ` +
+          `round ${round} step ${step}: node props ${
+            JSON.stringify(props)
+          } diverge from ` +
             `returned ${JSON.stringify(next)}`,
         );
       }
@@ -3382,7 +4003,9 @@ Deno.test("grapheme invariant fuzz: cluster-width sums are exact", () => {
     const end = editKey(Input({ value, caret: 0 }), { name: "end", ...base });
     if (end.caret !== total) {
       throw new Error(
-        `round ${round}: end caret ${end.caret} != total width ${total} of ${JSON.stringify(value)}`,
+        `round ${round}: end caret ${end.caret} != total width ${total} of ${
+          JSON.stringify(value)
+        }`,
       );
     }
 
@@ -3394,8 +4017,12 @@ Deno.test("grapheme invariant fuzz: cluster-width sums are exact", () => {
       const right = editKey(walk, { name: "right", ...base });
       if (right.caret - before !== cluster.width) {
         throw new Error(
-          `round ${round}: right advanced ${right.caret - before} columns, expected ` +
-            `${cluster.width} (cluster ${JSON.stringify(cluster.text)} of ${JSON.stringify(value)})`,
+          `round ${round}: right advanced ${
+            right.caret - before
+          } columns, expected ` +
+            `${cluster.width} (cluster ${JSON.stringify(cluster.text)} of ${
+              JSON.stringify(value)
+            })`,
         );
       }
     }
@@ -3414,13 +4041,17 @@ Deno.test("grapheme invariant fuzz: cluster-width sums are exact", () => {
       const left = editKey(back, { name: "left", ...base });
       if (before - left.caret !== cluster.width) {
         throw new Error(
-          `round ${round}: left retreated ${before - left.caret} columns, expected ` +
+          `round ${round}: left retreated ${
+            before - left.caret
+          } columns, expected ` +
             `${cluster.width} (cluster ${JSON.stringify(cluster.text)})`,
         );
       }
     }
     if (back.props.caret !== 0) {
-      throw new Error(`round ${round}: left-walk ended at ${back.props.caret}, expected 0`);
+      throw new Error(
+        `round ${round}: left-walk ended at ${back.props.caret}, expected 0`,
+      );
     }
   }
 });
@@ -3442,8 +4073,12 @@ Deno.test("grapheme invariant fuzz: paste round-trips at a cluster boundary", ()
     const expectedSplice = value.slice(0, index) + text + value.slice(index);
     if (next.value !== expectedSplice) {
       throw new Error(
-        `round ${round}: paste of ${JSON.stringify(text)} at caret ${caret} produced ` +
-          `${JSON.stringify(next.value)}, expected splice ${JSON.stringify(expectedSplice)} ` +
+        `round ${round}: paste of ${
+          JSON.stringify(text)
+        } at caret ${caret} produced ` +
+          `${JSON.stringify(next.value)}, expected splice ${
+            JSON.stringify(expectedSplice)
+          } ` +
           `(value ${JSON.stringify(value)})`,
       );
     }
@@ -3456,7 +4091,11 @@ Deno.test("grapheme invariant fuzz: paste round-trips at a cluster boundary", ()
         `round ${round}: paste caret ${next.caret} != ${caret} + ${pastedWidth}`,
       );
     }
-    assertEditCursorInvariant(next.value, next.caret, `round ${round} after paste`);
+    assertEditCursorInvariant(
+      next.value,
+      next.caret,
+      `round ${round} after paste`,
+    );
 
     // Round-trip: backspacing exactly the pasted text's cluster count
     // restores the original value and caret.
@@ -3468,7 +4107,9 @@ Deno.test("grapheme invariant fuzz: paste round-trips at a cluster boundary", ()
     const props = replay.props;
     if (props.value !== value || props.caret !== caret) {
       throw new Error(
-        `round ${round}: paste round-trip restored ${JSON.stringify(props.value)}@${props.caret}, ` +
+        `round ${round}: paste round-trip restored ${
+          JSON.stringify(props.value)
+        }@${props.caret}, ` +
           `expected ${JSON.stringify(value)}@${caret}`,
       );
     }
@@ -3495,35 +4136,47 @@ Deno.test("Textarea composes one text leaf per line with the caret on the caret'
   const ta = Textarea({ lines: ["ab", "cd"], row: 1, col: 2 });
   const props = ta.props as TextareaProps;
   if (ta.type !== "textarea") throw new Error(`type = ${ta.type}`);
-  if (props.lines?.join(",") !== "ab,cd") throw new Error(`lines = ${JSON.stringify(props.lines)}`);
+  if (props.lines?.join(",") !== "ab,cd") {
+    throw new Error(`lines = ${JSON.stringify(props.lines)}`);
+  }
   if (props.row !== 1 || props.col !== 2) {
     throw new Error(`row/col = ${props.row}/${props.col}`);
   }
-  if (ta.children.length !== 2) throw new Error(`leaves = ${ta.children.length}`);
+  if (ta.children.length !== 2) {
+    throw new Error(`leaves = ${ta.children.length}`);
+  }
   const first = ta.children[0]!;
   const second = ta.children[1]!;
   if (first.type !== "text" || first.props.text !== "ab") {
     throw new Error(`leaf 0 = ${JSON.stringify(first.props)}`);
   }
-  if ("caret" in first.props) throw new Error("the caret's line must be the only one with a caret");
+  if ("caret" in first.props) {
+    throw new Error("the caret's line must be the only one with a caret");
+  }
   if (second.props.text !== "cd" || second.props.caret !== 2) {
     throw new Error(`leaf 1 = ${JSON.stringify(second.props)}`);
   }
   // No explicit width: leaves are not sized, each line stays one display row.
-  if ("width" in first.props) throw new Error("no width prop without a wrap width");
+  if ("width" in first.props) {
+    throw new Error("no width prop without a wrap width");
+  }
 });
 
 Deno.test("Textarea with a width soft-wraps long lines into multiple leaves", () => {
   // The caret starts at (0,0) unless props say otherwise; the end-of-text
   // caret (col 11) rides the second display line.
   const ta = Textarea({ lines: ["hello world"], width: 5, row: 0, col: 11 });
-  if (ta.children.length !== 2) throw new Error(`leaves = ${ta.children.length}`);
+  if (ta.children.length !== 2) {
+    throw new Error(`leaves = ${ta.children.length}`);
+  }
   const first = ta.children[0]!;
   const second = ta.children[1]!;
   if (first.props.text !== "hello" || first.props.width !== 5) {
     throw new Error(`wrapped line 0 = ${JSON.stringify(first.props)}`);
   }
-  if ("caret" in first.props) throw new Error("the first wrapped line must not carry the caret");
+  if ("caret" in first.props) {
+    throw new Error("the first wrapped line must not carry the caret");
+  }
   // The caret (end of "hello world") rides the second display line at its
   // display column (5 — the trailing space at the wrap point is dropped).
   if (second.props.text !== "world" || second.props.caret !== 5) {
@@ -3531,8 +4184,15 @@ Deno.test("Textarea with a width soft-wraps long lines into multiple leaves", ()
   }
   // Default caret (0,0) sits on the first display line instead.
   const atStart = Textarea({ lines: ["hello world"], width: 5 });
-  if (atStart.children[0]?.props.caret !== 0 || "caret" in (atStart.children[1]?.props ?? {})) {
-    throw new Error(`default caret must ride the first line: ${JSON.stringify(atStart.children.map((c) => c.props))}`);
+  if (
+    atStart.children[0]?.props.caret !== 0 ||
+    "caret" in (atStart.children[1]?.props ?? {})
+  ) {
+    throw new Error(
+      `default caret must ride the first line: ${
+        JSON.stringify(atStart.children.map((c) => c.props))
+      }`,
+    );
   }
 });
 
@@ -3549,7 +4209,9 @@ Deno.test("wrapLineWithOffsets wraps plain ASCII at the width with exact offsets
   }
   // No wrap width: the whole line is one display row starting at 0.
   const flat = wrapLineWithOffsets("hello world", null);
-  if (flat.length !== 1 || flat[0]!.text !== "hello world" || flat[0]!.start !== 0) {
+  if (
+    flat.length !== 1 || flat[0]!.text !== "hello world" || flat[0]!.start !== 0
+  ) {
     throw new Error(`flat = ${JSON.stringify(flat)}`);
   }
 });
@@ -3568,7 +4230,10 @@ Deno.test("wrapLineWithOffsets wraps CJK wide chars by display columns", () => {
   // Mixed ASCII + wide: "aコ" is 3 columns, so 'b' wraps to its own row.
   const mixed = wrapLineWithOffsets("aコb", 3);
   if (mixed.length !== 2) throw new Error(`mixed rows = ${mixed.length}`);
-  if (mixed[0]!.text !== "aコ" || mixed[0]!.start !== 0 || mixed[1]!.text !== "b" || mixed[1]!.start !== 2) {
+  if (
+    mixed[0]!.text !== "aコ" || mixed[0]!.start !== 0 ||
+    mixed[1]!.text !== "b" || mixed[1]!.start !== 2
+  ) {
     throw new Error(`mixed = ${JSON.stringify(mixed)}`);
   }
 });
@@ -3580,14 +4245,19 @@ Deno.test("wrapLineWithOffsets hard-breaks a long unbroken token across rows", (
   if (wrapped.length !== 4) throw new Error(`rows = ${wrapped.length}`);
   const texts = wrapped.map((r) => r.text).join("|");
   if (texts !== "super|calif|ragil|istic") throw new Error(`texts = ${texts}`);
-  if (wrapped[0]!.start !== 0 || wrapped[1]!.start !== 5 || wrapped[2]!.start !== 10 || wrapped[3]!.start !== 15) {
+  if (
+    wrapped[0]!.start !== 0 || wrapped[1]!.start !== 5 ||
+    wrapped[2]!.start !== 10 || wrapped[3]!.start !== 15
+  ) {
     throw new Error(`starts = ${wrapped.map((r) => r.start).join(",")}`);
   }
 });
 
 Deno.test("wrapLineWithOffsets and measureText treat the empty string as one empty row", () => {
   const wrapped = wrapLineWithOffsets("", 5);
-  if (wrapped.length !== 1 || wrapped[0]!.text !== "" || wrapped[0]!.start !== 0) {
+  if (
+    wrapped.length !== 1 || wrapped[0]!.text !== "" || wrapped[0]!.start !== 0
+  ) {
     throw new Error(`wrapped = ${JSON.stringify(wrapped)}`);
   }
   const measured = measureText("", 5);
@@ -3621,7 +4291,9 @@ Deno.test("wrapLineWithOffsets and measureText strip ANSI escapes at ingestion",
   const colored = measureText(red, 5);
   const plain = measureText("red", 5);
   if (colored.rows !== plain.rows || colored.maxWidth !== plain.maxWidth) {
-    throw new Error(`colored = ${JSON.stringify(colored)}, plain = ${JSON.stringify(plain)}`);
+    throw new Error(
+      `colored = ${JSON.stringify(colored)}, plain = ${JSON.stringify(plain)}`,
+    );
   }
   if (colored.rows !== 1 || colored.maxWidth !== 3) {
     throw new Error(`colored = ${JSON.stringify(colored)}`);
@@ -3629,7 +4301,10 @@ Deno.test("wrapLineWithOffsets and measureText strip ANSI escapes at ingestion",
   // The wrapped row carries only the visible text; its start is the original
   // code-unit index of 'r' (after the 5-byte leading escape).
   const wrapped = wrapLineWithOffsets(red, 5);
-  if (wrapped.length !== 1 || wrapped[0]!.text !== "red" || wrapped[0]!.start !== 5) {
+  if (
+    wrapped.length !== 1 || wrapped[0]!.text !== "red" ||
+    wrapped[0]!.start !== 5
+  ) {
     throw new Error(`wrapped = ${JSON.stringify(wrapped)}`);
   }
   // The no-width path strips too, so the composed leaf never carries the
@@ -3646,16 +4321,30 @@ Deno.test("wrapLineWithOffsets and measureText strip OSC and C1 escape forms", (
   // form: the visible text is all that measures.
   const link = "\x1b]8;;https://example.com\x1b\\red\x1b]8;;\x1b\\";
   if (measureText(link, 20).maxWidth !== 3) throw new Error(`link`);
-  if (measureText("\x1b]0;my title\x07red", 20).maxWidth !== 3) throw new Error(`bel`);
-  if (measureText("\x1b]8;;u\x9cred", 20).maxWidth !== 3) throw new Error(`c1st`);
-  if (measureText("\x9b31mred\x9b0m", 20).maxWidth !== 3) throw new Error(`c1csi`);
+  if (measureText("\x1b]0;my title\x07red", 20).maxWidth !== 3) {
+    throw new Error(`bel`);
+  }
+  if (measureText("\x1b]8;;u\x9cred", 20).maxWidth !== 3) {
+    throw new Error(`c1st`);
+  }
+  if (measureText("\x9b31mred\x9b0m", 20).maxWidth !== 3) {
+    throw new Error(`c1csi`);
+  }
   // A bare ESC inside an OSC body (not followed by `\`) is body data.
-  if (measureText("\x1b]0;a\x1bb\x07", 20).maxWidth !== 0) throw new Error(`bare`);
+  if (measureText("\x1b]0;a\x1bb\x07", 20).maxWidth !== 0) {
+    throw new Error(`bare`);
+  }
   // Truncated sequences (no final byte / no terminator) strip to the end of
   // the input rather than leaking their bytes.
-  if (measureText("red\x1b[31", 20).maxWidth !== 3) throw new Error(`trunc-csi`);
-  if (measureText("red\x1b]0;unterminated", 20).maxWidth !== 3) throw new Error(`trunc-osc`);
-  if (measureText("a\x1b]0;title", 20).maxWidth !== 1) throw new Error(`trunc-osc-lead`);
+  if (measureText("red\x1b[31", 20).maxWidth !== 3) {
+    throw new Error(`trunc-csi`);
+  }
+  if (measureText("red\x1b]0;unterminated", 20).maxWidth !== 3) {
+    throw new Error(`trunc-osc`);
+  }
+  if (measureText("a\x1b]0;title", 20).maxWidth !== 1) {
+    throw new Error(`trunc-osc-lead`);
+  }
   // Only the OSC and CSI shapes strip: a lone ESC that introduces neither
   // (here the charset-designator form ESC ( B) is kept as-is — every byte
   // measures 1, mirroring tern-core's control fallback.
@@ -3731,14 +4420,24 @@ Deno.test("Textarea paints stripped leaves and maps the caret across escapes", (
   // the escape bytes), and a caret at the end of a colored line lands at the
   // display column of the visible text — the escape interior trails its
   // content, never splitting the caret into an escape.
-  const ta = Textarea({ lines: ["\x1b[31mred\x1b[0m"], row: 0, col: 12, width: 5 });
+  const ta = Textarea({
+    lines: ["\x1b[31mred\x1b[0m"],
+    row: 0,
+    col: 12,
+    width: 5,
+  });
   const leaves = ta.children.map((c) => c.props.text).join("|");
   if (leaves !== "red") throw new Error(`leaves = ${JSON.stringify(leaves)}`);
   const caret = (ta.children[0]?.props as { caret?: number }).caret;
   if (caret !== 3) throw new Error(`caret = ${caret}`);
   // A caret inside the leading escape rests before the first visible char
   // (display column 0 of the only display line).
-  const inside = Textarea({ lines: ["\x1b[31mred\x1b[0m"], row: 0, col: 2, width: 5 });
+  const inside = Textarea({
+    lines: ["\x1b[31mred\x1b[0m"],
+    row: 0,
+    col: 2,
+    width: 5,
+  });
   const insideCaret = (inside.children[0]?.props as { caret?: number }).caret;
   if (insideCaret !== 0) throw new Error(`inside caret = ${insideCaret}`);
 });
@@ -3753,17 +4452,26 @@ Deno.test("editTextareaKey inserts chars and splits lines on enter", () => {
   if ((ta.props as TextareaProps).lines?.join(",") !== "ab,cXd") {
     throw new Error(`node lines = ${JSON.stringify(ta.props.lines)}`);
   }
-  if (ta.children[1]?.props.text !== "cXd" || ta.children[1]?.props.caret !== 2) {
+  if (
+    ta.children[1]?.props.text !== "cXd" || ta.children[1]?.props.caret !== 2
+  ) {
     throw new Error(`node leaf = ${JSON.stringify(ta.children[1]?.props)}`);
   }
   // Enter splits the line at the caret; the tail becomes a new line.
   const afterEnter = editTextareaKey(ta, { name: "enter", ...base });
-  if (afterEnter.lines.join(",") !== "ab,cX,d" || afterEnter.row !== 2 || afterEnter.col !== 0) {
+  if (
+    afterEnter.lines.join(",") !== "ab,cX,d" || afterEnter.row !== 2 ||
+    afterEnter.col !== 0
+  ) {
     throw new Error(`after enter = ${JSON.stringify(afterEnter)}`);
   }
-  if (ta.children.length !== 3) throw new Error(`leaves after split = ${ta.children.length}`);
+  if (ta.children.length !== 3) {
+    throw new Error(`leaves after split = ${ta.children.length}`);
+  }
   if (ta.children[2]?.props.text !== "d" || ta.children[2]?.props.caret !== 0) {
-    throw new Error(`split tail leaf = ${JSON.stringify(ta.children[2]?.props)}`);
+    throw new Error(
+      `split tail leaf = ${JSON.stringify(ta.children[2]?.props)}`,
+    );
   }
 });
 
@@ -3772,13 +4480,17 @@ Deno.test("editTextareaKey backspace and delete remove chars and join lines", ()
   // Backspace at the start of a line joins the previous line at the join point.
   const join = Textarea({ lines: ["ab", "cd"], row: 1, col: 0 });
   const joined = editTextareaKey(join, { name: "backspace", ...base });
-  if (joined.lines.join(",") !== "abcd" || joined.row !== 0 || joined.col !== 2) {
+  if (
+    joined.lines.join(",") !== "abcd" || joined.row !== 0 || joined.col !== 2
+  ) {
     throw new Error(`backspace join = ${JSON.stringify(joined)}`);
   }
   // Delete at the end of a line joins the next line.
   const fwd = Textarea({ lines: ["ab", "cd"], row: 0, col: 2 });
   const deleted = editTextareaKey(fwd, { name: "delete", ...base });
-  if (deleted.lines.join(",") !== "abcd" || deleted.row !== 0 || deleted.col !== 2) {
+  if (
+    deleted.lines.join(",") !== "abcd" || deleted.row !== 0 || deleted.col !== 2
+  ) {
     throw new Error(`delete join = ${JSON.stringify(deleted)}`);
   }
   // Boundary deletes are no-ops.
@@ -3789,7 +4501,9 @@ Deno.test("editTextareaKey backspace and delete remove chars and join lines", ()
   }
   const bottom = Textarea({ lines: ["x"], row: 0, col: 1 });
   const noFwd = editTextareaKey(bottom, { name: "delete", ...base });
-  if (noFwd.lines.join(",") !== "x") throw new Error(`delete at bottom = ${JSON.stringify(noFwd)}`);
+  if (noFwd.lines.join(",") !== "x") {
+    throw new Error(`delete at bottom = ${JSON.stringify(noFwd)}`);
+  }
 });
 
 Deno.test("editTextareaKey navigates left/right/home/end with wrap-around", () => {
@@ -3800,14 +4514,23 @@ Deno.test("editTextareaKey navigates left/right/home/end with wrap-around", () =
     throw new Error(`left wraps up = ${left.row}/${left.col}`);
   }
   const right = editTextareaKey(mk(), { name: "right", ...base });
-  if (right.row !== 1 || right.col !== 1) throw new Error(`right = ${right.row}/${right.col}`);
+  if (right.row !== 1 || right.col !== 1) {
+    throw new Error(`right = ${right.row}/${right.col}`);
+  }
   const end = editTextareaKey(mk(), { name: "end", ...base });
-  if (end.row !== 1 || end.col !== 2) throw new Error(`end = ${end.row}/${end.col}`);
+  if (end.row !== 1 || end.col !== 2) {
+    throw new Error(`end = ${end.row}/${end.col}`);
+  }
   const home = editTextareaKey(mk(), { name: "home", ...base });
-  if (home.row !== 1 || home.col !== 0) throw new Error(`home = ${home.row}/${home.col}`);
+  if (home.row !== 1 || home.col !== 0) {
+    throw new Error(`home = ${home.row}/${home.col}`);
+  }
   // Unknown keys leave the textarea unchanged.
   const unknown = editTextareaKey(mk(), { name: "tab", ...base });
-  if (unknown.lines.join(",") !== "ab,cd" || unknown.row !== 1 || unknown.col !== 0) {
+  if (
+    unknown.lines.join(",") !== "ab,cd" || unknown.row !== 1 ||
+    unknown.col !== 0
+  ) {
     throw new Error(`tab must not edit: ${JSON.stringify(unknown)}`);
   }
 });
@@ -3820,62 +4543,105 @@ Deno.test("editTextareaKey up/down traverse soft-wrapped display lines", () => {
   const up = editTextareaKey(ta, { name: "up", ...base });
   if (up.row !== 0 || up.col !== 5) throw new Error(`up = ${up.row}/${up.col}`);
   const down = editTextareaKey(ta, { name: "down", ...base });
-  if (down.row !== 0 || down.col !== 11) throw new Error(`down = ${down.row}/${down.col}`);
+  if (down.row !== 0 || down.col !== 11) {
+    throw new Error(`down = ${down.row}/${down.col}`);
+  }
   // The preferred column sticks across the vertical run: from the end of the
   // last display line, three ups climb the display rows keeping col 5.
-  const multi = Textarea({ lines: ["alpha beta", "gamma delta"], width: 5, row: 1, col: 11 });
+  const multi = Textarea({
+    lines: ["alpha beta", "gamma delta"],
+    width: 5,
+    row: 1,
+    col: 11,
+  });
   const u1 = editTextareaKey(multi, { name: "up", ...base });
   if (u1.row !== 1 || u1.col !== 5) throw new Error(`u1 = ${u1.row}/${u1.col}`);
   const u2 = editTextareaKey(multi, { name: "up", ...base });
-  if (u2.row !== 0 || u2.col !== 10) throw new Error(`u2 = ${u2.row}/${u2.col}`);
+  if (u2.row !== 0 || u2.col !== 10) {
+    throw new Error(`u2 = ${u2.row}/${u2.col}`);
+  }
   const u3 = editTextareaKey(multi, { name: "up", ...base });
   if (u3.row !== 0 || u3.col !== 5) throw new Error(`u3 = ${u3.row}/${u3.col}`);
   const d1 = editTextareaKey(multi, { name: "down", ...base });
-  if (d1.row !== 0 || d1.col !== 10) throw new Error(`d1 = ${d1.row}/${d1.col}`);
+  if (d1.row !== 0 || d1.col !== 10) {
+    throw new Error(`d1 = ${d1.row}/${d1.col}`);
+  }
 });
 
 Deno.test("editTextareaKey scrolls vertically to keep the caret visible", () => {
   const base = { ctrl: false, alt: false, shift: false } as const;
-  const scrollOf = (node: Node): number => (node.props as TextareaProps).scroll ?? 0;
-  const ta = Textarea({ lines: ["1", "2", "3", "4", "5"], height: 2, row: 0, col: 0 });
+  const scrollOf = (node: Node): number =>
+    (node.props as TextareaProps).scroll ?? 0;
+  const ta = Textarea({
+    lines: ["1", "2", "3", "4", "5"],
+    height: 2,
+    row: 0,
+    col: 0,
+  });
   if (scrollOf(ta) !== 0) throw new Error(`initial scroll = ${scrollOf(ta)}`);
   editTextareaKey(ta, { name: "down", ...base }); // (1,0) — visible
-  if (scrollOf(ta) !== 0) throw new Error(`scroll after 1 down = ${scrollOf(ta)}`);
+  if (scrollOf(ta) !== 0) {
+    throw new Error(`scroll after 1 down = ${scrollOf(ta)}`);
+  }
   editTextareaKey(ta, { name: "down", ...base }); // (2,0) — below the window
-  if (scrollOf(ta) !== 1) throw new Error(`scroll after 2 downs = ${scrollOf(ta)}`);
+  if (scrollOf(ta) !== 1) {
+    throw new Error(`scroll after 2 downs = ${scrollOf(ta)}`);
+  }
   // Only the visible window is composed: rows 2 and 3 (scroll 1, height 2).
-  if (ta.children.length !== 2) throw new Error(`window leaves = ${ta.children.length}`);
-  if (ta.children[0]?.props.text !== "2" || ta.children[1]?.props.text !== "3") {
-    throw new Error(`window = ${ta.children.map((c) => c.props.text).join(",")}`);
+  if (ta.children.length !== 2) {
+    throw new Error(`window leaves = ${ta.children.length}`);
+  }
+  if (
+    ta.children[0]?.props.text !== "2" || ta.children[1]?.props.text !== "3"
+  ) {
+    throw new Error(
+      `window = ${ta.children.map((c) => c.props.text).join(",")}`,
+    );
   }
   if (ta.children[1]?.props.caret !== 0) {
-    throw new Error(`caret on the windowed leaf = ${ta.children[1]?.props.caret}`);
+    throw new Error(
+      `caret on the windowed leaf = ${ta.children[1]?.props.caret}`,
+    );
   }
   editTextareaKey(ta, { name: "up", ...base }); // (1,0) — still inside [1,3)
-  if (scrollOf(ta) !== 1) throw new Error(`scroll stays while visible = ${scrollOf(ta)}`);
+  if (scrollOf(ta) !== 1) {
+    throw new Error(`scroll stays while visible = ${scrollOf(ta)}`);
+  }
   editTextareaKey(ta, { name: "up", ...base }); // (0,0) — above the window
-  if (scrollOf(ta) !== 0) throw new Error(`scroll after up past the top = ${scrollOf(ta)}`);
+  if (scrollOf(ta) !== 0) {
+    throw new Error(`scroll after up past the top = ${scrollOf(ta)}`);
+  }
 });
 
 Deno.test("pasteIntoTextarea inserts text at the caret (single line)", () => {
   const ta = Textarea({ lines: ["ab", "cd"], row: 1, col: 1 });
   const next = pasteIntoTextarea(ta, "XY");
-  if (next.lines.join(",") !== "ab,cXYd") throw new Error(`lines = ${next.lines.join(",")}`);
+  if (next.lines.join(",") !== "ab,cXYd") {
+    throw new Error(`lines = ${next.lines.join(",")}`);
+  }
   if (next.row !== 1 || next.col !== 3) {
     throw new Error(`row/col = ${next.row}/${next.col}`);
   }
   if ((ta.props as TextareaProps).lines?.join(",") !== "ab,cXYd") {
     throw new Error(`node lines = ${JSON.stringify(ta.props.lines)}`);
   }
-  if (ta.children[1]?.props.text !== "cXYd" || ta.children[1]?.props.caret !== 3) {
+  if (
+    ta.children[1]?.props.text !== "cXYd" || ta.children[1]?.props.caret !== 3
+  ) {
     throw new Error(`node leaf = ${JSON.stringify(ta.children[1]?.props)}`);
   }
   // Pasting at the start / end stays on the same line.
-  const start = pasteIntoTextarea(Textarea({ lines: ["ab"], row: 0, col: 0 }), "X");
+  const start = pasteIntoTextarea(
+    Textarea({ lines: ["ab"], row: 0, col: 0 }),
+    "X",
+  );
   if (start.lines.join(",") !== "Xab" || start.col !== 1) {
     throw new Error(`start paste = ${start.lines.join(",")}/${start.col}`);
   }
-  const end = pasteIntoTextarea(Textarea({ lines: ["ab"], row: 0, col: 2 }), "X");
+  const end = pasteIntoTextarea(
+    Textarea({ lines: ["ab"], row: 0, col: 2 }),
+    "X",
+  );
   if (end.lines.join(",") !== "abX" || end.col !== 3) {
     throw new Error(`end paste = ${end.lines.join(",")}/${end.col}`);
   }
@@ -3884,24 +4650,40 @@ Deno.test("pasteIntoTextarea inserts text at the caret (single line)", () => {
 Deno.test("pasteIntoTextarea splits lines on pasted newlines", () => {
   const ta = Textarea({ lines: ["ab", "cd"], row: 1, col: 1 });
   const next = pasteIntoTextarea(ta, "X\nYZ");
-  if (next.lines.join(",") !== "ab,cX,YZd") throw new Error(`lines = ${next.lines.join(",")}`);
+  if (next.lines.join(",") !== "ab,cX,YZd") {
+    throw new Error(`lines = ${next.lines.join(",")}`);
+  }
   if (next.row !== 2 || next.col !== 2) {
     throw new Error(`row/col = ${next.row}/${next.col}`);
   }
   // The tail of the original line joins the last pasted segment.
-  if (ta.children.length !== 3) throw new Error(`leaves after split = ${ta.children.length}`);
-  if (ta.children[2]?.props.text !== "YZd" || ta.children[2]?.props.caret !== 2) {
+  if (ta.children.length !== 3) {
+    throw new Error(`leaves after split = ${ta.children.length}`);
+  }
+  if (
+    ta.children[2]?.props.text !== "YZd" || ta.children[2]?.props.caret !== 2
+  ) {
     throw new Error(`tail leaf = ${JSON.stringify(ta.children[2]?.props)}`);
   }
   // A leading newline pastes an empty first line (pure line split).
-  const lead = pasteIntoTextarea(Textarea({ lines: ["ab"], row: 0, col: 0 }), "\nxy");
+  const lead = pasteIntoTextarea(
+    Textarea({ lines: ["ab"], row: 0, col: 0 }),
+    "\nxy",
+  );
   if (lead.lines.join(",") !== ",xyab" || lead.row !== 1 || lead.col !== 2) {
-    throw new Error(`leading newline = ${lead.lines.join(",")}/${lead.row}/${lead.col}`);
+    throw new Error(
+      `leading newline = ${lead.lines.join(",")}/${lead.row}/${lead.col}`,
+    );
   }
   // A trailing newline moves the tail to a fresh line.
-  const trail = pasteIntoTextarea(Textarea({ lines: ["ab"], row: 0, col: 1 }), "x\n");
+  const trail = pasteIntoTextarea(
+    Textarea({ lines: ["ab"], row: 0, col: 1 }),
+    "x\n",
+  );
   if (trail.lines.join(",") !== "ax,b" || trail.row !== 1 || trail.col !== 0) {
-    throw new Error(`trailing newline = ${trail.lines.join(",")}/${trail.row}/${trail.col}`);
+    throw new Error(
+      `trailing newline = ${trail.lines.join(",")}/${trail.row}/${trail.col}`,
+    );
   }
 });
 
@@ -3916,12 +4698,17 @@ Deno.test("pasteIntoTextarea is multi-width aware for wide pastes", () => {
   if (next.row !== 0 || next.col !== 3) {
     throw new Error(`row/col = ${next.row}/${next.col}`);
   }
-  if (ta.children[0]?.props.text !== "aコ世b" || ta.children[0]?.props.caret !== 5) {
+  if (
+    ta.children[0]?.props.text !== "aコ世b" || ta.children[0]?.props.caret !== 5
+  ) {
     throw new Error(`leaf = ${JSON.stringify(ta.children[0]?.props)}`);
   }
   // A wide paste between wide chars keeps the code-unit caret consistent:
   // "コa" is 2 code units, col 1 is between コ and a.
-  const mid = pasteIntoTextarea(Textarea({ lines: ["コa"], row: 0, col: 1 }), "文");
+  const mid = pasteIntoTextarea(
+    Textarea({ lines: ["コa"], row: 0, col: 1 }),
+    "文",
+  );
   if (mid.lines[0] !== "コ文a" || mid.col !== 2) {
     throw new Error(`mid wide = ${mid.lines[0]}/${mid.col}`);
   }
@@ -3931,35 +4718,55 @@ Deno.test("editTextareaKey steps left/right over a ZWJ family emoji one cluster 
   const base = { ctrl: false, alt: false, shift: false } as const;
   // The line is 'a' + emoji + 'b'; col is a code-unit index. Cluster starts:
   // 'a' at 0, the 11-code-unit emoji at 1, 'b' at 12.
-  const right1 = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 0 }), {
-    name: "right",
-    ...base,
-  });
+  const right1 = editTextareaKey(
+    Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 0 }),
+    {
+      name: "right",
+      ...base,
+    },
+  );
   if (right1.col !== 1) throw new Error(`right over a = ${right1.col}`);
-  const right2 = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }), {
-    name: "right",
-    ...base,
-  });
-  if (right2.col !== 12) throw new Error(`right over the emoji = ${right2.col}`);
-  const right3 = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 12 }), {
-    name: "right",
-    ...base,
-  });
+  const right2 = editTextareaKey(
+    Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }),
+    {
+      name: "right",
+      ...base,
+    },
+  );
+  if (right2.col !== 12) {
+    throw new Error(`right over the emoji = ${right2.col}`);
+  }
+  const right3 = editTextareaKey(
+    Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 12 }),
+    {
+      name: "right",
+      ...base,
+    },
+  );
   if (right3.col !== 13) throw new Error(`right over b = ${right3.col}`);
-  const left1 = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 13 }), {
-    name: "left",
-    ...base,
-  });
+  const left1 = editTextareaKey(
+    Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 13 }),
+    {
+      name: "left",
+      ...base,
+    },
+  );
   if (left1.col !== 12) throw new Error(`left over b = ${left1.col}`);
-  const left2 = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 12 }), {
-    name: "left",
-    ...base,
-  });
+  const left2 = editTextareaKey(
+    Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 12 }),
+    {
+      name: "left",
+      ...base,
+    },
+  );
   if (left2.col !== 1) throw new Error(`left over the emoji = ${left2.col}`);
-  const left3 = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }), {
-    name: "left",
-    ...base,
-  });
+  const left3 = editTextareaKey(
+    Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }),
+    {
+      name: "left",
+      ...base,
+    },
+  );
   if (left3.col !== 0) throw new Error(`left over a = ${left3.col}`);
 });
 
@@ -3967,36 +4774,48 @@ Deno.test("editTextareaKey backspace and delete remove a ZWJ family emoji whole"
   const base = { ctrl: false, alt: false, shift: false } as const;
   // Backspace before 'b' removes 'b'; backspace before the emoji removes the
   // whole 11-code-unit cluster, never a fragment.
-  const bsB = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 13 }), {
-    name: "backspace",
-    ...base,
-  });
+  const bsB = editTextareaKey(
+    Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 13 }),
+    {
+      name: "backspace",
+      ...base,
+    },
+  );
   if (bsB.lines[0] !== `a${FAMILY_EMOJI}` || bsB.col !== 12) {
     throw new Error(`backspace b = ${JSON.stringify(bsB)}`);
   }
-  const bsFam = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 12 }), {
-    name: "backspace",
-    ...base,
-  });
+  const bsFam = editTextareaKey(
+    Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 12 }),
+    {
+      name: "backspace",
+      ...base,
+    },
+  );
   if (bsFam.lines[0] !== "ab" || bsFam.col !== 1) {
     throw new Error(`backspace emoji = ${JSON.stringify(bsFam)}`);
   }
   // Delete at the cluster boundary removes the whole cluster; the cursor
   // stays at the boundary (the following char's start).
-  const del = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }), {
-    name: "delete",
-    ...base,
-  });
+  const del = editTextareaKey(
+    Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }),
+    {
+      name: "delete",
+      ...base,
+    },
+  );
   if (del.lines[0] !== "ab" || del.col !== 1) {
     throw new Error(`delete emoji = ${JSON.stringify(del)}`);
   }
   // A mid-cluster cursor (from caller props) snaps to the boundary after its
   // cluster — where its caret visually paints — so backspace removes the
   // whole cluster.
-  const snapped = editTextareaKey(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 5 }), {
-    name: "backspace",
-    ...base,
-  });
+  const snapped = editTextareaKey(
+    Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 5 }),
+    {
+      name: "backspace",
+      ...base,
+    },
+  );
   if (snapped.lines[0] !== "ab" || snapped.col !== 1) {
     throw new Error(`snapped backspace = ${JSON.stringify(snapped)}`);
   }
@@ -4004,15 +4823,25 @@ Deno.test("editTextareaKey backspace and delete remove a ZWJ family emoji whole"
 
 Deno.test("pasteIntoTextarea before a ZWJ cluster inserts at the cluster boundary", () => {
   // col 1 is the boundary between 'a' and the emoji: the paste lands there.
-  const atBoundary = pasteIntoTextarea(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }), "X");
-  if (atBoundary.lines[0] !== `aX${FAMILY_EMOJI}b`) throw new Error(`value = ${atBoundary.lines[0]}`);
+  const atBoundary = pasteIntoTextarea(
+    Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 1 }),
+    "X",
+  );
+  if (atBoundary.lines[0] !== `aX${FAMILY_EMOJI}b`) {
+    throw new Error(`value = ${atBoundary.lines[0]}`);
+  }
   if (atBoundary.row !== 0 || atBoundary.col !== 2) {
     throw new Error(`row/col = ${atBoundary.row}/${atBoundary.col}`);
   }
   // A mid-cluster cursor snaps to the boundary after its cluster — the paste
   // lands after the emoji, before 'b', never inside the cluster.
-  const snapped = pasteIntoTextarea(Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 5 }), "X");
-  if (snapped.lines[0] !== `a${FAMILY_EMOJI}Xb`) throw new Error(`snap value = ${snapped.lines[0]}`);
+  const snapped = pasteIntoTextarea(
+    Textarea({ lines: [`a${FAMILY_EMOJI}b`], row: 0, col: 5 }),
+    "X",
+  );
+  if (snapped.lines[0] !== `a${FAMILY_EMOJI}Xb`) {
+    throw new Error(`snap value = ${snapped.lines[0]}`);
+  }
   if (snapped.row !== 0 || snapped.col !== 13) {
     throw new Error(`snap row/col = ${snapped.row}/${snapped.col}`);
   }
@@ -4023,35 +4852,57 @@ Deno.test("editTextareaKey steps over a base+combining sequence as one cluster",
   // The line is 'a' + "e\u0301" + 'b'; col is a code-unit index. The
   // combining cluster occupies code units 1..3 (base 'e' at 1, mark at 2);
   // 'b' starts at 3.
-  const right1 = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 0 }), {
-    name: "right",
-    ...base,
-  });
+  const right1 = editTextareaKey(
+    Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 0 }),
+    {
+      name: "right",
+      ...base,
+    },
+  );
   if (right1.col !== 1) throw new Error(`right over a = ${right1.col}`);
-  const right2 = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 1 }), {
-    name: "right",
-    ...base,
-  });
-  if (right2.col !== 3) throw new Error(`right over the combining cluster = ${right2.col}`);
-  const right3 = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 3 }), {
-    name: "right",
-    ...base,
-  });
+  const right2 = editTextareaKey(
+    Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 1 }),
+    {
+      name: "right",
+      ...base,
+    },
+  );
+  if (right2.col !== 3) {
+    throw new Error(`right over the combining cluster = ${right2.col}`);
+  }
+  const right3 = editTextareaKey(
+    Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 3 }),
+    {
+      name: "right",
+      ...base,
+    },
+  );
   if (right3.col !== 4) throw new Error(`right over b = ${right3.col}`);
-  const left1 = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 4 }), {
-    name: "left",
-    ...base,
-  });
+  const left1 = editTextareaKey(
+    Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 4 }),
+    {
+      name: "left",
+      ...base,
+    },
+  );
   if (left1.col !== 3) throw new Error(`left over b = ${left1.col}`);
-  const left2 = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 3 }), {
-    name: "left",
-    ...base,
-  });
-  if (left2.col !== 1) throw new Error(`left over the combining cluster = ${left2.col}`);
-  const left3 = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 1 }), {
-    name: "left",
-    ...base,
-  });
+  const left2 = editTextareaKey(
+    Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 3 }),
+    {
+      name: "left",
+      ...base,
+    },
+  );
+  if (left2.col !== 1) {
+    throw new Error(`left over the combining cluster = ${left2.col}`);
+  }
+  const left3 = editTextareaKey(
+    Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 1 }),
+    {
+      name: "left",
+      ...base,
+    },
+  );
   if (left3.col !== 0) throw new Error(`left over a = ${left3.col}`);
 });
 
@@ -4059,26 +4910,35 @@ Deno.test("editTextareaKey backspace and delete remove a base+combining sequence
   const base = { ctrl: false, alt: false, shift: false } as const;
   // Backspace before 'b' removes 'b'; backspace before the cluster removes
   // the whole 2-code-unit base+mark pair, never a fragment.
-  const bsB = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 4 }), {
-    name: "backspace",
-    ...base,
-  });
+  const bsB = editTextareaKey(
+    Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 4 }),
+    {
+      name: "backspace",
+      ...base,
+    },
+  );
   if (bsB.lines[0] !== `a${COMBINING_ACUTE}` || bsB.col !== 3) {
     throw new Error(`backspace b = ${JSON.stringify(bsB)}`);
   }
-  const bsSeq = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 3 }), {
-    name: "backspace",
-    ...base,
-  });
+  const bsSeq = editTextareaKey(
+    Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 3 }),
+    {
+      name: "backspace",
+      ...base,
+    },
+  );
   if (bsSeq.lines[0] !== "ab" || bsSeq.col !== 1) {
     throw new Error(`backspace combining = ${JSON.stringify(bsSeq)}`);
   }
   // Delete at the cluster boundary removes the whole cluster; the cursor
   // stays at the boundary.
-  const del = editTextareaKey(Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 1 }), {
-    name: "delete",
-    ...base,
-  });
+  const del = editTextareaKey(
+    Textarea({ lines: [`a${COMBINING_ACUTE}b`], row: 0, col: 1 }),
+    {
+      name: "delete",
+      ...base,
+    },
+  );
   if (del.lines[0] !== "ab" || del.col !== 1) {
     throw new Error(`delete combining = ${JSON.stringify(del)}`);
   }
@@ -4098,7 +4958,9 @@ Deno.test("Spinner renders a determinate bar of filled and empty cells", () => {
   if (none.props.text !== "░░░") throw new Error(`empty = ${none.props.text}`);
   // Filled cells round up: 3/10 * 4 = 1.2 -> 2 cells.
   const ceilBar = Spinner({ value: 3, max: 10, width: 4 });
-  if (ceilBar.props.text !== "▓▓░░") throw new Error(`ceil = ${ceilBar.props.text}`);
+  if (ceilBar.props.text !== "▓▓░░") {
+    throw new Error(`ceil = ${ceilBar.props.text}`);
+  }
 });
 
 Deno.test("tick advances the indeterminate frame and wraps", () => {
@@ -4122,8 +4984,12 @@ Deno.test("tick on a determinate spinner leaves the bar unchanged", () => {
   const before = bar.props.text;
   const next = tick(bar);
   if (next !== "▓▓░░") throw new Error(`next = ${next}`);
-  if (bar.props.text !== before) throw new Error("determinate bar must not change on tick");
-  if (bar.props.frame !== undefined) throw new Error(`frame = ${bar.props.frame}`);
+  if (bar.props.text !== before) {
+    throw new Error("determinate bar must not change on tick");
+  }
+  if (bar.props.frame !== undefined) {
+    throw new Error(`frame = ${bar.props.frame}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -4133,7 +4999,9 @@ Deno.test("tick on a determinate spinner leaves the bar unchanged", () => {
 Deno.test("StatusBar composes left/center/right segment Text nodes", () => {
   const bar = StatusBar({ left: "L", center: "C", right: "R" });
   if (bar.type !== "status_bar") throw new Error(`type = ${bar.type}`);
-  if (bar.props.flex_direction !== "row") throw new Error(`flex_direction = ${bar.props.flex_direction}`);
+  if (bar.props.flex_direction !== "row") {
+    throw new Error(`flex_direction = ${bar.props.flex_direction}`);
+  }
   if (bar.props.justify_content !== "space-between") {
     throw new Error(`justify_content = ${bar.props.justify_content}`);
   }
@@ -4153,12 +5021,18 @@ Deno.test("StatusBar accepts node segments, omits missing ones, and lifts segmen
   const bar = StatusBar({ left: "only", right: rightNode });
   const kids = bar.children;
   if (kids.length !== 2) throw new Error(`segments = ${kids.length}`);
-  if (kids[0]?.props.text !== "only") throw new Error(`left text = ${kids[0]?.props.text}`);
-  if (kids[1] !== rightNode) throw new Error("a node segment must be used verbatim");
+  if (kids[0]?.props.text !== "only") {
+    throw new Error(`left text = ${kids[0]?.props.text}`);
+  }
+  if (kids[1] !== rightNode) {
+    throw new Error("a node segment must be used verbatim");
+  }
   // left/right are absolute-position inset keywords in tern-layout; the
   // segment keys must never reach the strip's props.
   if ("left" in bar.props || "right" in bar.props || "center" in bar.props) {
-    throw new Error(`segment keys leaked into strip props: ${JSON.stringify(bar.props)}`);
+    throw new Error(
+      `segment keys leaked into strip props: ${JSON.stringify(bar.props)}`,
+    );
   }
 });
 
@@ -4169,30 +5043,53 @@ Deno.test("StatusBar accepts node segments, omits missing ones, and lifts segmen
 Deno.test("Panels builds header + body panels with an active index", () => {
   const bodyA = Text({ text: "a-body" });
   const bodyB = Text({ text: "b-body" });
-  const panels = Panels({ panels: [{ header: "A", body: bodyA }, { header: "B", body: bodyB }], active: 1 });
+  const panels = Panels({
+    panels: [{ header: "A", body: bodyA }, { header: "B", body: bodyB }],
+    active: 1,
+  });
   if (panels.type !== "panels") throw new Error(`type = ${panels.type}`);
-  if (panels.props.active !== 1) throw new Error(`active = ${panels.props.active}`);
-  if (panels.props.flex_direction !== "column") throw new Error(`direction = ${panels.props.flex_direction}`);
+  if (panels.props.active !== 1) {
+    throw new Error(`active = ${panels.props.active}`);
+  }
+  if (panels.props.flex_direction !== "column") {
+    throw new Error(`direction = ${panels.props.flex_direction}`);
+  }
   const kids = panels.children;
   if (kids.length !== 2) throw new Error(`panels = ${kids.length}`);
   const first = kids[0]!;
   const second = kids[1]!;
   if (first.type !== "box") throw new Error(`panel type = ${first.type}`);
-  if (first.children.length !== 2) throw new Error("panel A must have header + body");
-  if (first.children[0]?.props.text !== "A") throw new Error(`header = ${first.children[0]?.props.text}`);
-  if (first.children[1] !== bodyA) throw new Error("panel A body must be the given node");
-  if (second.children[1] !== bodyB) throw new Error("panel B body must be the given node");
+  if (first.children.length !== 2) {
+    throw new Error("panel A must have header + body");
+  }
+  if (first.children[0]?.props.text !== "A") {
+    throw new Error(`header = ${first.children[0]?.props.text}`);
+  }
+  if (first.children[1] !== bodyA) {
+    throw new Error("panel A body must be the given node");
+  }
+  if (second.children[1] !== bodyB) {
+    throw new Error("panel B body must be the given node");
+  }
   // The active panel's header is bold; inactive headers are not.
-  if (second.children[0]?.props.bold !== true) throw new Error("active header must be bold");
-  if (first.children[0]?.props.bold !== false) throw new Error("inactive header must not be bold");
+  if (second.children[0]?.props.bold !== true) {
+    throw new Error("active header must be bold");
+  }
+  if (first.children[0]?.props.bold !== false) {
+    throw new Error("inactive header must not be bold");
+  }
 });
 
 Deno.test("Panels builds collapsed panels header-only", () => {
   const body = Text({ text: "x" });
   const panels = Panels({ panels: [{ header: "A", body, collapsed: true }] });
   const panel = panels.children[0]!;
-  if (panel.children.length !== 1) throw new Error(`collapsed children = ${panel.children.length}`);
-  if (panel.children[0]?.props.text !== "A") throw new Error("header must be retained");
+  if (panel.children.length !== 1) {
+    throw new Error(`collapsed children = ${panel.children.length}`);
+  }
+  if (panel.children[0]?.props.text !== "A") {
+    throw new Error("header must be retained");
+  }
 });
 
 Deno.test("togglePanel collapses and restores a panel body", () => {
@@ -4202,13 +5099,19 @@ Deno.test("togglePanel collapses and restores a panel body", () => {
   const collapsed = togglePanel(panels, 0);
   if (collapsed !== true) throw new Error("toggle must collapse");
   const collapsedCount = panel.children.length;
-  if (collapsedCount !== 1) throw new Error(`collapsed children = ${collapsedCount}`);
+  if (collapsedCount !== 1) {
+    throw new Error(`collapsed children = ${collapsedCount}`);
+  }
   if (body.attached) throw new Error("removed body must be detached");
   const expanded = togglePanel(panels, 0);
   if (expanded !== false) throw new Error("toggle must expand");
   const expandedCount = panel.children.length;
-  if (expandedCount !== 2) throw new Error(`expanded children = ${expandedCount}`);
-  if (panel.children[1] !== body) throw new Error("restored body must be the same node");
+  if (expandedCount !== 2) {
+    throw new Error(`expanded children = ${expandedCount}`);
+  }
+  if (panel.children[1] !== body) {
+    throw new Error("restored body must be the same node");
+  }
 });
 
 Deno.test("collapsePanel and expandPanel are idempotent and ignore bad indices", () => {
@@ -4218,19 +5121,28 @@ Deno.test("collapsePanel and expandPanel are idempotent and ignore bad indices",
   collapsePanel(panels, 0);
   collapsePanel(panels, 0);
   const afterCollapse = panel.children.length;
-  if (afterCollapse !== 1) throw new Error(`double collapse must be a no-op (${afterCollapse})`);
+  if (afterCollapse !== 1) {
+    throw new Error(`double collapse must be a no-op (${afterCollapse})`);
+  }
   expandPanel(panels, 0);
   expandPanel(panels, 0);
   const afterExpand = panel.children.length;
-  if (afterExpand !== 2) throw new Error(`double expand must be a no-op (${afterExpand})`);
+  if (afterExpand !== 2) {
+    throw new Error(`double expand must be a no-op (${afterExpand})`);
+  }
   collapsePanel(panels, 99);
   const afterBad = panel.children.length;
-  if (afterBad !== 2) throw new Error(`collapsing a bad index must be a no-op (${afterBad})`);
+  if (afterBad !== 2) {
+    throw new Error(`collapsing a bad index must be a no-op (${afterBad})`);
+  }
 });
 
 Deno.test("focusPanel moves the active index and restyles headers", () => {
   const panels = Panels({
-    panels: [{ header: "A", body: Text({ text: "1" }) }, { header: "B", body: Text({ text: "2" }) }],
+    panels: [{ header: "A", body: Text({ text: "1" }) }, {
+      header: "B",
+      body: Text({ text: "2" }),
+    }],
   });
   const initialActive = panels.props.active;
   if (initialActive !== 0) throw new Error(`initial active = ${initialActive}`);
@@ -4266,7 +5178,10 @@ function mouse(kind: string, column: number, row: number): MouseEventJs {
  * row 3, panel B rows 4-5, gutter row 6, panel C rows 7-8). Panels are 60
  * cells wide.
  */
-function attachedPanels(): { renderer: ReturnType<typeof createRenderer>; panels: Node } {
+function attachedPanels(): {
+  renderer: ReturnType<typeof createRenderer>;
+  panels: Node;
+} {
   const renderer = createRenderer();
   const panels = Panels({
     panels: [
@@ -4285,9 +5200,14 @@ function attachedPanels(): { renderer: ReturnType<typeof createRenderer>; panels
 }
 
 Deno.test("Panels defaults to a 1-cell gutter gap (an explicit gap wins)", () => {
-  const a = Panels({ panels: [{ header: "A", body: Box() }, { header: "B", body: Box() }] });
+  const a = Panels({
+    panels: [{ header: "A", body: Box() }, { header: "B", body: Box() }],
+  });
   if (a.props.gap !== 1) throw new Error(`default gap = ${a.props.gap}`);
-  const b = Panels({ panels: [{ header: "A", body: Box() }, { header: "B", body: Box() }], gap: 0 });
+  const b = Panels({
+    panels: [{ header: "A", body: Box() }, { header: "B", body: Box() }],
+    gap: 0,
+  });
   if (b.props.gap !== 0) throw new Error(`explicit gap = ${b.props.gap}`);
 });
 
@@ -4297,7 +5217,9 @@ Deno.test("startPanelDrag grabs a gutter on down_left and dragPanels mutates the
 
     // Press on gutter 0 (row 3): between panel A (rows 0-2) and panel B.
     const started = startPanelDrag(panels, mouse("down_left", 0, 3));
-    if (started === null || started.index !== 0 || started.direction !== "column") {
+    if (
+      started === null || started.index !== 0 || started.direction !== "column"
+    ) {
       throw new Error(`started = ${JSON.stringify(started)}`);
     }
 
@@ -4307,12 +5229,16 @@ Deno.test("startPanelDrag grabs a gutter on down_left and dragPanels mutates the
       throw new Error(`drag 1 = ${JSON.stringify(r1)}`);
     }
     if (panels.children[0]!.props.flex_basis !== 4) {
-      throw new Error(`flex_basis after drag = ${panels.children[0]!.props.flex_basis}`);
+      throw new Error(
+        `flex_basis after drag = ${panels.children[0]!.props.flex_basis}`,
+      );
     }
 
     // Drag down 2 more: 4 -> 6.
     const r2 = dragPanels(panels, mouse("drag_left", 0, 6));
-    if (r2 === null || r2.flex_basis !== 6) throw new Error(`drag 2 = ${JSON.stringify(r2)}`);
+    if (r2 === null || r2.flex_basis !== 6) {
+      throw new Error(`drag 2 = ${JSON.stringify(r2)}`);
+    }
 
     // A drag on a gutter further down targets its own pane (gutter 1 -> pane B).
     const r3 = dragPanels(panels, mouse("drag_left", 0, 7));
@@ -4322,7 +5248,9 @@ Deno.test("startPanelDrag grabs a gutter on down_left and dragPanels mutates the
 
     // up_left ends the drag; a later drag_left is inert.
     const ended = endPanelDrag(panels);
-    if (ended === null || ended.index !== 0) throw new Error(`ended = ${JSON.stringify(ended)}`);
+    if (ended === null || ended.index !== 0) {
+      throw new Error(`ended = ${JSON.stringify(ended)}`);
+    }
     if (dragPanels(panels, mouse("drag_left", 0, 8)) !== null) {
       throw new Error("a drag after up_left must be a no-op");
     }
@@ -4365,7 +5293,10 @@ Deno.test("a declared min_height prop raises the pane's drag floor", () => {
   withFakeAddon(() => {
     const renderer = createRenderer();
     const panels = Panels({
-      panels: [{ header: "A", body: Box(), min_height: 4 }, { header: "B", body: Box() }],
+      panels: [{ header: "A", body: Box(), min_height: 4 }, {
+        header: "B",
+        body: Box(),
+      }],
       direction: "column",
     });
     renderer.root.addChild(panels);
@@ -4399,11 +5330,15 @@ Deno.test("row stacks resize by column and use min_width", () => {
     fakeContentSizes.set(panels.children[1]!.handle, { width: 2, height: 20 });
     // Gutter 0 = column 3 (panel A columns 0-2); the drag axis is the column.
     const started = startPanelDrag(panels, mouse("down_left", 3, 0));
-    if (started === null || started.direction !== "row" || started.index !== 0) {
+    if (
+      started === null || started.direction !== "row" || started.index !== 0
+    ) {
       throw new Error(`started = ${JSON.stringify(started)}`);
     }
     const r = dragPanels(panels, mouse("drag_left", 5, 0)); // +2 columns
-    if (r === null || r.flex_basis !== 5) throw new Error(`row drag = ${JSON.stringify(r)}`);
+    if (r === null || r.flex_basis !== 5) {
+      throw new Error(`row drag = ${JSON.stringify(r)}`);
+    }
     if (panels.children[0]!.props.flex_basis !== 5) {
       throw new Error(`flex_basis = ${panels.children[0]!.props.flex_basis}`);
     }
@@ -4434,12 +5369,16 @@ Deno.test("startPanelDrag ignores presses off the gutters and on detached trees"
       throw new Error("drag_left must not start a drag");
     }
     // A detached tree has no geometry: contentSize throws, so no drag.
-    const detached = Panels({ panels: [{ header: "A", body: Box() }, { header: "B", body: Box() }] });
+    const detached = Panels({
+      panels: [{ header: "A", body: Box() }, { header: "B", body: Box() }],
+    });
     if (startPanelDrag(detached, mouse("down_left", 0, 1)) !== null) {
       throw new Error("a detached tree must not start a drag");
     }
     // endPanelDrag without an active drag is a no-op.
-    if (endPanelDrag(panels) !== null) throw new Error("end without a drag must return null");
+    if (endPanelDrag(panels) !== null) {
+      throw new Error("end without a drag must return null");
+    }
   });
 });
 
@@ -4493,18 +5432,28 @@ Deno.test("DiffView composes a column of gutter/marker/content rows per hunk lin
     throw new Error(`flex_direction = ${diff.props.flex_direction}`);
   }
   // The line model is JS bookkeeping, never a scene prop.
-  if ("hunks" in diff.props) throw new Error("hunks must not reach the scene props");
+  if ("hunks" in diff.props) {
+    throw new Error("hunks must not reach the scene props");
+  }
   const rows = diff.children;
-  if (rows.length !== diffHunks.length) throw new Error(`rows = ${rows.length}`);
+  if (rows.length !== diffHunks.length) {
+    throw new Error(`rows = ${rows.length}`);
+  }
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (row === undefined || row.type !== "box" || row.props.flex_direction !== "row") {
+    if (
+      row === undefined || row.type !== "box" ||
+      row.props.flex_direction !== "row"
+    ) {
       throw new Error(`row ${i} must be a row box`);
     }
     const kids = row.children;
     if (kids.length !== 3) throw new Error(`row ${i} must have 3 text leaves`);
     const [gutter, marker, content] = kids;
-    if (gutter?.type !== "text" || marker?.type !== "text" || content?.type !== "text") {
+    if (
+      gutter?.type !== "text" || marker?.type !== "text" ||
+      content?.type !== "text"
+    ) {
       throw new Error(`row ${i} leaves must be text`);
     }
   }
@@ -4515,45 +5464,93 @@ Deno.test("DiffView gutter right-aligns old/new line numbers and blanks absent s
   const rows = diff.children;
   const gutter = (i: number): string => rows[i]?.children[0]?.props.text ?? "";
   // Width-2 columns: old and new, right-aligned, joined by a space.
-  if (gutter(0) !== " 1  1") throw new Error(`gutter(0) = ${JSON.stringify(gutter(0))}`);
-  if (gutter(1) !== " 2   ") throw new Error(`gutter(1) = ${JSON.stringify(gutter(1))}`);
-  if (gutter(2) !== "    2") throw new Error(`gutter(2) = ${JSON.stringify(gutter(2))}`);
-  if (gutter(3) !== " 3  3") throw new Error(`gutter(3) = ${JSON.stringify(gutter(3))}`);
+  if (gutter(0) !== " 1  1") {
+    throw new Error(`gutter(0) = ${JSON.stringify(gutter(0))}`);
+  }
+  if (gutter(1) !== " 2   ") {
+    throw new Error(`gutter(1) = ${JSON.stringify(gutter(1))}`);
+  }
+  if (gutter(2) !== "    2") {
+    throw new Error(`gutter(2) = ${JSON.stringify(gutter(2))}`);
+  }
+  if (gutter(3) !== " 3  3") {
+    throw new Error(`gutter(3) = ${JSON.stringify(gutter(3))}`);
+  }
   // Two-digit numbers widen neither column beyond the widest number.
-  if (gutter(4) !== "10 11") throw new Error(`gutter(4) = ${JSON.stringify(gutter(4))}`);
-  if (gutter(5) !== "11   ") throw new Error(`gutter(5) = ${JSON.stringify(gutter(5))}`);
-  if (gutter(6) !== "   12") throw new Error(`gutter(6) = ${JSON.stringify(gutter(6))}`);
+  if (gutter(4) !== "10 11") {
+    throw new Error(`gutter(4) = ${JSON.stringify(gutter(4))}`);
+  }
+  if (gutter(5) !== "11   ") {
+    throw new Error(`gutter(5) = ${JSON.stringify(gutter(5))}`);
+  }
+  if (gutter(6) !== "   12") {
+    throw new Error(`gutter(6) = ${JSON.stringify(gutter(6))}`);
+  }
 });
 
 Deno.test("DiffView styles markers and content per kind: add green, del red, ctx dim", () => {
   const diff = DiffView({ hunks: [...diffHunks] });
   const rows = diff.children;
-  const markerText = (i: number): string => rows[i]?.children[1]?.props.text ?? "";
+  const markerText = (i: number): string =>
+    rows[i]?.children[1]?.props.text ?? "";
   const markerFg = (i: number): unknown => rows[i]?.children[1]?.props.fg;
   const contentFg = (i: number): unknown => rows[i]?.children[2]?.props.fg;
   const contentDim = (i: number): unknown => rows[i]?.children[2]?.props.dim;
   // Markers: ctx is a space, del is '-', add is '+'.
-  if (markerText(0) !== " ") throw new Error(`ctx marker = ${JSON.stringify(markerText(0))}`);
-  if (markerText(1) !== "-") throw new Error(`del marker = ${JSON.stringify(markerText(1))}`);
-  if (markerText(2) !== "+") throw new Error(`add marker = ${JSON.stringify(markerText(2))}`);
+  if (markerText(0) !== " ") {
+    throw new Error(`ctx marker = ${JSON.stringify(markerText(0))}`);
+  }
+  if (markerText(1) !== "-") {
+    throw new Error(`del marker = ${JSON.stringify(markerText(1))}`);
+  }
+  if (markerText(2) !== "+") {
+    throw new Error(`add marker = ${JSON.stringify(markerText(2))}`);
+  }
   // Marker + content carry the kind color; ctx is dimmed, no fg.
-  if (markerFg(1) !== DIFF_DEL_FG) throw new Error(`del marker fg = ${markerFg(1)}`);
-  if (contentFg(1) !== DIFF_DEL_FG) throw new Error(`del content fg = ${contentFg(1)}`);
-  if (markerFg(2) !== DIFF_ADD_FG) throw new Error(`add marker fg = ${markerFg(2)}`);
-  if (contentFg(2) !== DIFF_ADD_FG) throw new Error(`add content fg = ${contentFg(2)}`);
-  if (markerFg(0) !== undefined) throw new Error(`ctx marker must have no fg (${markerFg(0)})`);
-  if (contentDim(0) !== true) throw new Error(`ctx content must be dimmed (${contentDim(0)})`);
-  if (contentDim(2) !== undefined) throw new Error(`add content must not be dimmed`);
+  if (markerFg(1) !== DIFF_DEL_FG) {
+    throw new Error(`del marker fg = ${markerFg(1)}`);
+  }
+  if (contentFg(1) !== DIFF_DEL_FG) {
+    throw new Error(`del content fg = ${contentFg(1)}`);
+  }
+  if (markerFg(2) !== DIFF_ADD_FG) {
+    throw new Error(`add marker fg = ${markerFg(2)}`);
+  }
+  if (contentFg(2) !== DIFF_ADD_FG) {
+    throw new Error(`add content fg = ${contentFg(2)}`);
+  }
+  if (markerFg(0) !== undefined) {
+    throw new Error(`ctx marker must have no fg (${markerFg(0)})`);
+  }
+  if (contentDim(0) !== true) {
+    throw new Error(`ctx content must be dimmed (${contentDim(0)})`);
+  }
+  if (contentDim(2) !== undefined) {
+    throw new Error(`add content must not be dimmed`);
+  }
   // The content leaf carries the line text verbatim (multi-width included).
   if (rows[4]?.children[2]?.props.text !== "  宽度对齐测试") {
-    throw new Error(`multi-width content = ${JSON.stringify(rows[4]?.children[2]?.props.text)}`);
+    throw new Error(
+      `multi-width content = ${
+        JSON.stringify(rows[4]?.children[2]?.props.text)
+      }`,
+    );
   }
 });
 
 Deno.test("DiffView passes scroll_x/scroll_y to the root and wrap to the content leaves", () => {
-  const diff = DiffView({ hunks: [...diffHunks], scroll_x: 4, scroll_y: 7, wrap: false });
-  if (diff.props.scroll_x !== 4) throw new Error(`scroll_x = ${diff.props.scroll_x}`);
-  if (diff.props.scroll_y !== 7) throw new Error(`scroll_y = ${diff.props.scroll_y}`);
+  const diff = DiffView({
+    hunks: [...diffHunks],
+    scroll_x: 4,
+    scroll_y: 7,
+    wrap: false,
+  });
+  if (diff.props.scroll_x !== 4) {
+    throw new Error(`scroll_x = ${diff.props.scroll_x}`);
+  }
+  if (diff.props.scroll_y !== 7) {
+    throw new Error(`scroll_y = ${diff.props.scroll_y}`);
+  }
   for (let i = 0; i < diff.children.length; i++) {
     if (diff.children[i]?.children[2]?.props.wrap !== false) {
       throw new Error(`row ${i} content must carry wrap=false`);
@@ -4571,8 +5568,12 @@ Deno.test("DiffView passes scroll_x/scroll_y to the root and wrap to the content
 Deno.test("DiffView with no hunks yields an empty column", () => {
   const diff = DiffView({ hunks: [] });
   if (diff.type !== "diff") throw new Error(`type = ${diff.type}`);
-  if (diff.children.length !== 0) throw new Error(`rows = ${diff.children.length}`);
-  if ("hunks" in diff.props) throw new Error("hunks must not reach the scene props");
+  if (diff.children.length !== 0) {
+    throw new Error(`rows = ${diff.children.length}`);
+  }
+  if ("hunks" in diff.props) {
+    throw new Error("hunks must not reach the scene props");
+  }
 });
 
 /** Flatten one diff row's leaves into their text, in scene order. */
@@ -4582,7 +5583,9 @@ function diffRowTexts(row: Node): string[] {
 
 /** The golden style snapshot of one text leaf: its text plus the keys the
  * intra-line highlighting stamps (`fg` kind color, `bold` / `underline`). */
-function diffLeafStyle(leaf: Node): { text: string; fg: unknown; bold: unknown; underline: unknown } {
+function diffLeafStyle(
+  leaf: Node,
+): { text: string; fg: unknown; bold: unknown; underline: unknown } {
   return {
     text: leaf.props.text as string,
     fg: leaf.props.fg,
@@ -4603,10 +5606,14 @@ Deno.test("DiffView inline_highlight splits paired add/del lines at char granula
   const addRow = diff.children[1]!;
   // Gutter + marker are unchanged from unified mode (width-1 gutters).
   if (diffRowTexts(delRow).slice(0, 2).join("|") !== "2  |-") {
-    throw new Error(`del gutter|marker = ${JSON.stringify(diffRowTexts(delRow).slice(0, 2))}`);
+    throw new Error(
+      `del gutter|marker = ${JSON.stringify(diffRowTexts(delRow).slice(0, 2))}`,
+    );
   }
   if (diffRowTexts(addRow).slice(0, 2).join("|") !== "  2|+") {
-    throw new Error(`add gutter|marker = ${JSON.stringify(diffRowTexts(addRow).slice(0, 2))}`);
+    throw new Error(
+      `add gutter|marker = ${JSON.stringify(diffRowTexts(addRow).slice(0, 2))}`,
+    );
   }
   // The paired content splits into per-segment leaves inside a row box.
   const delContent = delRow.children[2]!;
@@ -4628,8 +5635,12 @@ Deno.test("DiffView inline_highlight splits paired add/del lines at char granula
     for (let i = 0; i < golden.length; i++) {
       const got = diffLeafStyle(segs[i]!);
       const want = golden[i]!;
-      if (got.text !== want.text || got.fg !== want.fg || got.bold !== want.bold) {
-        throw new Error(`segment ${i} = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+      if (
+        got.text !== want.text || got.fg !== want.fg || got.bold !== want.bold
+      ) {
+        throw new Error(
+          `segment ${i} = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`,
+        );
       }
       // Changed chars are additionally underlined; plain chars are not.
       if (want.bold && got.underline !== true) {
@@ -4677,7 +5688,9 @@ Deno.test("DiffView inline_highlight keeps unpaired lines plain and whole-line c
   const lone = diff.children[0]!;
   const loneContent = lone.children[2]!;
   if (loneContent.type !== "text" || loneContent.props.text !== "foo") {
-    throw new Error(`unpaired del content = ${JSON.stringify(diffLeafStyle(loneContent))}`);
+    throw new Error(
+      `unpaired del content = ${JSON.stringify(diffLeafStyle(loneContent))}`,
+    );
   }
   if (loneContent.props.bold !== undefined) {
     throw new Error("unpaired del must not be highlighted");
@@ -4689,7 +5702,9 @@ Deno.test("DiffView inline_highlight keeps unpaired lines plain and whole-line c
   for (const [row, text] of [[delAll, "aaa"], [addAll, "bbb"]] as const) {
     const content = row.children[2]!;
     if (content.type !== "text" || content.props.text !== text) {
-      throw new Error(`all-changed content = ${JSON.stringify(diffLeafStyle(content))}`);
+      throw new Error(
+        `all-changed content = ${JSON.stringify(diffLeafStyle(content))}`,
+      );
     }
     if (content.props.bold !== true || content.props.underline !== true) {
       throw new Error("all-changed content must be bold + underlined");
@@ -4704,8 +5719,13 @@ Deno.test("DiffView mode=side composes two aligned columns with per-column gutte
     throw new Error(`flex_direction = ${diff.props.flex_direction}`);
   }
   if (diff.props.gap !== 1) throw new Error(`gap = ${diff.props.gap}`);
-  if ("hunks" in diff.props || "mode" in diff.props || "inline_highlight" in diff.props) {
-    throw new Error("hunks/mode/inline_highlight must not reach the scene props");
+  if (
+    "hunks" in diff.props || "mode" in diff.props ||
+    "inline_highlight" in diff.props
+  ) {
+    throw new Error(
+      "hunks/mode/inline_highlight must not reach the scene props",
+    );
   }
   const oldCol = diff.children[0]!;
   const newCol = diff.children[1]!;
@@ -4716,28 +5736,60 @@ Deno.test("DiffView mode=side composes two aligned columns with per-column gutte
     throw new Error("the new side must be a column box");
   }
   // Aligned by line pair: one row per hunk line in both columns.
-  if (oldCol.children.length !== diffHunks.length || newCol.children.length !== diffHunks.length) {
+  if (
+    oldCol.children.length !== diffHunks.length ||
+    newCol.children.length !== diffHunks.length
+  ) {
     throw new Error("columns must carry one row per hunk line");
   }
-  const row = (col: Node, i: number): string => diffRowTexts(col.children[i]!).join("|");
+  const row = (col: Node, i: number): string =>
+    diffRowTexts(col.children[i]!).join("|");
   // Old column: deletions + context, additions blank; its gutter right-aligns
   // on the old line numbers (width 2: 1, 2, 3, 10, 11).
-  if (row(oldCol, 0) !== " 1| |  fn main() {") throw new Error(`old[0] = ${JSON.stringify(row(oldCol, 0))}`);
-  if (row(oldCol, 1) !== " 2|-|    let x = 1;") throw new Error(`old[1] = ${JSON.stringify(row(oldCol, 1))}`);
-  if (row(oldCol, 2) !== "  | |") throw new Error(`old[2] = ${JSON.stringify(row(oldCol, 2))}`);
-  if (row(oldCol, 3) !== " 3| |  }") throw new Error(`old[3] = ${JSON.stringify(row(oldCol, 3))}`);
-  if (row(oldCol, 4) !== "10| |  宽度对齐测试") throw new Error(`old[4] = ${JSON.stringify(row(oldCol, 4))}`);
-  if (row(oldCol, 5) !== "11|-|    old line") throw new Error(`old[5] = ${JSON.stringify(row(oldCol, 5))}`);
-  if (row(oldCol, 6) !== "  | |") throw new Error(`old[6] = ${JSON.stringify(row(oldCol, 6))}`);
+  if (row(oldCol, 0) !== " 1| |  fn main() {") {
+    throw new Error(`old[0] = ${JSON.stringify(row(oldCol, 0))}`);
+  }
+  if (row(oldCol, 1) !== " 2|-|    let x = 1;") {
+    throw new Error(`old[1] = ${JSON.stringify(row(oldCol, 1))}`);
+  }
+  if (row(oldCol, 2) !== "  | |") {
+    throw new Error(`old[2] = ${JSON.stringify(row(oldCol, 2))}`);
+  }
+  if (row(oldCol, 3) !== " 3| |  }") {
+    throw new Error(`old[3] = ${JSON.stringify(row(oldCol, 3))}`);
+  }
+  if (row(oldCol, 4) !== "10| |  宽度对齐测试") {
+    throw new Error(`old[4] = ${JSON.stringify(row(oldCol, 4))}`);
+  }
+  if (row(oldCol, 5) !== "11|-|    old line") {
+    throw new Error(`old[5] = ${JSON.stringify(row(oldCol, 5))}`);
+  }
+  if (row(oldCol, 6) !== "  | |") {
+    throw new Error(`old[6] = ${JSON.stringify(row(oldCol, 6))}`);
+  }
   // New column: additions + context, deletions blank; its gutter right-aligns
   // on the new line numbers (width 2: 1, 2, 3, 11, 12).
-  if (row(newCol, 0) !== " 1| |  fn main() {") throw new Error(`new[0] = ${JSON.stringify(row(newCol, 0))}`);
-  if (row(newCol, 1) !== "  | |") throw new Error(`new[1] = ${JSON.stringify(row(newCol, 1))}`);
-  if (row(newCol, 2) !== " 2|+|    let x = 2;") throw new Error(`new[2] = ${JSON.stringify(row(newCol, 2))}`);
-  if (row(newCol, 3) !== " 3| |  }") throw new Error(`new[3] = ${JSON.stringify(row(newCol, 3))}`);
-  if (row(newCol, 4) !== "11| |  宽度对齐测试") throw new Error(`new[4] = ${JSON.stringify(row(newCol, 4))}`);
-  if (row(newCol, 5) !== "  | |") throw new Error(`new[5] = ${JSON.stringify(row(newCol, 5))}`);
-  if (row(newCol, 6) !== "12|+|    new line") throw new Error(`new[6] = ${JSON.stringify(row(newCol, 6))}`);
+  if (row(newCol, 0) !== " 1| |  fn main() {") {
+    throw new Error(`new[0] = ${JSON.stringify(row(newCol, 0))}`);
+  }
+  if (row(newCol, 1) !== "  | |") {
+    throw new Error(`new[1] = ${JSON.stringify(row(newCol, 1))}`);
+  }
+  if (row(newCol, 2) !== " 2|+|    let x = 2;") {
+    throw new Error(`new[2] = ${JSON.stringify(row(newCol, 2))}`);
+  }
+  if (row(newCol, 3) !== " 3| |  }") {
+    throw new Error(`new[3] = ${JSON.stringify(row(newCol, 3))}`);
+  }
+  if (row(newCol, 4) !== "11| |  宽度对齐测试") {
+    throw new Error(`new[4] = ${JSON.stringify(row(newCol, 4))}`);
+  }
+  if (row(newCol, 5) !== "  | |") {
+    throw new Error(`new[5] = ${JSON.stringify(row(newCol, 5))}`);
+  }
+  if (row(newCol, 6) !== "12|+|    new line") {
+    throw new Error(`new[6] = ${JSON.stringify(row(newCol, 6))}`);
+  }
 });
 
 Deno.test("DiffView mode=side aligned pairs fit a wide viewport without overflow", () => {
@@ -4749,7 +5801,9 @@ Deno.test("DiffView mode=side aligned pairs fit a wide viewport without overflow
   const cellWidth = (cell: Node): number => {
     let w = 0;
     for (const leaf of cell.children) {
-      for (const ch of leaf.props.text as string) w += ch.codePointAt(0)! > 0x2e80 ? 2 : 1;
+      for (const ch of leaf.props.text as string) {
+        w += ch.codePointAt(0)! > 0x2e80 ? 2 : 1;
+      }
     }
     return w;
   };
@@ -4761,10 +5815,13 @@ Deno.test("DiffView mode=side aligned pairs fit a wide viewport without overflow
   // A 40-cell viewport comfortably holds every aligned pair — nothing would
   // overflow the clip region's right edge. The widest pair is the CJK
   // context line: 17 + 1 + 17 = 35 cells.
-  if (widest > 40) throw new Error(`widest aligned pair = ${widest} cells (viewport 40)`);
-  if (widest !== 35) throw new Error(`widest aligned pair = ${widest}, want 35`);
+  if (widest > 40) {
+    throw new Error(`widest aligned pair = ${widest} cells (viewport 40)`);
+  }
+  if (widest !== 35) {
+    throw new Error(`widest aligned pair = ${widest}, want 35`);
+  }
 });
-
 
 // ---------------------------------------------------------------------------
 // Roadmap elements: Select
@@ -4781,12 +5838,22 @@ const keyBase = { ctrl: false, alt: false, shift: false } as const;
 Deno.test("Select composes a filter row and option rows (highlighted first)", () => {
   const select = Select({ options: selectOptions });
   if (select.type !== "select") throw new Error(`type = ${select.type}`);
-  if (select.props.multi !== false) throw new Error(`multi = ${select.props.multi}`);
-  if (select.props.value !== "") throw new Error(`value = ${select.props.value}`);
-  if (select.props.highlighted !== 0) throw new Error(`highlighted = ${select.props.highlighted}`);
-  if ("options" in select.props) throw new Error("options must not reach the scene props");
+  if (select.props.multi !== false) {
+    throw new Error(`multi = ${select.props.multi}`);
+  }
+  if (select.props.value !== "") {
+    throw new Error(`value = ${select.props.value}`);
+  }
+  if (select.props.highlighted !== 0) {
+    throw new Error(`highlighted = ${select.props.highlighted}`);
+  }
+  if ("options" in select.props) {
+    throw new Error("options must not reach the scene props");
+  }
   // Filter row + 3 option rows (no summary in single mode).
-  if (select.children.length !== 4) throw new Error(`children = ${select.children.length}`);
+  if (select.children.length !== 4) {
+    throw new Error(`children = ${select.children.length}`);
+  }
   const filterRow = select.children[0];
   if (filterRow === undefined || filterRow.type !== "text") {
     throw new Error("filter row must be a text leaf");
@@ -4794,8 +5861,12 @@ Deno.test("Select composes a filter row and option rows (highlighted first)", ()
   if (filterRow.props.text !== SELECT_FILTER_PLACEHOLDER) {
     throw new Error(`filter = ${filterRow.props.text}`);
   }
-  if (filterRow.props.dim !== true) throw new Error(`filter dim = ${filterRow.props.dim}`);
-  const labels = select.children.slice(1).map((child) => child.props.text).join(",");
+  if (filterRow.props.dim !== true) {
+    throw new Error(`filter dim = ${filterRow.props.dim}`);
+  }
+  const labels = select.children.slice(1).map((child) => child.props.text).join(
+    ",",
+  );
   if (labels !== "Apple,Banana,Cherry") throw new Error(`rows = ${labels}`);
   // The first option starts highlighted (reversed).
   if (select.children[1]?.props.reversed !== true) {
@@ -4816,7 +5887,9 @@ Deno.test("Select multi mode shows checkmarks and a selected-count summary", () 
     multi: true,
   });
   // Filter + 3 option rows + summary.
-  if (select.children.length !== 5) throw new Error(`children = ${select.children.length}`);
+  if (select.children.length !== 5) {
+    throw new Error(`children = ${select.children.length}`);
+  }
   const rows = select.children.slice(1, 4).map((child) => child.props.text);
   if (rows[0] !== "✓ A") throw new Error(`row 0 = ${rows[0]}`);
   if (rows[1] !== "  B") throw new Error(`row 1 = ${rows[1]}`);
@@ -4837,20 +5910,29 @@ Deno.test("selectKey moves the highlight with up/down and clamps at the ends", (
   const up = selectKey(select, { name: "up", ...keyBase });
   if (up.highlighted !== 0) throw new Error(`up = ${up.highlighted}`);
   // Clamp at the top.
-  const upClamped = selectKey(Select({ options: selectOptions }), { name: "up", ...keyBase });
-  if (upClamped.highlighted !== 0) throw new Error(`up clamp = ${upClamped.highlighted}`);
+  const upClamped = selectKey(Select({ options: selectOptions }), {
+    name: "up",
+    ...keyBase,
+  });
+  if (upClamped.highlighted !== 0) {
+    throw new Error(`up clamp = ${upClamped.highlighted}`);
+  }
   // Clamp at the bottom.
   selectKey(select, { name: "down", ...keyBase });
   selectKey(select, { name: "down", ...keyBase });
   const bottom = selectKey(select, { name: "down", ...keyBase });
-  if (bottom.highlighted !== 2) throw new Error(`down clamp = ${bottom.highlighted}`);
+  if (bottom.highlighted !== 2) {
+    throw new Error(`down clamp = ${bottom.highlighted}`);
+  }
   // The composition reflects the moved highlight.
   if (select.children[3]?.props.reversed !== true) {
     throw new Error("highlighted row must be reversed");
   }
   // Unknown keys leave the state unchanged.
   const tab = selectKey(select, { name: "tab", ...keyBase });
-  if (tab.highlighted !== 2) throw new Error(`tab must not move = ${tab.highlighted}`);
+  if (tab.highlighted !== 2) {
+    throw new Error(`tab must not move = ${tab.highlighted}`);
+  }
 });
 
 Deno.test("selectKey typeahead filter narrows the visible options", () => {
@@ -4861,7 +5943,9 @@ Deno.test("selectKey typeahead filter narrows the visible options", () => {
   const childCount = () => select.children.length;
   const b = selectKey(select, { name: "char", char: "b", ...keyBase });
   if (b.filter !== "b") throw new Error(`filter = ${b.filter}`);
-  if (b.highlighted !== 0) throw new Error(`highlight resets to first match = ${b.highlighted}`);
+  if (b.highlighted !== 0) {
+    throw new Error(`highlight resets to first match = ${b.highlighted}`);
+  }
   // The composition narrows to the prefix matches (filter row + 1 row).
   if (childCount() !== 2) throw new Error(`children = ${childCount()}`);
   if (visibleText() !== "Banana") {
@@ -4891,7 +5975,10 @@ Deno.test("visibleOptions reflects the filter and is label-normalized", () => {
   if (all[0]?.label !== "Apple") throw new Error(`label = ${all[0]?.label}`);
   selectKey(select, { name: "char", char: "b", ...keyBase });
   const visible = visibleOptions(select);
-  if (visible.length !== 1 || visible[0]?.value !== "banana" || visible[0]?.label !== "Banana") {
+  if (
+    visible.length !== 1 || visible[0]?.value !== "banana" ||
+    visible[0]?.label !== "Banana"
+  ) {
     throw new Error(`visible = ${JSON.stringify(visible)}`);
   }
 });
@@ -4902,24 +5989,34 @@ Deno.test("selectKey enter confirms the highlighted option and dismisses", () =>
   const next = selectKey(select, { name: "enter", ...keyBase });
   if (next.value !== "banana") throw new Error(`value = ${next.value}`);
   if (next.open !== false) throw new Error(`open = ${next.open}`);
-  if (select.props.value !== "banana") throw new Error(`node value = ${select.props.value}`);
-  if (select.props.open !== false) throw new Error(`node open = ${select.props.open}`);
+  if (select.props.value !== "banana") {
+    throw new Error(`node value = ${select.props.value}`);
+  }
+  if (select.props.open !== false) {
+    throw new Error(`node open = ${select.props.open}`);
+  }
   // Enter confirms the filtered highlight too (typeahead + enter).
   const filtered = Select({ options: selectOptions });
   selectKey(filtered, { name: "char", char: "c", ...keyBase });
   const confirmed = selectKey(filtered, { name: "enter", ...keyBase });
-  if (confirmed.value !== "cherry") throw new Error(`filtered confirm = ${confirmed.value}`);
+  if (confirmed.value !== "cherry") {
+    throw new Error(`filtered confirm = ${confirmed.value}`);
+  }
 });
 
 Deno.test("selectKey escape dismisses the dropdown", () => {
   const select = Select({ options: selectOptions });
   const next = selectKey(select, { name: "escape", ...keyBase });
   if (next.open !== false) throw new Error(`open = ${next.open}`);
-  if (select.props.open !== false) throw new Error(`node open = ${select.props.open}`);
+  if (select.props.open !== false) {
+    throw new Error(`node open = ${select.props.open}`);
+  }
   // Enter/escape on an empty list is a no-op (nothing to confirm/dismiss).
   const empty = Select({ options: [] });
   const dismissed = selectKey(empty, { name: "escape", ...keyBase });
-  if (dismissed.open !== false) throw new Error(`empty open = ${dismissed.open}`);
+  if (dismissed.open !== false) {
+    throw new Error(`empty open = ${dismissed.open}`);
+  }
 });
 
 Deno.test("selectKey space toggles a checkmark in multi mode and updates the count", () => {
@@ -4961,14 +6058,26 @@ Deno.test("selectKey space toggles a checkmark in multi mode and updates the cou
 Deno.test("Select floating mode sets a z_index prop", () => {
   // Floating defaults the overlay to z-index 0.
   const floating = Select({ options: selectOptions, floating: true });
-  if (floating.props.z_index !== 0) throw new Error(`z_index = ${floating.props.z_index}`);
-  if ("floating" in floating.props) throw new Error("floating must not reach the scene props");
+  if (floating.props.z_index !== 0) {
+    throw new Error(`z_index = ${floating.props.z_index}`);
+  }
+  if ("floating" in floating.props) {
+    throw new Error("floating must not reach the scene props");
+  }
   // An explicit z_index is honored.
-  const layered = Select({ options: selectOptions, floating: true, z_index: 5 });
-  if (layered.props.z_index !== 5) throw new Error(`z_index = ${layered.props.z_index}`);
+  const layered = Select({
+    options: selectOptions,
+    floating: true,
+    z_index: 5,
+  });
+  if (layered.props.z_index !== 5) {
+    throw new Error(`z_index = ${layered.props.z_index}`);
+  }
   // Docked selects carry no z_index prop at all.
   const docked = Select({ options: selectOptions });
-  if (docked.props.z_index !== undefined) throw new Error(`docked z_index = ${docked.props.z_index}`);
+  if (docked.props.z_index !== undefined) {
+    throw new Error(`docked z_index = ${docked.props.z_index}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -4999,32 +6108,57 @@ const tableKeyBase = { ctrl: false, alt: false, shift: false } as const;
 Deno.test("Table composes a sticky header row above a content region of per-column rows", () => {
   const table = Table({ columns: tableColumns, rows: tableRows });
   if (table.type !== "table") throw new Error(`type = ${table.type}`);
-  if (table.props.flex_direction !== "column") throw new Error(`flex_direction = ${table.props.flex_direction}`);
-  if (table.props.highlight !== 0) throw new Error(`highlight = ${table.props.highlight}`);
-  if (table.props.sticky_header !== true) throw new Error(`sticky_header = ${table.props.sticky_header}`);
+  if (table.props.flex_direction !== "column") {
+    throw new Error(`flex_direction = ${table.props.flex_direction}`);
+  }
+  if (table.props.highlight !== 0) {
+    throw new Error(`highlight = ${table.props.highlight}`);
+  }
+  if (table.props.sticky_header !== true) {
+    throw new Error(`sticky_header = ${table.props.sticky_header}`);
+  }
   // The model is JS bookkeeping, never scene props.
   if ("columns" in table.props || "rows" in table.props) {
     throw new Error("columns/rows must not reach the scene props");
   }
   // Sticky structure: header row (child 0) + content region (child 1).
-  if (table.children.length !== 2) throw new Error(`children = ${table.children.length}`);
+  if (table.children.length !== 2) {
+    throw new Error(`children = ${table.children.length}`);
+  }
   const header = table.children[0];
-  if (header === undefined || header.type !== "box" || header.props.flex_direction !== "row") {
+  if (
+    header === undefined || header.type !== "box" ||
+    header.props.flex_direction !== "row"
+  ) {
     throw new Error("header must be a row box");
   }
-  if (header.props.z_index !== 1) throw new Error(`header z_index = ${header.props.z_index}`);
-  if (header.children.length !== tableColumns.length) throw new Error(`header cells = ${header.children.length}`);
+  if (header.props.z_index !== 1) {
+    throw new Error(`header z_index = ${header.props.z_index}`);
+  }
+  if (header.children.length !== tableColumns.length) {
+    throw new Error(`header cells = ${header.children.length}`);
+  }
   const region = table.children[1];
-  if (region === undefined || region.type !== "box" || region.props.flex_direction !== "column") {
+  if (
+    region === undefined || region.type !== "box" ||
+    region.props.flex_direction !== "column"
+  ) {
     throw new Error("content region must be a column box");
   }
-  if (region.children.length !== tableRows.length) throw new Error(`rows = ${region.children.length}`);
+  if (region.children.length !== tableRows.length) {
+    throw new Error(`rows = ${region.children.length}`);
+  }
   for (let i = 0; i < region.children.length; i++) {
     const row = region.children[i];
-    if (row === undefined || row.type !== "box" || row.props.flex_direction !== "row") {
+    if (
+      row === undefined || row.type !== "box" ||
+      row.props.flex_direction !== "row"
+    ) {
       throw new Error(`row ${i} must be a row box`);
     }
-    if (row.children.length !== tableColumns.length) throw new Error(`row ${i} cells = ${row.children.length}`);
+    if (row.children.length !== tableColumns.length) {
+      throw new Error(`row ${i} cells = ${row.children.length}`);
+    }
   }
 });
 
@@ -5033,23 +6167,42 @@ Deno.test("Table cells align per column (left/right/center) and truncate wide co
   const row0 = table.children[1]?.children[0];
   // Name: left-aligned to width 10 (padded with trailing spaces).
   if (row0?.children[0]?.props.text !== "Ada".padEnd(10)) {
-    throw new Error(`name cell = ${JSON.stringify(row0?.children[0]?.props.text)}`);
+    throw new Error(
+      `name cell = ${JSON.stringify(row0?.children[0]?.props.text)}`,
+    );
   }
   // Score: right-aligned to width 5 (padded with leading spaces).
   if (row0?.children[2]?.props.text !== "92".padStart(5)) {
-    throw new Error(`score cell = ${JSON.stringify(row0?.children[2]?.props.text)}`);
+    throw new Error(
+      `score cell = ${JSON.stringify(row0?.children[2]?.props.text)}`,
+    );
   }
   // Each cell pins its column width so every column lines up.
-  if (row0?.children[0]?.props.width !== 10 || row0?.children[2]?.props.width !== 5) {
-    throw new Error(`cell widths = ${JSON.stringify(row0?.children.map((c) => c.props.width))}`);
+  if (
+    row0?.children[0]?.props.width !== 10 ||
+    row0?.children[2]?.props.width !== 5
+  ) {
+    throw new Error(
+      `cell widths = ${
+        JSON.stringify(row0?.children.map((c) => c.props.width))
+      }`,
+    );
   }
   // Center alignment splits the padding evenly.
   const centered = Table({
     columns: [{ key: "c", header: "C", width: 7, align: "center" }],
     rows: [["x"]],
   });
-  if (centered.children[1]?.children[0]?.children[0]?.props.text !== "   x   ") {
-    throw new Error(`center cell = ${JSON.stringify(centered.children[1]?.children[0]?.children[0]?.props.text)}`);
+  if (
+    centered.children[1]?.children[0]?.children[0]?.props.text !== "   x   "
+  ) {
+    throw new Error(
+      `center cell = ${
+        JSON.stringify(
+          centered.children[1]?.children[0]?.children[0]?.props.text,
+        )
+      }`,
+    );
   }
   // Content wider than the column is truncated to the width, never mid-glyph
   // ("宽度对齐测试" is 6 wide chars -> display width 12 -> 4 kept = 2 chars).
@@ -5058,24 +6211,47 @@ Deno.test("Table cells align per column (left/right/center) and truncate wide co
     rows: [["宽度对齐测试"]],
   });
   if (wide.children[1]?.children[0]?.children[0]?.props.text !== "宽度") {
-    throw new Error(`truncated cell = ${JSON.stringify(wide.children[1]?.children[0]?.children[0]?.props.text)}`);
+    throw new Error(
+      `truncated cell = ${
+        JSON.stringify(wide.children[1]?.children[0]?.children[0]?.props.text)
+      }`,
+    );
   }
 });
 
 Deno.test("Table routes scroll_x to the root and scroll_y/clip_height to the content region", () => {
-  const table = Table({ columns: tableColumns, rows: tableRows, scroll_x: 4, scroll_y: 3, clip_height: 5 });
+  const table = Table({
+    columns: tableColumns,
+    rows: tableRows,
+    scroll_x: 4,
+    scroll_y: 3,
+    clip_height: 5,
+  });
   // scroll_x pans header + rows together, so it stays on the root.
-  if (table.props.scroll_x !== 4) throw new Error(`scroll_x = ${table.props.scroll_x}`);
+  if (table.props.scroll_x !== 4) {
+    throw new Error(`scroll_x = ${table.props.scroll_x}`);
+  }
   // scroll_y is the content region's state — the root never carries it (it
   // would pan the sticky header with the rows).
-  if ("scroll_y" in table.props) throw new Error("scroll_y must not reach the root props");
+  if ("scroll_y" in table.props) {
+    throw new Error("scroll_y must not reach the root props");
+  }
   const region = table.children[1];
-  if (region?.props.scroll_y !== 3) throw new Error(`region scroll_y = ${region?.props.scroll_y}`);
-  if (region?.props.clip_height !== 5) throw new Error(`region clip_height = ${region?.props.clip_height}`);
+  if (region?.props.scroll_y !== 3) {
+    throw new Error(`region scroll_y = ${region?.props.scroll_y}`);
+  }
+  if (region?.props.clip_height !== 5) {
+    throw new Error(`region clip_height = ${region?.props.clip_height}`);
+  }
 });
 
 Deno.test("visibleTableRows returns the viewport window under scroll and clip_height", () => {
-  const table = Table({ columns: tableColumns, rows: tableRows, scroll_y: 2, clip_height: 3 });
+  const table = Table({
+    columns: tableColumns,
+    rows: tableRows,
+    scroll_y: 2,
+    clip_height: 3,
+  });
   const visible = visibleTableRows(table);
   if (visible.length !== 3) throw new Error(`visible = ${visible.length}`);
   if (visible[0]?.[0] !== "Linus" || visible[2]?.[0] !== "Margaret") {
@@ -5095,11 +6271,18 @@ Deno.test("tableKey moves the highlight with up/down and clamps at the ends", ()
   const up = tableKey(table, { name: "up", ...tableKeyBase });
   if (up.highlight !== 0) throw new Error(`up = ${up.highlight}`);
   // Clamp at the top.
-  const upClamped = tableKey(Table({ columns: tableColumns, rows: tableRows }), { name: "up", ...tableKeyBase });
-  if (upClamped.highlight !== 0) throw new Error(`up clamp = ${upClamped.highlight}`);
+  const upClamped = tableKey(
+    Table({ columns: tableColumns, rows: tableRows }),
+    { name: "up", ...tableKeyBase },
+  );
+  if (upClamped.highlight !== 0) {
+    throw new Error(`up clamp = ${upClamped.highlight}`);
+  }
   // Clamp at the bottom (a few extra downs past the last row).
   const bottom = Table({ columns: tableColumns, rows: tableRows });
-  for (let i = 0; i < tableRows.length + 2; i++) tableKey(bottom, { name: "down", ...tableKeyBase });
+  for (let i = 0; i < tableRows.length + 2; i++) {
+    tableKey(bottom, { name: "down", ...tableKeyBase });
+  }
   const clamped = tableKey(bottom, { name: "down", ...tableKeyBase });
   if (clamped.highlight !== tableRows.length - 1) {
     throw new Error(`down clamp = ${clamped.highlight}`);
@@ -5113,16 +6296,26 @@ Deno.test("tableKey moves the highlight with up/down and clamps at the ends", ()
   if (row2?.children.every((cell) => cell.props.reversed === true) !== true) {
     throw new Error("the highlighted row must be reversed");
   }
-  if (moved.children[1]?.children[0]?.children.some((cell) => cell.props.reversed === true)) {
+  if (
+    moved.children[1]?.children[0]?.children.some((cell) =>
+      cell.props.reversed === true
+    )
+  ) {
     throw new Error("only the highlighted row may be reversed");
   }
   // Unknown keys leave the state unchanged.
   const tab = tableKey(moved, { name: "tab", ...tableKeyBase });
-  if (tab.highlight !== 2) throw new Error(`tab must not move = ${tab.highlight}`);
+  if (tab.highlight !== 2) {
+    throw new Error(`tab must not move = ${tab.highlight}`);
+  }
 });
 
 Deno.test("tableKey auto-scrolls to keep the highlight visible and clamps scroll_y", () => {
-  const table = Table({ columns: tableColumns, rows: tableRows, clip_height: 3 });
+  const table = Table({
+    columns: tableColumns,
+    rows: tableRows,
+    clip_height: 3,
+  });
   // Down from 0: highlights 1, 2 fit the window [0, 2]; highlight 3 scrolls.
   tableKey(table, { name: "down", ...tableKeyBase });
   tableKey(table, { name: "down", ...tableKeyBase });
@@ -5136,32 +6329,56 @@ Deno.test("tableKey auto-scrolls to keep the highlight visible and clamps scroll
   }
   // Down to the last row: scroll_y clamps at rows.length - clip_height.
   let last = scrolled;
-  for (let i = 0; i < 10; i++) last = tableKey(table, { name: "down", ...tableKeyBase });
-  if (last.highlight !== tableRows.length - 1) throw new Error(`highlight = ${last.highlight}`);
-  if (last.scroll_y !== tableRows.length - 3) throw new Error(`scroll_y clamp = ${last.scroll_y}`);
+  for (let i = 0; i < 10; i++) {
+    last = tableKey(table, { name: "down", ...tableKeyBase });
+  }
+  if (last.highlight !== tableRows.length - 1) {
+    throw new Error(`highlight = ${last.highlight}`);
+  }
+  if (last.scroll_y !== tableRows.length - 3) {
+    throw new Error(`scroll_y clamp = ${last.scroll_y}`);
+  }
   // Up back toward the top: scroll_y clamps at 0.
   let up = last;
-  for (let i = 0; i < 10; i++) up = tableKey(table, { name: "up", ...tableKeyBase });
+  for (let i = 0; i < 10; i++) {
+    up = tableKey(table, { name: "up", ...tableKeyBase });
+  }
   if (up.highlight !== 0 || up.scroll_y !== 0) {
     throw new Error(`up back to top = ${JSON.stringify(up)}`);
   }
 });
 
 Deno.test("sticky_header: false moves the header into the scrollable content region", () => {
-  const table = Table({ columns: tableColumns, rows: tableRows, sticky_header: false });
-  if (table.props.sticky_header !== false) throw new Error(`sticky_header = ${table.props.sticky_header}`);
+  const table = Table({
+    columns: tableColumns,
+    rows: tableRows,
+    sticky_header: false,
+  });
+  if (table.props.sticky_header !== false) {
+    throw new Error(`sticky_header = ${table.props.sticky_header}`);
+  }
   // Single child: the content region, whose first child is the header row
   // (it scrolls away with the rows, so no sticky z_index).
-  if (table.children.length !== 1) throw new Error(`children = ${table.children.length}`);
+  if (table.children.length !== 1) {
+    throw new Error(`children = ${table.children.length}`);
+  }
   const region = table.children[0];
-  if (region === undefined || region.type !== "box" || region.props.flex_direction !== "column") {
+  if (
+    region === undefined || region.type !== "box" ||
+    region.props.flex_direction !== "column"
+  ) {
     throw new Error("content region must be a column box");
   }
   const header = region.children[0];
-  if (header === undefined || header.props.flex_direction !== "row" || header.children.length !== tableColumns.length) {
+  if (
+    header === undefined || header.props.flex_direction !== "row" ||
+    header.children.length !== tableColumns.length
+  ) {
     throw new Error("the header must be the region's first child");
   }
-  if (header.props.z_index !== undefined) throw new Error(`header z_index = ${header.props.z_index}`);
+  if (header.props.z_index !== undefined) {
+    throw new Error(`header z_index = ${header.props.z_index}`);
+  }
   if (region.children.length !== tableRows.length + 1) {
     throw new Error(`region children = ${region.children.length}`);
   }
@@ -5183,20 +6400,28 @@ Deno.test("a 10k-row table materializes a bounded row window and still clamps an
 
     // The window is bounded near the clip height — not one node per row.
     let region = table.children[1]!;
-    if (region.children.length !== 12) throw new Error(`window = ${region.children.length}`);
-    if (region.props.scroll_y !== 0) throw new Error(`region scroll_y = ${region.props.scroll_y}`);
+    if (region.children.length !== 12) {
+      throw new Error(`window = ${region.children.length}`);
+    }
+    if (region.props.scroll_y !== 0) {
+      throw new Error(`region scroll_y = ${region.props.scroll_y}`);
+    }
 
     // visibleTableRows reports the full dataset window at the offset.
     let visible = visibleTableRows(table);
     if (visible.length !== 12) throw new Error(`visible = ${visible.length}`);
     if (visible[0]?.[0] !== "row-0" || visible[11]?.[0] !== "row-11") {
-      throw new Error(`visible = ${JSON.stringify(visible.map((r) => r[0]).slice(0, 3))}`);
+      throw new Error(
+        `visible = ${JSON.stringify(visible.map((r) => r[0]).slice(0, 3))}`,
+      );
     }
 
     // tableKey navigates the dataset: the highlight moves and the window
     // follows (auto-scroll), never materializing beyond the clip height.
     let state: TableState = { highlight: 0, scroll_x: 0, scroll_y: 0 };
-    for (let i = 0; i < 30; i++) state = tableKey(table, { name: "down", ...tableKeyBase });
+    for (let i = 0; i < 30; i++) {
+      state = tableKey(table, { name: "down", ...tableKeyBase });
+    }
     if (state.highlight !== 30 || state.scroll_y !== 30 - 12 + 1) {
       throw new Error(`mid-nav = ${JSON.stringify(state)}`);
     }
@@ -5206,21 +6431,40 @@ Deno.test("a 10k-row table materializes a bounded row window and still clamps an
     }
     // All the way down: the highlight clamps at the dataset end and the
     // scroll clamps against the full virtual height (10000 - 12).
-    for (let i = 0; i < 10000 - 30 + 2; i++) state = tableKey(table, { name: "down", ...tableKeyBase });
-    if (state.highlight !== 9999) throw new Error(`highlight = ${state.highlight}`);
-    if (state.scroll_y !== 10000 - 12) throw new Error(`scroll_y clamp = ${state.scroll_y}`);
+    for (let i = 0; i < 10000 - 30 + 2; i++) {
+      state = tableKey(table, { name: "down", ...tableKeyBase });
+    }
+    if (state.highlight !== 9999) {
+      throw new Error(`highlight = ${state.highlight}`);
+    }
+    if (state.scroll_y !== 10000 - 12) {
+      throw new Error(`scroll_y clamp = ${state.scroll_y}`);
+    }
     region = table.children[1]!;
-    if (region.children.length !== 12) throw new Error(`bottom window = ${region.children.length}`);
+    if (region.children.length !== 12) {
+      throw new Error(`bottom window = ${region.children.length}`);
+    }
     visible = visibleTableRows(table);
-    if (visible.length !== 12 || visible[0]?.[0] !== "row-9988" || visible[11]?.[0] !== "row-9999") {
-      throw new Error(`tail = ${JSON.stringify(visible.map((r) => r[0]).slice(0, 3))}`);
+    if (
+      visible.length !== 12 || visible[0]?.[0] !== "row-9988" ||
+      visible[11]?.[0] !== "row-9999"
+    ) {
+      throw new Error(
+        `tail = ${JSON.stringify(visible.map((r) => r[0]).slice(0, 3))}`,
+      );
     }
     // The highlighted row — the last materialized row — is reversed, and
     // only it.
-    if (region.children[11]?.children.every((cell) => cell.props.reversed === true) !== true) {
+    if (
+      region.children[11]?.children.every((cell) =>
+        cell.props.reversed === true
+      ) !== true
+    ) {
       throw new Error("the last windowed row must be the reversed highlight");
     }
-    if (region.children[0]?.children.some((cell) => cell.props.reversed === true)) {
+    if (
+      region.children[0]?.children.some((cell) => cell.props.reversed === true)
+    ) {
       throw new Error("only the highlighted row may be reversed");
     }
 
@@ -5250,7 +6494,9 @@ Deno.test("a 10k-row table materializes a bounded row window and still clamps an
       throw new Error(`window after wheel = ${visible[0]?.[0]}`);
     }
     if (table.props.scroll_y !== undefined) {
-      throw new Error("the table root must not scroll (the sticky header stays pinned)");
+      throw new Error(
+        "the table root must not scroll (the sticky header stays pinned)",
+      );
     }
   });
 });
@@ -5260,7 +6506,11 @@ Deno.test("a 10k-row table materializes a bounded row window and still clamps an
 // ---------------------------------------------------------------------------
 
 /** A small tabs fixture: three tabs with distinct content nodes. */
-function tabsFixture(): { tabs: Node; specs: TabSpec[]; activeOf: () => number } {
+function tabsFixture(): {
+  tabs: Node;
+  specs: TabSpec[];
+  activeOf: () => number;
+} {
   const specs: TabSpec[] = [
     { label: "logs", content: [Text({ text: "log line" })] },
     { label: "files", content: [Text({ text: "file list" })] },
@@ -5274,29 +6524,51 @@ function tabsFixture(): { tabs: Node; specs: TabSpec[]; activeOf: () => number }
 Deno.test("Tabs composes a tab bar row and a content region holding the active tab's content", () => {
   const { tabs } = tabsFixture();
   if (tabs.type !== "tabs") throw new Error(`type = ${tabs.type}`);
-  if (tabs.props.flex_direction !== "column") throw new Error(`flex_direction = ${tabs.props.flex_direction}`);
+  if (tabs.props.flex_direction !== "column") {
+    throw new Error(`flex_direction = ${tabs.props.flex_direction}`);
+  }
   if (tabs.props.active !== 0) throw new Error(`active = ${tabs.props.active}`);
   // The tab list is JS bookkeeping, never scene props.
   if ("tabs" in tabs.props || "closable" in tabs.props) {
     throw new Error(`consumed keys leaked: ${JSON.stringify(tabs.props)}`);
   }
   // Composition: the tab bar row (child 0) + the content region (child 1).
-  if (tabs.children.length !== 2) throw new Error(`children = ${tabs.children.length}`);
+  if (tabs.children.length !== 2) {
+    throw new Error(`children = ${tabs.children.length}`);
+  }
   const bar = tabs.children[0];
-  if (bar === undefined || bar.type !== "box" || bar.props.flex_direction !== "row") {
+  if (
+    bar === undefined || bar.type !== "box" ||
+    bar.props.flex_direction !== "row"
+  ) {
     throw new Error("the tab bar must be a row box");
   }
-  if (bar.children.length !== 3) throw new Error(`tab leaves = ${bar.children.length}`);
-  if (bar.children.map((leaf) => leaf.props.text).join(",") !== `${TAB_ACTIVE_MARKER}logs,files,git`) {
-    throw new Error(`labels = ${bar.children.map((leaf) => leaf.props.text).join(",")}`);
+  if (bar.children.length !== 3) {
+    throw new Error(`tab leaves = ${bar.children.length}`);
+  }
+  if (
+    bar.children.map((leaf) => leaf.props.text).join(",") !==
+      `${TAB_ACTIVE_MARKER}logs,files,git`
+  ) {
+    throw new Error(
+      `labels = ${bar.children.map((leaf) => leaf.props.text).join(",")}`,
+    );
   }
   const region = tabs.children[1];
-  if (region === undefined || region.type !== "box" || region.props.flex_direction !== "column") {
+  if (
+    region === undefined || region.type !== "box" ||
+    region.props.flex_direction !== "column"
+  ) {
     throw new Error("the content region must be a column box");
   }
   // Only the active tab's content is materialized in the region.
-  if (region.children.length !== 1 || region.children[0]?.props.text !== "log line") {
-    throw new Error(`region content = ${region.children.map((n) => n.props.text).join(",")}`);
+  if (
+    region.children.length !== 1 ||
+    region.children[0]?.props.text !== "log line"
+  ) {
+    throw new Error(
+      `region content = ${region.children.map((n) => n.props.text).join(",")}`,
+    );
   }
   // The other tabs' content stays out of the scene tree (only the active
   // tab's content is composed).
@@ -5316,13 +6588,24 @@ Deno.test("Tabs styles the active tab with the primary palette, reversed, and a 
   }
   // The active tab carries the primary palette colors + reversed; inactive
   // tabs are plain.
-  if (activeLeaf.props.reversed !== true) throw new Error("the active tab must be reversed");
-  if (activeLeaf.props.fg !== TAB_PRIMARY_FG || activeLeaf.props.bg !== TAB_PRIMARY_BG) {
+  if (activeLeaf.props.reversed !== true) {
+    throw new Error("the active tab must be reversed");
+  }
+  if (
+    activeLeaf.props.fg !== TAB_PRIMARY_FG ||
+    activeLeaf.props.bg !== TAB_PRIMARY_BG
+  ) {
     throw new Error(`active colors = ${JSON.stringify(activeLeaf.props)}`);
   }
-  if (inactiveLeaf.props.reversed !== undefined) throw new Error("inactive tabs must not be reversed");
-  if (inactiveLeaf.props.fg !== undefined) throw new Error("inactive tabs must not carry the primary fg");
-  if (inactiveLeaf.props.text !== "files") throw new Error(`inactive text = ${inactiveLeaf.props.text}`);
+  if (inactiveLeaf.props.reversed !== undefined) {
+    throw new Error("inactive tabs must not be reversed");
+  }
+  if (inactiveLeaf.props.fg !== undefined) {
+    throw new Error("inactive tabs must not carry the primary fg");
+  }
+  if (inactiveLeaf.props.text !== "files") {
+    throw new Error(`inactive text = ${inactiveLeaf.props.text}`);
+  }
 });
 
 Deno.test("Tabs close affordance appends the close glyph per tab (per-tab closable wins)", () => {
@@ -5334,11 +6617,17 @@ Deno.test("Tabs close affordance appends the close glyph per tab (per-tab closab
     closable: true,
   });
   const bar = closable.children[0]!;
-  if (bar.children[0]?.props.text !== `${TAB_ACTIVE_MARKER}a ${TAB_CLOSE_CHAR}`) {
-    throw new Error(`active closable = ${JSON.stringify(bar.children[0]?.props.text)}`);
+  if (
+    bar.children[0]?.props.text !== `${TAB_ACTIVE_MARKER}a ${TAB_CLOSE_CHAR}`
+  ) {
+    throw new Error(
+      `active closable = ${JSON.stringify(bar.children[0]?.props.text)}`,
+    );
   }
   if (bar.children[1]?.props.text !== `b ${TAB_CLOSE_CHAR}`) {
-    throw new Error(`inactive closable = ${JSON.stringify(bar.children[1]?.props.text)}`);
+    throw new Error(
+      `inactive closable = ${JSON.stringify(bar.children[1]?.props.text)}`,
+    );
   }
   // A per-tab `closable: false` overrides the element default.
   const mixed = Tabs({
@@ -5350,10 +6639,16 @@ Deno.test("Tabs close affordance appends the close glyph per tab (per-tab closab
   });
   const mixedBar = mixed.children[0]!;
   if (mixedBar.children[0]?.props.text !== `${TAB_ACTIVE_MARKER}a`) {
-    throw new Error(`per-tab closable: false = ${JSON.stringify(mixedBar.children[0]?.props.text)}`);
+    throw new Error(
+      `per-tab closable: false = ${
+        JSON.stringify(mixedBar.children[0]?.props.text)
+      }`,
+    );
   }
   if (mixedBar.children[1]?.props.text !== `b ${TAB_CLOSE_CHAR}`) {
-    throw new Error(`default closable = ${JSON.stringify(mixedBar.children[1]?.props.text)}`);
+    throw new Error(
+      `default closable = ${JSON.stringify(mixedBar.children[1]?.props.text)}`,
+    );
   }
 });
 
@@ -5364,17 +6659,28 @@ Deno.test("activateTab switches the active tab and swaps the content region", ()
   // Re-read the live composition: the rebuild replaced the bar and region.
   const bar = tabs.children[0]!;
   if (bar.children[1]?.props.text !== `${TAB_ACTIVE_MARKER}files`) {
-    throw new Error(`active leaf = ${JSON.stringify(bar.children[1]?.props.text)}`);
+    throw new Error(
+      `active leaf = ${JSON.stringify(bar.children[1]?.props.text)}`,
+    );
   }
-  if (bar.children[0]?.props.text !== "logs") throw new Error(`old active leaf = ${bar.children[0]?.props.text}`);
+  if (bar.children[0]?.props.text !== "logs") {
+    throw new Error(`old active leaf = ${bar.children[0]?.props.text}`);
+  }
   const region = tabs.children[1]!;
-  if (region.children.length !== 1 || region.children[0]?.props.text !== "file list") {
-    throw new Error(`region content = ${region.children.map((n) => n.props.text).join(",")}`);
+  if (
+    region.children.length !== 1 ||
+    region.children[0]?.props.text !== "file list"
+  ) {
+    throw new Error(
+      `region content = ${region.children.map((n) => n.props.text).join(",")}`,
+    );
   }
   // Activating the same tab is a no-op (the composition is not rebuilt).
   const before = tabs.children[0]!;
   activateTab(tabs, 1);
-  if (tabs.children[0] !== before) throw new Error("a no-op activate must not rebuild");
+  if (tabs.children[0] !== before) {
+    throw new Error("a no-op activate must not rebuild");
+  }
   // Out-of-range indices clamp: 99 -> last, -1 -> first.
   activateTab(tabs, 99);
   if (activeOf() !== 2) throw new Error(`clamp high = ${activeOf()}`);
@@ -5386,50 +6692,86 @@ Deno.test("closeTab removes the tab and re-clamps the active index", () => {
   // Closing a tab before the active one shifts the active down.
   const shift = Tabs({ tabs: tabsFixture().specs, active: 2 });
   closeTab(shift, 0);
-  if (shift.props.active !== 1) throw new Error(`shift = ${shift.props.active}`);
-  if (shift.children[0]?.children.map((leaf) => leaf.props.text).join(",") !== `files,${TAB_ACTIVE_MARKER}git`) {
-    throw new Error(`labels after close = ${shift.children[0]?.children.map((leaf) => leaf.props.text).join(",")}`);
+  if (shift.props.active !== 1) {
+    throw new Error(`shift = ${shift.props.active}`);
+  }
+  if (
+    shift.children[0]?.children.map((leaf) => leaf.props.text).join(",") !==
+      `files,${TAB_ACTIVE_MARKER}git`
+  ) {
+    throw new Error(
+      `labels after close = ${
+        shift.children[0]?.children.map((leaf) => leaf.props.text).join(",")
+      }`,
+    );
   }
   // Closing the active tab leaves the tab that slid into its slot.
   const active = Tabs({ tabs: tabsFixture().specs, active: 1 });
   closeTab(active, 1);
-  if (active.props.active !== 1) throw new Error(`active after self-close = ${active.props.active}`);
-  if (active.children[0]?.children.map((leaf) => leaf.props.text).join(",") !== `logs,${TAB_ACTIVE_MARKER}git`) {
-    throw new Error(`labels = ${active.children[0]?.children.map((leaf) => leaf.props.text).join(",")}`);
+  if (active.props.active !== 1) {
+    throw new Error(`active after self-close = ${active.props.active}`);
+  }
+  if (
+    active.children[0]?.children.map((leaf) => leaf.props.text).join(",") !==
+      `logs,${TAB_ACTIVE_MARKER}git`
+  ) {
+    throw new Error(
+      `labels = ${
+        active.children[0]?.children.map((leaf) => leaf.props.text).join(",")
+      }`,
+    );
   }
   // Closing the last (active) tab clamps the active to the new last.
   const last = Tabs({ tabs: tabsFixture().specs, active: 2 });
   closeTab(last, 2);
-  if (last.props.active !== 1) throw new Error(`clamped active = ${last.props.active}`);
+  if (last.props.active !== 1) {
+    throw new Error(`clamped active = ${last.props.active}`);
+  }
   // Closing the only tab leaves an empty bar + region at active 0.
-  const only = Tabs({ tabs: [{ label: "solo", content: [Text({ text: "x" })] }] });
+  const only = Tabs({
+    tabs: [{ label: "solo", content: [Text({ text: "x" })] }],
+  });
   closeTab(only, 0);
-  if (only.props.active !== 0) throw new Error(`empty active = ${only.props.active}`);
-  if (only.children[0]?.children.length !== 0) throw new Error(`empty bar = ${only.children[0]?.children.length}`);
-  if (only.children[1]?.children.length !== 0) throw new Error(`empty region = ${only.children[1]?.children.length}`);
+  if (only.props.active !== 0) {
+    throw new Error(`empty active = ${only.props.active}`);
+  }
+  if (only.children[0]?.children.length !== 0) {
+    throw new Error(`empty bar = ${only.children[0]?.children.length}`);
+  }
+  if (only.children[1]?.children.length !== 0) {
+    throw new Error(`empty region = ${only.children[1]?.children.length}`);
+  }
   // Bad indices are no-ops.
   const noop = Tabs({ tabs: tabsFixture().specs });
   closeTab(noop, 5);
-  if (noop.children[0]?.children.length !== 3) throw new Error("a bad index must not close");
+  if (noop.children[0]?.children.length !== 3) {
+    throw new Error("a bad index must not close");
+  }
 });
 
 Deno.test("tabsKey left/right move the active tab and clamp at the ends", () => {
   const base = { ctrl: false, alt: false, shift: false } as const;
   const { tabs, activeOf } = tabsFixture();
   const right = tabsKey(tabs, { name: "right", ...base });
-  if (right.active !== 1 || right.count !== 3) throw new Error(`right = ${JSON.stringify(right)}`);
+  if (right.active !== 1 || right.count !== 3) {
+    throw new Error(`right = ${JSON.stringify(right)}`);
+  }
   if (activeOf() !== 1) throw new Error(`node active = ${activeOf()}`);
   // Right at the last tab clamps.
   const atEnd = tabsKey(tabs, { name: "right", ...base });
   const clamped = tabsKey(tabs, { name: "right", ...base });
-  if (atEnd.active !== 2 || clamped.active !== 2) throw new Error(`right clamp = ${clamped.active}`);
+  if (atEnd.active !== 2 || clamped.active !== 2) {
+    throw new Error(`right clamp = ${clamped.active}`);
+  }
   // Left walks back and clamps at the first.
   const left = tabsKey(tabs, { name: "left", ...base });
   if (left.active !== 1) throw new Error(`left = ${left.active}`);
   const top = tabsKey(tabs, { name: "left", ...base });
   if (top.active !== 0) throw new Error(`left = ${top.active}`);
   const clampedLow = tabsKey(tabs, { name: "left", ...base });
-  if (clampedLow.active !== 0) throw new Error(`left clamp = ${clampedLow.active}`);
+  if (clampedLow.active !== 0) {
+    throw new Error(`left clamp = ${clampedLow.active}`);
+  }
   if (activeOf() !== 0) throw new Error(`node active = ${activeOf()}`);
 });
 
@@ -5437,14 +6779,33 @@ Deno.test("tabsKey ctrl+tab / ctrl+shift+tab wrap to the next / previous tab", (
   const base = { alt: false } as const;
   const { tabs, activeOf } = tabsFixture();
   // ctrl+shift+tab at the first tab wraps to the last.
-  const prevWrap = tabsKey(tabs, { name: "tab", ctrl: true, shift: true, ...base });
-  if (prevWrap.active !== 2) throw new Error(`ctrl+shift+tab wrap = ${prevWrap.active}`);
+  const prevWrap = tabsKey(tabs, {
+    name: "tab",
+    ctrl: true,
+    shift: true,
+    ...base,
+  });
+  if (prevWrap.active !== 2) {
+    throw new Error(`ctrl+shift+tab wrap = ${prevWrap.active}`);
+  }
   if (activeOf() !== 2) throw new Error(`node active = ${activeOf()}`);
   // ctrl+tab at the last tab wraps to the first.
-  const nextWrap = tabsKey(tabs, { name: "tab", ctrl: true, shift: false, ...base });
-  if (nextWrap.active !== 0) throw new Error(`ctrl+tab wrap = ${nextWrap.active}`);
+  const nextWrap = tabsKey(tabs, {
+    name: "tab",
+    ctrl: true,
+    shift: false,
+    ...base,
+  });
+  if (nextWrap.active !== 0) {
+    throw new Error(`ctrl+tab wrap = ${nextWrap.active}`);
+  }
   // Plain tab (no ctrl) leaves the tabs unchanged.
-  const plainTab = tabsKey(tabs, { name: "tab", ctrl: false, shift: false, ...base });
+  const plainTab = tabsKey(tabs, {
+    name: "tab",
+    ctrl: false,
+    shift: false,
+    ...base,
+  });
   if (plainTab.active !== 0) throw new Error(`plain tab = ${plainTab.active}`);
 });
 
@@ -5456,8 +6817,15 @@ Deno.test("tabsKey ctrl+w closes the active tab and re-clamps the active index",
   const closed = tabsKey(tabs, { name: "w", ctrl: true, ...base });
   if (closed.count !== 2) throw new Error(`count = ${closed.count}`);
   if (activeOf() !== 1) throw new Error(`active after close = ${activeOf()}`);
-  if (tabs.children[0]?.children.map((leaf) => leaf.props.text).join(",") !== `logs,${TAB_ACTIVE_MARKER}git`) {
-    throw new Error(`labels = ${tabs.children[0]?.children.map((leaf) => leaf.props.text).join(",")}`);
+  if (
+    tabs.children[0]?.children.map((leaf) => leaf.props.text).join(",") !==
+      `logs,${TAB_ACTIVE_MARKER}git`
+  ) {
+    throw new Error(
+      `labels = ${
+        tabs.children[0]?.children.map((leaf) => leaf.props.text).join(",")
+      }`,
+    );
   }
   // ctrl+w on the last tab closes it; the active clamps to the new last.
   void specs;
@@ -5467,9 +6835,772 @@ Deno.test("tabsKey ctrl+w closes the active tab and re-clamps the active index",
     throw new Error(`last close = ${JSON.stringify(closedLast)}`);
   }
   // Unknown keys leave the tabs unchanged.
-  const untouched = tabsKey(tabs, { name: "char", char: "q", ctrl: false, ...base });
+  const untouched = tabsKey(tabs, {
+    name: "char",
+    char: "q",
+    ctrl: false,
+    ...base,
+  });
   if (untouched.active !== 1 || untouched.count !== 2) {
     throw new Error(`unknown key = ${JSON.stringify(untouched)}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Form primitives: Checkbox / Radio / Toggle — glyph composition, focus
+// styling, key handlers
+// ---------------------------------------------------------------------------
+
+Deno.test("Checkbox composes the checked glyph and label; the label never reaches the scene props", () => {
+  const checkbox = Checkbox({ label: "Dark mode", checked: true });
+  if (checkbox.type !== "checkbox") throw new Error(`type = ${checkbox.type}`);
+  if (checkbox.props.checked !== true) {
+    throw new Error(`checked = ${checkbox.props.checked}`);
+  }
+  if ("label" in checkbox.props) {
+    throw new Error("label must not reach the scene props");
+  }
+  if ("checked" in checkbox.props !== true) {
+    throw new Error("checked must live on the root props");
+  }
+  // Composition: one text leaf holding the checked glyph + the label.
+  if (checkbox.children.length !== 1) {
+    throw new Error(`children = ${checkbox.children.length}`);
+  }
+  const leaf = checkbox.children[0];
+  if (leaf === undefined || leaf.type !== "text") {
+    throw new Error("the checkbox must compose a text leaf");
+  }
+  if (leaf.props.text !== `${CHECKBOX_CHECKED_GLYPH} Dark mode`) {
+    throw new Error(`text = ${JSON.stringify(leaf.props.text)}`);
+  }
+  // The unchecked variant renders the unchecked glyph.
+  const unchecked = Checkbox({ label: "Dark mode" });
+  if (unchecked.props.checked !== false) {
+    throw new Error(`default checked = ${unchecked.props.checked}`);
+  }
+  if (
+    unchecked.children[0]?.props.text !==
+      `${CHECKBOX_UNCHECKED_GLYPH} Dark mode`
+  ) {
+    throw new Error(
+      `unchecked text = ${JSON.stringify(unchecked.children[0]?.props.text)}`,
+    );
+  }
+});
+
+Deno.test("Toggle composes the on/off glyph and label; the label never reaches the scene props", () => {
+  const toggle = Toggle({ label: "Notifications", on: true });
+  if (toggle.type !== "toggle") throw new Error(`type = ${toggle.type}`);
+  if (toggle.props.on !== true) throw new Error(`on = ${toggle.props.on}`);
+  if ("label" in toggle.props) {
+    throw new Error("label must not reach the scene props");
+  }
+  if ("on" in toggle.props !== true) {
+    throw new Error("on must live on the root props");
+  }
+  if (toggle.children.length !== 1) {
+    throw new Error(`children = ${toggle.children.length}`);
+  }
+  const leaf = toggle.children[0];
+  if (leaf === undefined || leaf.type !== "text") {
+    throw new Error("the toggle must compose a text leaf");
+  }
+  if (leaf.props.text !== `${TOGGLE_ON_GLYPH} Notifications`) {
+    throw new Error(`text = ${JSON.stringify(leaf.props.text)}`);
+  }
+  // The off variant renders the off glyph.
+  const off = Toggle({ label: "Notifications" });
+  if (off.props.on !== false) throw new Error(`default on = ${off.props.on}`);
+  if (off.children[0]?.props.text !== `${TOGGLE_OFF_GLYPH} Notifications`) {
+    throw new Error(
+      `off text = ${JSON.stringify(off.children[0]?.props.text)}`,
+    );
+  }
+});
+
+Deno.test("Radio composes one row per option with a single selected index; options never reach the scene props", () => {
+  const radio = Radio({
+    options: [
+      { value: "a", label: "A" },
+      { value: "b", label: "B", selected: true },
+      { value: "c", label: "C" },
+    ],
+  });
+  if (radio.type !== "radio") throw new Error(`type = ${radio.type}`);
+  if (radio.props.flex_direction !== "column") {
+    throw new Error(`flex_direction = ${radio.props.flex_direction}`);
+  }
+  // The second option is `selected`-flagged, so the initial selection is 1.
+  if (radio.props.selected !== 1) {
+    throw new Error(`selected = ${radio.props.selected}`);
+  }
+  if (radio.props.focused !== 0) {
+    throw new Error(`focused = ${radio.props.focused}`);
+  }
+  if ("options" in radio.props) {
+    throw new Error("options must not reach the scene props");
+  }
+  // One row per option, the selected row `(•)`-prefixed.
+  if (radio.children.length !== 3) {
+    throw new Error(`children = ${radio.children.length}`);
+  }
+  const rows = radio.children.map((child) => child.props.text);
+  if (
+    rows.join(",") !==
+      `${RADIO_UNSELECTED_GLYPH} A,${RADIO_SELECTED_GLYPH} B,${RADIO_UNSELECTED_GLYPH} C`
+  ) {
+    throw new Error(`rows = ${rows.join(",")}`);
+  }
+});
+
+Deno.test("Form primitives style the focused row with the primary palette and reversed", () => {
+  // A focused checkbox paints its leaf with the primary colors, reversed.
+  const focusedCheck = Checkbox({ label: "Dark mode", focused: true });
+  const checkLeaf = focusedCheck.children[0]!;
+  if (checkLeaf.props.reversed !== true) {
+    throw new Error("the focused checkbox leaf must be reversed");
+  }
+  if (
+    checkLeaf.props.fg !== CHECK_PRIMARY_FG ||
+    checkLeaf.props.bg !== CHECK_PRIMARY_BG
+  ) {
+    throw new Error(`focused colors = ${JSON.stringify(checkLeaf.props)}`);
+  }
+  // An unfocused checkbox leaf carries no fg/reversed styling.
+  const plainCheck = Checkbox({ label: "Dark mode" });
+  const plainLeaf = plainCheck.children[0]!;
+  if (plainLeaf.props.fg !== undefined) {
+    throw new Error("unfocused leaves must not carry the primary fg");
+  }
+  if (plainLeaf.props.reversed !== undefined) {
+    throw new Error("unfocused leaves must not be reversed");
+  }
+  // A focused radio row is styled; the others stay plain.
+  const radio = Radio({
+    options: [
+      { value: "a", label: "A" },
+      { value: "b", label: "B", selected: true },
+      { value: "c", label: "C" },
+    ],
+    focused: 1,
+  });
+  const focusedRow = radio.children[1]!;
+  if (focusedRow.props.reversed !== true) {
+    throw new Error("the focused radio row must be reversed");
+  }
+  if (
+    focusedRow.props.fg !== CHECK_PRIMARY_FG ||
+    focusedRow.props.bg !== CHECK_PRIMARY_BG
+  ) {
+    throw new Error(`focused row colors = ${JSON.stringify(focusedRow.props)}`);
+  }
+  const plainRow0 = radio.children[0]!;
+  const plainRow2 = radio.children[2]!;
+  if (
+    plainRow0.props.reversed !== undefined ||
+    plainRow2.props.reversed !== undefined
+  ) {
+    throw new Error("unfocused radio rows must not be reversed");
+  }
+  if (plainRow0.props.fg !== undefined || plainRow2.props.fg !== undefined) {
+    throw new Error("unfocused radio rows must not carry the primary fg");
+  }
+});
+
+Deno.test("checkboxKey space/enter toggle the checked state and rebuild the composition; unknown keys are no-ops", () => {
+  const checkbox = Checkbox({ label: "Dark mode" });
+  // Accessors: checkboxKey mutates the node in place, which TS's control flow
+  // cannot see — reading through functions defeats the stale narrowing.
+  const checkedOf = () => checkbox.props.checked;
+  const leafText = () => checkbox.children[0]?.props.text;
+  // Space checks the box.
+  const checked = checkboxKey(checkbox, {
+    name: "char",
+    char: " ",
+    ...keyBase,
+  });
+  if (checked.checked !== true) throw new Error(`checked = ${checked.checked}`);
+  if (checkedOf() !== true) throw new Error(`node checked = ${checkedOf()}`);
+  if (leafText() !== `${CHECKBOX_CHECKED_GLYPH} Dark mode`) {
+    throw new Error(`text = ${JSON.stringify(leafText())}`);
+  }
+  // Enter unchecks it again.
+  const unchecked = checkboxKey(checkbox, { name: "enter", ...keyBase });
+  if (unchecked.checked !== false) {
+    throw new Error(`unchecked = ${unchecked.checked}`);
+  }
+  if (leafText() !== `${CHECKBOX_UNCHECKED_GLYPH} Dark mode`) {
+    throw new Error(`text = ${JSON.stringify(leafText())}`);
+  }
+  // Unknown keys leave the state and composition unchanged.
+  const untouched = checkboxKey(checkbox, { name: "tab", ...keyBase });
+  if (untouched.checked !== false) {
+    throw new Error(`tab must not toggle = ${untouched.checked}`);
+  }
+  if (checkedOf() !== false) {
+    throw new Error(`node checked after tab = ${checkedOf()}`);
+  }
+  if (leafText() !== `${CHECKBOX_UNCHECKED_GLYPH} Dark mode`) {
+    throw new Error(`composition changed = ${JSON.stringify(leafText())}`);
+  }
+});
+
+Deno.test("toggleKey space/enter toggle the on state; unknown keys are no-ops", () => {
+  const toggle = Toggle({ label: "Notifications" });
+  // Accessors: toggleKey mutates the node in place, which TS's control flow
+  // cannot see — reading through functions defeats the stale narrowing.
+  const onOf = () => toggle.props.on;
+  const leafText = () => toggle.children[0]?.props.text;
+  // Space turns the toggle on.
+  const on = toggleKey(toggle, { name: "char", char: " ", ...keyBase });
+  if (on.on !== true) throw new Error(`on = ${on.on}`);
+  if (onOf() !== true) throw new Error(`node on = ${onOf()}`);
+  if (leafText() !== `${TOGGLE_ON_GLYPH} Notifications`) {
+    throw new Error(`text = ${JSON.stringify(leafText())}`);
+  }
+  // Enter turns it back off.
+  const off = toggleKey(toggle, { name: "enter", ...keyBase });
+  if (off.on !== false) throw new Error(`off = ${off.on}`);
+  if (leafText() !== `${TOGGLE_OFF_GLYPH} Notifications`) {
+    throw new Error(`text = ${JSON.stringify(leafText())}`);
+  }
+  // Unknown keys leave the state and composition unchanged.
+  const untouched = toggleKey(toggle, { name: "escape", ...keyBase });
+  if (untouched.on !== false) {
+    throw new Error(`escape must not toggle = ${untouched.on}`);
+  }
+  if (onOf() !== false) throw new Error(`node on after escape = ${onOf()}`);
+  if (leafText() !== `${TOGGLE_OFF_GLYPH} Notifications`) {
+    throw new Error(`composition changed = ${JSON.stringify(leafText())}`);
+  }
+});
+
+Deno.test("radioKey arrows move the focus clamped at the ends and space commits the selection", () => {
+  const radio = Radio({
+    options: [
+      { value: "a", label: "A" },
+      { value: "b", label: "B" },
+      { value: "c", label: "C" },
+    ],
+  });
+  // Accessors: radioKey mutates the node in place, which TS's control flow
+  // cannot see — reading through functions defeats the stale narrowing.
+  const selectedOf = () => radio.props.selected;
+  const focusedOf = () => radio.props.focused;
+  // down/right move the focus down.
+  const down = radioKey(radio, { name: "down", ...keyBase });
+  if (down.focused !== 1) throw new Error(`down = ${down.focused}`);
+  const right = radioKey(radio, { name: "right", ...keyBase });
+  if (right.focused !== 2) throw new Error(`right = ${right.focused}`);
+  // Further down clamps at the last option.
+  const clamped = radioKey(radio, { name: "down", ...keyBase });
+  if (clamped.focused !== 2) throw new Error(`down clamp = ${clamped.focused}`);
+  // The composition's focused row follows the focus.
+  if (radio.children[2]?.props.reversed !== true) {
+    throw new Error("the focused row must be reversed");
+  }
+  // up/left move the focus back; at the top they clamp at 0.
+  const up = radioKey(radio, { name: "up", ...keyBase });
+  if (up.focused !== 1) throw new Error(`up = ${up.focused}`);
+  const left = radioKey(radio, { name: "left", ...keyBase });
+  if (left.focused !== 0) throw new Error(`left = ${left.focused}`);
+  const clampedLow = radioKey(radio, { name: "up", ...keyBase });
+  if (clampedLow.focused !== 0) {
+    throw new Error(`up clamp = ${clampedLow.focused}`);
+  }
+  const clampedLowLeft = radioKey(radio, { name: "left", ...keyBase });
+  if (clampedLowLeft.focused !== 0) {
+    throw new Error(`left clamp = ${clampedLowLeft.focused}`);
+  }
+  // Space commits the focused option as the selection.
+  radioKey(radio, { name: "down", ...keyBase });
+  radioKey(radio, { name: "down", ...keyBase });
+  const committed = radioKey(radio, { name: "char", char: " ", ...keyBase });
+  if (committed.selected !== 2) {
+    throw new Error(`space commit = ${committed.selected}`);
+  }
+  if (selectedOf() !== 2) throw new Error(`node selected = ${selectedOf()}`);
+  if (radio.children[2]?.props.text !== `${RADIO_SELECTED_GLYPH} C`) {
+    throw new Error(
+      `selected row = ${JSON.stringify(radio.children[2]?.props.text)}`,
+    );
+  }
+  // Enter also commits.
+  radioKey(radio, { name: "up", ...keyBase });
+  const entered = radioKey(radio, { name: "enter", ...keyBase });
+  if (entered.selected !== 1) {
+    throw new Error(`enter commit = ${entered.selected}`);
+  }
+  if (selectedOf() !== 1) {
+    throw new Error(`node selected after enter = ${selectedOf()}`);
+  }
+  // Unknown keys leave the state unchanged.
+  const untouched = radioKey(radio, { name: "tab", ...keyBase });
+  if (untouched.selected !== 1 || untouched.focused !== 1) {
+    throw new Error(`tab must not move = ${JSON.stringify(untouched)}`);
+  }
+  if (selectedOf() !== 1 || focusedOf() !== 1) {
+    throw new Error(
+      `node changed by tab = ${
+        JSON.stringify({ selected: selectedOf(), focused: focusedOf() })
+      }`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Menu: composition, floating z-order, submenu rendering, keyboard + mouse
+// helpers, focus isolation
+// ---------------------------------------------------------------------------
+
+/** A small fixture menu:
+ *   File            (branch: New, Open → Open Recent)
+ *   Edit            (branch: Cut, Copy)
+ *   Quit            (leaf)
+ */
+function menuFixture(): MenuItem[] {
+  return [
+    {
+      label: "File",
+      children: [
+        { label: "New" },
+        { label: "Open", children: [{ label: "Open Recent" }] },
+      ],
+    },
+    { label: "Edit", children: [{ label: "Cut" }, { label: "Copy" }] },
+    { label: "Quit" },
+  ];
+}
+
+/** The text of every materialized row leaf among the menu's root children,
+ * in scene order (direct row leaves only — flyout layer rows are read through
+ * the layer's own children). */
+function menuRowTexts(menu: Node): string[] {
+  return menu.children.map((
+    child,
+  ) => (typeof child.props.text === "string" ? child.props.text : ""));
+}
+
+Deno.test("Menu composes one row per visible item; the model and render mode never reach the scene props", () => {
+  const menu = Menu({ items: menuFixture() });
+  if (menu.type !== "menu") throw new Error(`type = ${menu.type}`);
+  if (menu.props.flex_direction !== "column") {
+    throw new Error(`flex_direction = ${menu.props.flex_direction}`);
+  }
+  if (menu.props.highlighted !== 0) {
+    throw new Error(`highlighted = ${menu.props.highlighted}`);
+  }
+  // The item model + render-mode flags are JS bookkeeping, never scene props.
+  if (
+    "items" in menu.props || "floating" in menu.props || "submenu" in menu.props
+  ) {
+    throw new Error("items/floating/submenu must not reach the scene props");
+  }
+  // A menu starts hidden (the Modal pattern): open false, hidden, display none.
+  if (menu.props.open !== false) throw new Error(`open = ${menu.props.open}`);
+  if (menu.props.hidden !== true) {
+    throw new Error(`hidden = ${menu.props.hidden}`);
+  }
+  if (menu.props.display !== "none") {
+    throw new Error(`display = ${menu.props.display}`);
+  }
+  // All submenus closed: only the three top-level items materialize, unindented.
+  const rows = menuRowTexts(menu);
+  if (rows.length !== 3) throw new Error(`rows = ${JSON.stringify(rows)}`);
+  if (rows[0] !== "File") throw new Error(`row0 = ${JSON.stringify(rows[0])}`);
+  if (rows[1] !== "Edit") throw new Error(`row1 = ${JSON.stringify(rows[1])}`);
+  if (rows[2] !== "Quit") throw new Error(`row2 = ${JSON.stringify(rows[2])}`);
+  // The highlighted (first) row is reversed; the others are not.
+  if (menu.children[0]?.props.reversed !== true) {
+    throw new Error("row 0 must be reversed");
+  }
+  if (menu.children[1]?.props.reversed === true) {
+    throw new Error("only the highlighted row may be reversed");
+  }
+  // An empty menu materializes no rows.
+  const empty = Menu({ items: [] });
+  if (empty.children.length !== 0) {
+    throw new Error(`empty children = ${empty.children.length}`);
+  }
+});
+
+Deno.test("Menu floating mode sets a z_index prop", () => {
+  // Floating defaults the overlay to z-index 0 (the Select pattern).
+  const floating = Menu({ items: menuFixture(), floating: true });
+  if (floating.props.z_index !== 0) {
+    throw new Error(`z_index = ${floating.props.z_index}`);
+  }
+  if ("floating" in floating.props) {
+    throw new Error("floating must not reach the scene props");
+  }
+  // An explicit z_index is honored — including MENU_Z_INDEX for full overlays.
+  const layered = Menu({
+    items: menuFixture(),
+    floating: true,
+    z_index: MENU_Z_INDEX,
+  });
+  if (layered.props.z_index !== MENU_Z_INDEX) {
+    throw new Error(`z_index = ${layered.props.z_index}`);
+  }
+  // Docked menus carry no z_index prop at all.
+  const docked = Menu({ items: menuFixture() });
+  if (docked.props.z_index !== undefined) {
+    throw new Error(`docked z_index = ${docked.props.z_index}`);
+  }
+});
+
+Deno.test("Menu inline submenus render as indented rows when open", () => {
+  const menu = Menu({ items: menuFixture(), open_submenus: ["0"] });
+  const rows = menuRowTexts(menu);
+  // Visible order: File, New, Open, Edit, Quit (File's submenu is open).
+  if (rows.length !== 5) throw new Error(`rows = ${JSON.stringify(rows)}`);
+  if (rows[0] !== "File") throw new Error(`row0 = ${JSON.stringify(rows[0])}`);
+  if (rows[1] !== "  New") throw new Error(`row1 = ${JSON.stringify(rows[1])}`);
+  if (rows[2] !== "  Open") {
+    throw new Error(`row2 = ${JSON.stringify(rows[2])}`);
+  }
+  if (rows[3] !== "Edit") throw new Error(`row3 = ${JSON.stringify(rows[3])}`);
+  if (rows[4] !== "Quit") throw new Error(`row4 = ${JSON.stringify(rows[4])}`);
+  // Nested: opening Open's submenu (key "0.1") adds its child, one indent deeper.
+  const nested = Menu({ items: menuFixture(), open_submenus: ["0", "0.1"] });
+  const nestedRows = menuRowTexts(nested);
+  if (nestedRows.length !== 6) {
+    throw new Error(`nested rows = ${JSON.stringify(nestedRows)}`);
+  }
+  if (nestedRows[3] !== "    Open Recent") {
+    throw new Error(`nested row3 = ${JSON.stringify(nestedRows[3])}`);
+  }
+});
+
+Deno.test("Menu flyout submenus render as overlay layers with their own z_index", () => {
+  const menu = Menu({
+    items: menuFixture(),
+    open_submenus: ["0"],
+    submenu: "flyout",
+  });
+  if ("submenu" in menu.props) {
+    throw new Error("submenu must not reach the scene props");
+  }
+  // Root children: the depth-0 rows (File, Edit, Quit) with File's open
+  // submenu's flyout layer box interleaved right after its parent row (the
+  // layer that paints beside it).
+  if (menu.children.length !== 4) {
+    throw new Error(`children = ${menu.children.length}`);
+  }
+  const rows = [
+    menu.children[0]?.props.text,
+    menu.children[2]?.props.text,
+    menu.children[3]?.props.text,
+  ];
+  if (rows.join(",") !== "File,Edit,Quit") {
+    throw new Error(`root rows = ${rows.join(",")}`);
+  }
+  const layer = menu.children[1];
+  if (
+    layer === undefined || layer.type !== "box" ||
+    layer.props.flex_direction !== "column"
+  ) {
+    throw new Error("the flyout submenu must be a column box");
+  }
+  // The flyout layer carries its own paint z-order, above in-flow content.
+  if (layer.props.z_index !== MENU_Z_INDEX) {
+    throw new Error(`layer z_index = ${layer.props.z_index}`);
+  }
+  const layerTexts = layer.children.map((child) => child.props.text);
+  if (layerTexts.join(",") !== "  New,  Open") {
+    throw new Error(`layer rows = ${layerTexts.join(",")}`);
+  }
+  // A closed submenu renders no layer at all.
+  const closed = Menu({ items: menuFixture(), submenu: "flyout" });
+  if (closed.children.length !== 3) {
+    throw new Error(`closed children = ${closed.children.length}`);
+  }
+});
+
+Deno.test("Menu starts hidden and openMenu/closeMenu toggle the visible state", () => {
+  const closed = Menu({ items: menuFixture() });
+  // Fresh reads per assertion — TS narrows a const-typed property access to
+  // its first-checked literal.
+  const open = (): unknown => closed.props.open;
+  const hidden = (): unknown => closed.props.hidden;
+  const display = (): unknown => closed.props.display;
+  if (open() !== false || hidden() !== true || display() !== "none") {
+    throw new Error(`initial = ${JSON.stringify(closed.props)}`);
+  }
+  // openMenu shows it; closeMenu hides it again.
+  openMenu(closed);
+  if (open() !== true || hidden() !== false || display() !== "flex") {
+    throw new Error(`after open = ${JSON.stringify(closed.props)}`);
+  }
+  closeMenu(closed);
+  if (open() !== false || hidden() !== true || display() !== "none") {
+    throw new Error(`after close = ${JSON.stringify(closed.props)}`);
+  }
+  // Opening an already-open menu is a no-op (the focus record must not be
+  // overwritten by the focus that now sits inside the menu).
+  openMenu(closed);
+  openMenu(closed);
+  if (open() !== true) {
+    throw new Error(`double open = ${JSON.stringify(closed.props)}`);
+  }
+  closeMenu(closed);
+  closeMenu(closed);
+  if (open() !== false) {
+    throw new Error(`double close = ${JSON.stringify(closed.props)}`);
+  }
+  // A foreign node (not created by the Menu factory) is left alone.
+  const box = Box();
+  openMenu(box);
+  if ("open" in box.props) {
+    throw new Error("openMenu must ignore non-menu nodes");
+  }
+  closeMenu(box);
+});
+
+Deno.test("openMenu focuses the first registered focusable and closeMenu restores the prior focus", () => {
+  const menu = Menu({ items: menuFixture() });
+  const manager = new FocusManager();
+  const insideNode = Text({ text: "in" });
+  const outsideNode = Text({ text: "out" });
+  // The menu's focusable registers first, so `openMenu`'s `focusFirst()`
+  // lands inside the menu; the outside focusable is the prior focus that
+  // closing restores.
+  const inside = useFocus("menu-in", insideNode, () => {}, manager);
+  const outside = useFocus("menu-out", outsideNode, () => {}, manager);
+  const activeId = (): string | null => manager.activeId;
+  try {
+    manager.focus("menu-out");
+    if (activeId() !== "menu-out") throw new Error("setup focus failed");
+    openMenu(menu, manager);
+    if (activeId() !== "menu-in") {
+      throw new Error(
+        `open must focus the first registered focusable, got ${activeId()}`,
+      );
+    }
+    closeMenu(menu, manager);
+    if (activeId() !== "menu-out") {
+      throw new Error(`close must restore the prior focus, got ${activeId()}`);
+    }
+  } finally {
+    inside.dispose();
+    outside.dispose();
+    manager.blur();
+  }
+});
+
+Deno.test("closeMenu falls back to a blur when nothing was focused before the open", () => {
+  const menu = Menu({ items: menuFixture() });
+  const manager = new FocusManager();
+  const insideNode = Text({ text: "in" });
+  const inside = useFocus("menu-fallback-in", insideNode, () => {}, manager);
+  const activeId = (): string | null => manager.activeId;
+  try {
+    // Nothing is focused when the menu opens: the record is null.
+    openMenu(menu, manager);
+    if (activeId() !== "menu-fallback-in") {
+      throw new Error(
+        `focusFirst must focus the registered focusable, got ${activeId()}`,
+      );
+    }
+    closeMenu(menu, manager);
+    if (activeId() !== null) {
+      throw new Error(
+        `close with no recorded focus must blur, got ${activeId()}`,
+      );
+    }
+    // A recorded id that was unregistered meanwhile also falls back to blur.
+    manager.focus("menu-fallback-in");
+    openMenu(menu, manager);
+    inside.dispose(); // unregister the recorded id while the menu is open
+    closeMenu(menu, manager);
+    if (activeId() !== null) {
+      throw new Error(
+        `close with an unregistered recorded id must blur, got ${activeId()}`,
+      );
+    }
+  } finally {
+    inside.dispose();
+    manager.blur();
+  }
+});
+
+Deno.test("menuKey up/down move the highlight clamped at the ends; unknown keys are no-ops", () => {
+  const menu = Menu({ items: menuFixture(), open: true });
+  // Accessors: menuKey mutates the node in place, which TS's control flow
+  // cannot see — reading through functions defeats the stale narrowing.
+  const highlightedOf = () => menu.props.highlighted;
+  const down = menuKey(menu, { name: "down", ...keyBase });
+  if (down.highlighted !== 1) throw new Error(`down = ${down.highlighted}`);
+  const downAgain = menuKey(menu, { name: "down", ...keyBase });
+  if (downAgain.highlighted !== 2) {
+    throw new Error(`down = ${downAgain.highlighted}`);
+  }
+  // Further down clamps at the last visible item.
+  const clamped = menuKey(menu, { name: "down", ...keyBase });
+  if (clamped.highlighted !== 2) {
+    throw new Error(`down clamp = ${clamped.highlighted}`);
+  }
+  // The composition's highlighted row follows the highlight.
+  if (menu.children[2]?.props.reversed !== true) {
+    throw new Error("the highlighted row must be reversed");
+  }
+  const up = menuKey(menu, { name: "up", ...keyBase });
+  if (up.highlighted !== 1) throw new Error(`up = ${up.highlighted}`);
+  const clampedLow = menuKey(menu, { name: "up", ...keyBase });
+  if (clampedLow.highlighted !== 0) {
+    throw new Error(`up clamp = ${clampedLow.highlighted}`);
+  }
+  if (highlightedOf() !== 0) {
+    throw new Error(`node highlighted = ${highlightedOf()}`);
+  }
+  // Unknown keys leave the state and composition unchanged.
+  const untouched = menuKey(menu, { name: "tab", ...keyBase });
+  if (untouched.highlighted !== 0 || untouched.count !== 3) {
+    throw new Error(`tab must not move = ${JSON.stringify(untouched)}`);
+  }
+  if (menu.children.length !== 3) {
+    throw new Error("tab must not change the composition");
+  }
+  // A key on an empty menu is a no-op.
+  const empty = Menu({ items: [] });
+  const onEmpty = menuKey(empty, { name: "down", ...keyBase });
+  if (onEmpty.highlighted !== 0 || onEmpty.count !== 0) {
+    throw new Error(`empty = ${JSON.stringify(onEmpty)}`);
+  }
+});
+
+Deno.test("menuKey right opens the highlighted submenu and left closes to the parent", () => {
+  const menu = Menu({ items: menuFixture(), open: true });
+  const rows = () => menuRowTexts(menu);
+  // Right on the highlighted branch (File, index 0) opens its submenu.
+  const opened = menuKey(menu, { name: "right", ...keyBase });
+  if (opened.count !== 5) throw new Error(`count = ${opened.count}`);
+  if (opened.open_submenus.join(",") !== "0") {
+    throw new Error(`open_submenus = ${opened.open_submenus.join(",")}`);
+  }
+  if (rows().join(",") !== "File,  New,  Open,Edit,Quit") {
+    throw new Error(`rows = ${rows().join(",")}`);
+  }
+  // Right on the now-open branch steps into its first child.
+  const descended = menuKey(menu, { name: "right", ...keyBase });
+  if (descended.highlighted !== 1) {
+    throw new Error(`descend = ${descended.highlighted}`);
+  }
+  // Right on a leaf is a no-op.
+  const leafNoop = menuKey(menu, { name: "right", ...keyBase }); // highlighted 1 = New (leaf)
+  if (leafNoop.count !== 5 || leafNoop.highlighted !== 1) {
+    throw new Error(`leaf right = ${JSON.stringify(leafNoop)}`);
+  }
+  // Left on an item inside the submenu closes it to the parent: File's
+  // submenu closes and the highlight lands on File.
+  const closed = menuKey(menu, { name: "left", ...keyBase });
+  if (closed.open_submenus.length !== 0) {
+    throw new Error(
+      `open_submenus after left = ${closed.open_submenus.join(",")}`,
+    );
+  }
+  if (closed.highlighted !== 0) {
+    throw new Error(`highlighted after left = ${closed.highlighted}`);
+  }
+  if (rows().join(",") !== "File,Edit,Quit") {
+    throw new Error(`rows after left = ${rows().join(",")}`);
+  }
+  // Left on an open branch collapses it too.
+  menuKey(menu, { name: "right", ...keyBase });
+  const collapsed = menuKey(menu, { name: "left", ...keyBase });
+  if (collapsed.open_submenus.length !== 0) {
+    throw new Error(
+      `open_submenus after left on branch = ${
+        collapsed.open_submenus.join(",")
+      }`,
+    );
+  }
+  // Left at the top level on a leaf is a no-op.
+  const topNoop = menuKey(menu, { name: "left", ...keyBase });
+  if (topNoop.highlighted !== 0 || topNoop.count !== 3) {
+    throw new Error(`top left = ${JSON.stringify(topNoop)}`);
+  }
+});
+
+Deno.test("menuKey enter activates a leaf and dismisses; on a branch it opens the submenu; escape dismisses", () => {
+  const menu = Menu({ items: menuFixture(), open: true });
+  const openOf = () => menu.props.open;
+  // Enter on the highlighted branch (File) opens its submenu.
+  const branch = menuKey(menu, { name: "enter", ...keyBase });
+  if (branch.open_submenus.join(",") !== "0") {
+    throw new Error(`enter branch = ${branch.open_submenus.join(",")}`);
+  }
+  if (openOf() !== true) {
+    throw new Error("opening a branch must not dismiss the menu");
+  }
+  // Down to Quit (the last visible row), then enter activates it + dismisses.
+  menuKey(menu, { name: "down", ...keyBase });
+  menuKey(menu, { name: "down", ...keyBase });
+  menuKey(menu, { name: "down", ...keyBase });
+  menuKey(menu, { name: "down", ...keyBase });
+  const activated = menuKey(menu, { name: "enter", ...keyBase });
+  if (activated.activated !== "2") {
+    throw new Error(`activated = ${activated.activated}`);
+  }
+  if (activated.open !== false) throw new Error(`open = ${activated.open}`);
+  if (openOf() !== false) throw new Error(`node open = ${openOf()}`);
+  // Escape dismisses an open menu without activating anything.
+  const reopened = Menu({ items: menuFixture(), open: true });
+  const dismissed = menuKey(reopened, { name: "escape", ...keyBase });
+  if (dismissed.open !== false || dismissed.activated !== null) {
+    throw new Error(`escape = ${JSON.stringify(dismissed)}`);
+  }
+  if (reopened.props.open !== false) {
+    throw new Error(`node open after escape = ${reopened.props.open}`);
+  }
+});
+
+Deno.test("menuHover moves the highlight clamped; menuClick activates like enter", () => {
+  const menu = Menu({ items: menuFixture(), open: true });
+  // Hover the third row (Quit, a leaf).
+  const hovered = menuHover(menu, 2);
+  if (hovered.highlighted !== 2) {
+    throw new Error(`hover = ${hovered.highlighted}`);
+  }
+  if (menu.props.highlighted !== 2) {
+    throw new Error(`node highlighted = ${menu.props.highlighted}`);
+  }
+  if (menu.children[2]?.props.reversed !== true) {
+    throw new Error("the hovered row must be reversed");
+  }
+  // Hovering beyond the last visible row clamps.
+  const clamped = menuHover(menu, 99);
+  if (clamped.highlighted !== 2) {
+    throw new Error(`hover clamp = ${clamped.highlighted}`);
+  }
+  // Click on a leaf activates it and dismisses the menu.
+  const clicked = menuClick(menu, 2);
+  if (clicked.activated !== "2") {
+    throw new Error(`click activated = ${clicked.activated}`);
+  }
+  if (clicked.open !== false) throw new Error(`click open = ${clicked.open}`);
+  if (menu.props.open !== false) {
+    throw new Error(`node open after click = ${menu.props.open}`);
+  }
+  // Clicking a branch opens its submenu instead of dismissing.
+  const branchMenu = Menu({ items: menuFixture(), open: true });
+  const branchClicked = menuClick(branchMenu, 0);
+  if (branchClicked.activated !== null) {
+    throw new Error(`branch click activated = ${branchClicked.activated}`);
+  }
+  if (branchClicked.open_submenus.join(",") !== "0") {
+    throw new Error(
+      `branch click open = ${branchClicked.open_submenus.join(",")}`,
+    );
+  }
+  if (branchMenu.props.open !== true) {
+    throw new Error("clicking a branch must not dismiss the menu");
+  }
+  if (menuRowTexts(branchMenu).join(",") !== "File,  New,  Open,Edit,Quit") {
+    throw new Error(
+      `rows after branch click = ${menuRowTexts(branchMenu).join(",")}`,
+    );
   }
 });
 
@@ -5504,28 +7635,46 @@ function treeFixture(): TreeNode[] {
 
 /** The text of every materialized row leaf, in scene order. */
 function treeRowTexts(tree: Node): string[] {
-  return tree.children.map((leaf) => (typeof leaf.props.text === "string" ? leaf.props.text : ""));
+  return tree.children.map((
+    leaf,
+  ) => (typeof leaf.props.text === "string" ? leaf.props.text : ""));
 }
 
 Deno.test("Tree composes one collapsed leaf per top-level node with glyphs", () => {
   const tree = Tree({ nodes: treeFixture() });
   if (tree.type !== "tree") throw new Error(`type = ${tree.type}`);
-  if (tree.props.flex_direction !== "column") throw new Error(`flex_direction = ${tree.props.flex_direction}`);
-  if (tree.props.highlight !== 0) throw new Error(`highlight = ${tree.props.highlight}`);
+  if (tree.props.flex_direction !== "column") {
+    throw new Error(`flex_direction = ${tree.props.flex_direction}`);
+  }
+  if (tree.props.highlight !== 0) {
+    throw new Error(`highlight = ${tree.props.highlight}`);
+  }
   // The model / bookkeeping keys never reach the scene props.
-  if ("nodes" in tree.props || "expanded" in tree.props || "indent" in tree.props) {
+  if (
+    "nodes" in tree.props || "expanded" in tree.props || "indent" in tree.props
+  ) {
     throw new Error("nodes/expanded/indent must not reach the scene props");
   }
   // All collapsed: only the three top-level rows materialize.
   const rows = treeRowTexts(tree);
   if (rows.length !== 3) throw new Error(`rows = ${JSON.stringify(rows)}`);
   // Branches carry the collapsed glyph + space; the leaf carries two spaces.
-  if (rows[0] !== `${TREE_COLLAPSED_GLYPH} src`) throw new Error(`row0 = ${JSON.stringify(rows[0])}`);
-  if (rows[1] !== `${TREE_COLLAPSED_GLYPH} docs`) throw new Error(`row1 = ${JSON.stringify(rows[1])}`);
-  if (rows[2] !== "  package.json") throw new Error(`row2 = ${JSON.stringify(rows[2])}`);
+  if (rows[0] !== `${TREE_COLLAPSED_GLYPH} src`) {
+    throw new Error(`row0 = ${JSON.stringify(rows[0])}`);
+  }
+  if (rows[1] !== `${TREE_COLLAPSED_GLYPH} docs`) {
+    throw new Error(`row1 = ${JSON.stringify(rows[1])}`);
+  }
+  if (rows[2] !== "  package.json") {
+    throw new Error(`row2 = ${JSON.stringify(rows[2])}`);
+  }
   // The highlighted (first) row is reversed; the others are not.
-  if (tree.children[0]?.props.reversed !== true) throw new Error("row 0 must be reversed");
-  if (tree.children[1]?.props.reversed === true) throw new Error("only the highlighted row may be reversed");
+  if (tree.children[0]?.props.reversed !== true) {
+    throw new Error("row 0 must be reversed");
+  }
+  if (tree.children[1]?.props.reversed === true) {
+    throw new Error("only the highlighted row may be reversed");
+  }
 });
 
 Deno.test("Tree indentation guides draw a vertical bar under a continuing ancestor", () => {
@@ -5534,62 +7683,110 @@ Deno.test("Tree indentation guides draw a vertical bar under a continuing ancest
   const rows = treeRowTexts(tree);
   // Visible order: src, index.ts, components, button.ts, input.ts, docs, package.json.
   // `src` has a following sibling (docs), so its children draw a `│ ` guide.
-  if (rows[0] !== `${TREE_EXPANDED_GLYPH} src`) throw new Error(`row0 = ${JSON.stringify(rows[0])}`);
-  if (rows[1] !== `${TREE_GUIDE_VERTICAL} ` + "  index.ts") throw new Error(`row1 = ${JSON.stringify(rows[1])}`);
+  if (rows[0] !== `${TREE_EXPANDED_GLYPH} src`) {
+    throw new Error(`row0 = ${JSON.stringify(rows[0])}`);
+  }
+  if (rows[1] !== `${TREE_GUIDE_VERTICAL} ` + "  index.ts") {
+    throw new Error(`row1 = ${JSON.stringify(rows[1])}`);
+  }
   if (rows[2] !== `${TREE_GUIDE_VERTICAL} ${TREE_EXPANDED_GLYPH} components`) {
     throw new Error(`row2 = ${JSON.stringify(rows[2])}`);
   }
   // Depth-2 leaves: one guide from `src` (has next sibling -> bar) + one from
   // `components` (last child of src -> gap), then the leaf glyph slot.
-  if (rows[3] !== `${TREE_GUIDE_VERTICAL} ` + "    button.ts") throw new Error(`row3 = ${JSON.stringify(rows[3])}`);
-  if (rows[4] !== `${TREE_GUIDE_VERTICAL} ` + "    input.ts") throw new Error(`row4 = ${JSON.stringify(rows[4])}`);
-  if (rows[5] !== `${TREE_COLLAPSED_GLYPH} docs`) throw new Error(`row5 = ${JSON.stringify(rows[5])}`);
-  if (rows[6] !== "  package.json") throw new Error(`row6 = ${JSON.stringify(rows[6])}`);
+  if (rows[3] !== `${TREE_GUIDE_VERTICAL} ` + "    button.ts") {
+    throw new Error(`row3 = ${JSON.stringify(rows[3])}`);
+  }
+  if (rows[4] !== `${TREE_GUIDE_VERTICAL} ` + "    input.ts") {
+    throw new Error(`row4 = ${JSON.stringify(rows[4])}`);
+  }
+  if (rows[5] !== `${TREE_COLLAPSED_GLYPH} docs`) {
+    throw new Error(`row5 = ${JSON.stringify(rows[5])}`);
+  }
+  if (rows[6] !== "  package.json") {
+    throw new Error(`row6 = ${JSON.stringify(rows[6])}`);
+  }
 });
 
 Deno.test("treeKey right/left/enter expand, collapse, and walk the tree", () => {
   const tree = Tree({ nodes: treeFixture() });
   // right on a collapsed branch expands it (src has 2 children).
   const expanded = treeKey(tree, { name: "right", ...treeKeyBase });
-  if (expanded.count !== 5) throw new Error(`count after expand = ${expanded.count}`);
+  if (expanded.count !== 5) {
+    throw new Error(`count after expand = ${expanded.count}`);
+  }
   if (visibleTreeRows(tree)[1]?.node.label !== "index.ts") {
     throw new Error(`first child = ${visibleTreeRows(tree)[1]?.node.label}`);
   }
   // right again on the (expanded) branch steps into the first child.
   const stepIn = treeKey(tree, { name: "right", ...treeKeyBase });
-  if (stepIn.highlight !== 1) throw new Error(`step-in highlight = ${stepIn.highlight}`);
+  if (stepIn.highlight !== 1) {
+    throw new Error(`step-in highlight = ${stepIn.highlight}`);
+  }
   // down to `components`, then enter expands it (2 more children).
   treeKey(tree, { name: "down", ...treeKeyBase });
   const openComponents = treeKey(tree, { name: "enter", ...treeKeyBase });
-  if (openComponents.count !== 7) throw new Error(`count after enter = ${openComponents.count}`);
+  if (openComponents.count !== 7) {
+    throw new Error(`count after enter = ${openComponents.count}`);
+  }
   // left on the expanded `components` collapses it back.
   const collapse = treeKey(tree, { name: "left", ...treeKeyBase });
-  if (collapse.count !== 5) throw new Error(`count after collapse = ${collapse.count}`);
+  if (collapse.count !== 5) {
+    throw new Error(`count after collapse = ${collapse.count}`);
+  }
   const row = visibleTreeRows(tree)[collapse.highlight];
   if (row?.node.label !== "components" || row.expanded !== false) {
-    throw new Error(`highlight row = ${JSON.stringify(row?.node.label)} expanded=${row?.expanded}`);
+    throw new Error(
+      `highlight row = ${
+        JSON.stringify(row?.node.label)
+      } expanded=${row?.expanded}`,
+    );
   }
   // left on a collapsed node jumps to its parent (`src`).
   const toParent = treeKey(tree, { name: "left", ...treeKeyBase });
   if (visibleTreeRows(tree)[toParent.highlight]?.node.label !== "src") {
-    throw new Error(`parent = ${visibleTreeRows(tree)[toParent.highlight]?.node.label}`);
+    throw new Error(
+      `parent = ${visibleTreeRows(tree)[toParent.highlight]?.node.label}`,
+    );
   }
 });
 
 Deno.test("expandTreeNode / collapseTreeNode / toggleTreeNode drive expand state by key", () => {
   const tree = Tree({ nodes: treeFixture() });
-  if (expandTreeNode(tree, "0") !== true) throw new Error("expand must report a change");
-  if (expandTreeNode(tree, "0") !== false) throw new Error("re-expand must be a no-op");
-  if (visibleTreeRows(tree).length !== 5) throw new Error(`after expand = ${visibleTreeRows(tree).length}`);
-  if (collapseTreeNode(tree, "0") !== true) throw new Error("collapse must report a change");
-  if (visibleTreeRows(tree).length !== 3) throw new Error(`after collapse = ${visibleTreeRows(tree).length}`);
-  if (toggleTreeNode(tree, "0") !== true) throw new Error("toggle must report a change");
-  if (visibleTreeRows(tree)[0]?.expanded !== true) throw new Error("toggle must expand");
+  if (expandTreeNode(tree, "0") !== true) {
+    throw new Error("expand must report a change");
+  }
+  if (expandTreeNode(tree, "0") !== false) {
+    throw new Error("re-expand must be a no-op");
+  }
+  if (visibleTreeRows(tree).length !== 5) {
+    throw new Error(`after expand = ${visibleTreeRows(tree).length}`);
+  }
+  if (collapseTreeNode(tree, "0") !== true) {
+    throw new Error("collapse must report a change");
+  }
+  if (visibleTreeRows(tree).length !== 3) {
+    throw new Error(`after collapse = ${visibleTreeRows(tree).length}`);
+  }
+  if (toggleTreeNode(tree, "0") !== true) {
+    throw new Error("toggle must report a change");
+  }
+  if (visibleTreeRows(tree)[0]?.expanded !== true) {
+    throw new Error("toggle must expand");
+  }
   // A custom id keys the expand state instead of the index path.
-  const keyed = Tree({ nodes: [{ id: "root", label: "root", children: [{ label: "child" }] }] });
-  if (expandTreeNode(keyed, "0") !== false) throw new Error("index-path key must miss a custom-id node");
-  if (expandTreeNode(keyed, "root") !== true) throw new Error("custom id must expand");
-  if (visibleTreeRows(keyed).length !== 2) throw new Error(`keyed expand = ${visibleTreeRows(keyed).length}`);
+  const keyed = Tree({
+    nodes: [{ id: "root", label: "root", children: [{ label: "child" }] }],
+  });
+  if (expandTreeNode(keyed, "0") !== false) {
+    throw new Error("index-path key must miss a custom-id node");
+  }
+  if (expandTreeNode(keyed, "root") !== true) {
+    throw new Error("custom id must expand");
+  }
+  if (visibleTreeRows(keyed).length !== 2) {
+    throw new Error(`keyed expand = ${visibleTreeRows(keyed).length}`);
+  }
 });
 
 Deno.test("treeKey up/down move the highlight and clamp at the ends", () => {
@@ -5599,32 +7796,51 @@ Deno.test("treeKey up/down move the highlight and clamp at the ends", () => {
   const up = treeKey(tree, { name: "up", ...treeKeyBase });
   if (up.highlight !== 0) throw new Error(`up = ${up.highlight}`);
   const upClamp = treeKey(tree, { name: "up", ...treeKeyBase });
-  if (upClamp.highlight !== 0) throw new Error(`up clamp = ${upClamp.highlight}`);
+  if (upClamp.highlight !== 0) {
+    throw new Error(`up clamp = ${upClamp.highlight}`);
+  }
   for (let i = 0; i < 5; i++) treeKey(tree, { name: "down", ...treeKeyBase });
-  if ((tree.props.highlight as number) !== 2) throw new Error(`down clamp = ${tree.props.highlight}`);
+  if ((tree.props.highlight as number) !== 2) {
+    throw new Error(`down clamp = ${tree.props.highlight}`);
+  }
   // The reversed leaf follows the highlight.
-  if (tree.children[2]?.props.reversed !== true) throw new Error("last row must be reversed");
+  if (tree.children[2]?.props.reversed !== true) {
+    throw new Error("last row must be reversed");
+  }
 });
 
 Deno.test("a large tree materializes only the visible window and clamps scroll", () => {
   // 1000 top-level branches, each with 3 children.
   const nodes: TreeNode[] = [];
   for (let i = 0; i < 1000; i++) {
-    nodes.push({ label: `dir-${i}`, children: [{ label: "a" }, { label: "b" }, { label: "c" }] });
+    nodes.push({
+      label: `dir-${i}`,
+      children: [{ label: "a" }, { label: "b" }, { label: "c" }],
+    });
   }
   const tree = Tree({ nodes, clip_height: 5 });
   // Collapsed: 1000 visible rows, but only 5 materialize.
-  if (tree.children.length !== 5) throw new Error(`window = ${tree.children.length}`);
-  if (visibleTreeRows(tree).length !== 5) throw new Error(`visible = ${visibleTreeRows(tree).length}`);
+  if (tree.children.length !== 5) {
+    throw new Error(`window = ${tree.children.length}`);
+  }
+  if (visibleTreeRows(tree).length !== 5) {
+    throw new Error(`visible = ${visibleTreeRows(tree).length}`);
+  }
   if (treeRowTexts(tree)[0] !== `${TREE_COLLAPSED_GLYPH} dir-0`) {
     throw new Error(`row0 = ${JSON.stringify(treeRowTexts(tree)[0])}`);
   }
   // Drive down well past the window: the window still holds 5 leaves and the
   // highlighted row stays inside it.
   for (let i = 0; i < 40; i++) treeKey(tree, { name: "down", ...treeKeyBase });
-  if (tree.children.length !== 5) throw new Error(`window after scroll = ${tree.children.length}`);
-  if ((tree.props.highlight as number) !== 40) throw new Error(`highlight = ${tree.props.highlight}`);
-  if ((tree.props.scroll_y as number) !== 36) throw new Error(`scroll_y = ${tree.props.scroll_y}`);
+  if (tree.children.length !== 5) {
+    throw new Error(`window after scroll = ${tree.children.length}`);
+  }
+  if ((tree.props.highlight as number) !== 40) {
+    throw new Error(`highlight = ${tree.props.highlight}`);
+  }
+  if ((tree.props.scroll_y as number) !== 36) {
+    throw new Error(`scroll_y = ${tree.props.scroll_y}`);
+  }
   if (treeRowTexts(tree)[4] !== `${TREE_COLLAPSED_GLYPH} dir-40`) {
     throw new Error(`bottom row = ${JSON.stringify(treeRowTexts(tree)[4])}`);
   }
@@ -5633,7 +7849,9 @@ Deno.test("a large tree materializes only the visible window and clamps scroll",
   const first = Tree({ nodes, clip_height: 5 });
   expandTreeNode(first, "0");
   if (treeRowTexts(first)[1] !== `${TREE_GUIDE_VERTICAL} ` + "  a") {
-    throw new Error(`expanded child = ${JSON.stringify(treeRowTexts(first)[1])}`);
+    throw new Error(
+      `expanded child = ${JSON.stringify(treeRowTexts(first)[1])}`,
+    );
   }
 });
 
@@ -5644,7 +7862,9 @@ Deno.test("a large tree materializes only the visible window and clamps scroll",
 /** The inner (bar) width of a progress node: the outer width minus the frame's
  * border columns (2 for a visible border, 0 for `none`/unset). */
 function progressInnerOf(node: Node): number {
-  const outer = typeof node.props.width === "number" ? node.props.width : PROGRESS_DEFAULT_WIDTH;
+  const outer = typeof node.props.width === "number"
+    ? node.props.width
+    : PROGRESS_DEFAULT_WIDTH;
   const border = node.props.border_style;
   return outer - (border !== undefined && border !== "none" ? 2 : 0);
 }
@@ -5652,16 +7872,21 @@ function progressInnerOf(node: Node): number {
 /** The expected bar text: `ceil(ratio*inner)` fills then empty cells. */
 function expectedBar(ratio: number, inner: number): string {
   const filled = Math.max(0, Math.min(inner, Math.ceil(ratio * inner)));
-  return PROGRESS_FILL_CHAR.repeat(filled) + PROGRESS_EMPTY_CHAR.repeat(inner - filled);
+  return PROGRESS_FILL_CHAR.repeat(filled) +
+    PROGRESS_EMPTY_CHAR.repeat(inner - filled);
 }
 
 Deno.test("Progress composes a framed gauge: fill leaf + percentage readout", () => {
   // Defaults: plain frame, outer width 20 (inner 18), value 0/max 100.
   const node = Progress();
   if (node.type !== "progress") throw new Error(`type = ${node.type}`);
-  if (node.props.border_style !== "plain") throw new Error(`border_style = ${node.props.border_style}`);
+  if (node.props.border_style !== "plain") {
+    throw new Error(`border_style = ${node.props.border_style}`);
+  }
   if (node.props.height !== 1) throw new Error(`height = ${node.props.height}`);
-  if (node.props.width !== PROGRESS_DEFAULT_WIDTH) throw new Error(`width = ${node.props.width}`);
+  if (node.props.width !== PROGRESS_DEFAULT_WIDTH) {
+    throw new Error(`width = ${node.props.width}`);
+  }
   // The composition bookkeeping keys are consumed by the factory — never
   // scene props (`ratio` is the bar model state, like Tabs' `active`, so it
   // stays on the props).
@@ -5670,9 +7895,13 @@ Deno.test("Progress composes a framed gauge: fill leaf + percentage readout", ()
   }
   // Composition: the in-flow fill leaf (child 0) + the percentage readout
   // overlay (the last child); no label by default.
-  if (node.children.length !== 2) throw new Error(`children = ${node.children.length}`);
+  if (node.children.length !== 2) {
+    throw new Error(`children = ${node.children.length}`);
+  }
   const bar = node.children[0];
-  if (bar === undefined || bar.type !== "text") throw new Error("the fill must be a text leaf");
+  if (bar === undefined || bar.type !== "text") {
+    throw new Error("the fill must be a text leaf");
+  }
   if (bar.props.text !== expectedBar(0, progressInnerOf(node))) {
     throw new Error(`empty bar = ${JSON.stringify(bar.props.text)}`);
   }
@@ -5683,7 +7912,9 @@ Deno.test("Progress composes a framed gauge: fill leaf + percentage readout", ()
   if (readout?.props.position !== "absolute" || readout?.props.right !== 0) {
     throw new Error(`readout position = ${JSON.stringify(readout?.props)}`);
   }
-  if (readout?.props.z_index !== 1) throw new Error("the readout must overlay the fill (z_index 1)");
+  if (readout?.props.z_index !== 1) {
+    throw new Error("the readout must overlay the fill (z_index 1)");
+  }
 });
 
 Deno.test("Progress fill-cell math: ceil(value/max * inner_width) filled cells", () => {
@@ -5702,13 +7933,18 @@ Deno.test("Progress fill-cell math: ceil(value/max * inner_width) filled cells",
     const node = Progress({ value, max, width: 6 });
     const text = node.children[0]?.props.text;
     if (text !== expected) {
-      throw new Error(`value=${value} max=${max} bar = ${JSON.stringify(text)} (want ${JSON.stringify(expected)})`);
+      throw new Error(
+        `value=${value} max=${max} bar = ${JSON.stringify(text)} (want ${
+          JSON.stringify(expected)
+        })`,
+      );
     }
   }
 });
 
 Deno.test("Progress percentage readout: ceil(value/max*100)%", () => {
-  const readout = (node: Node): string | undefined => node.children[node.children.length - 1]?.props.text;
+  const readout = (node: Node): string | undefined =>
+    node.children[node.children.length - 1]?.props.text;
   if (readout(Progress({ value: 5, max: 10, width: 6 })) !== "50%") {
     throw new Error("50% readout");
   }
@@ -5719,8 +7955,16 @@ Deno.test("Progress percentage readout: ceil(value/max*100)%", () => {
     throw new Error("99% readout");
   }
   // show_percentage: false drops the readout leaf entirely.
-  const noReadout = Progress({ value: 1, max: 2, width: 6, show_percentage: false });
-  if (noReadout.children.length !== 1 || noReadout.children[0]?.props.text !== "▓▓░░") {
+  const noReadout = Progress({
+    value: 1,
+    max: 2,
+    width: 6,
+    show_percentage: false,
+  });
+  if (
+    noReadout.children.length !== 1 ||
+    noReadout.children[0]?.props.text !== "▓▓░░"
+  ) {
     throw new Error(`no-readout composition = ${noReadout.children.length}`);
   }
 });
@@ -5729,7 +7973,9 @@ Deno.test("Progress label: left-aligned overlay inside the bar area when there i
   // width 12, plain frame => inner 10; "copy" (4 cells) + "100%" reserve (4)
   // fits.
   const fits = Progress({ value: 2, max: 4, width: 12, label: "copy" });
-  if (fits.children.length !== 3) throw new Error(`label composition = ${fits.children.length}`);
+  if (fits.children.length !== 3) {
+    throw new Error(`label composition = ${fits.children.length}`);
+  }
   const label = fits.children[1];
   if (label === undefined || label.props.text !== "copy") {
     throw new Error(`label text = ${JSON.stringify(label?.props.text)}`);
@@ -5739,7 +7985,9 @@ Deno.test("Progress label: left-aligned overlay inside the bar area when there i
   }
   if (label.props.dim !== true) throw new Error("the label must be dimmed");
   // The fill leaf still counts the full inner width (the label overlays it).
-  if (fits.children[0]?.props.text !== expectedBar(0.5, progressInnerOf(fits))) {
+  if (
+    fits.children[0]?.props.text !== expectedBar(0.5, progressInnerOf(fits))
+  ) {
     throw new Error("the fill must stay exact under the label overlay");
   }
   // No room: a label wider than inner - reserve is dropped.
@@ -5748,22 +7996,42 @@ Deno.test("Progress label: left-aligned overlay inside the bar area when there i
     throw new Error(`tight label must be dropped (${tight.children.length})`);
   }
   // With the readout off, the label only competes against the inner width.
-  const wide = Progress({ value: 1, max: 4, width: 10, label: "copying", show_percentage: false }); // inner 8
-  if (wide.children.length !== 2 || wide.children[1]?.props.text !== "copying") {
-    throw new Error(`no-readout label = ${JSON.stringify(wide.children.map((c) => c.props.text))}`);
+  const wide = Progress({
+    value: 1,
+    max: 4,
+    width: 10,
+    label: "copying",
+    show_percentage: false,
+  }); // inner 8
+  if (
+    wide.children.length !== 2 || wide.children[1]?.props.text !== "copying"
+  ) {
+    throw new Error(
+      `no-readout label = ${
+        JSON.stringify(wide.children.map((c) => c.props.text))
+      }`,
+    );
   }
   // An empty label string is never composed.
   const empty = Progress({ value: 1, max: 4, width: 12, label: "" });
-  if (empty.children.length !== 2) throw new Error("an empty label must be dropped");
+  if (empty.children.length !== 2) {
+    throw new Error("an empty label must be dropped");
+  }
 });
 
 Deno.test("Progress ratio prop drives the bar directly (wins over value/max)", () => {
   const ratio = Progress({ value: 9, max: 10, ratio: 0.5, width: 6 });
-  if (ratio.children[0]?.props.text !== expectedBar(0.5, progressInnerOf(ratio))) {
-    throw new Error(`ratio bar = ${JSON.stringify(ratio.children[0]?.props.text)}`);
+  if (
+    ratio.children[0]?.props.text !== expectedBar(0.5, progressInnerOf(ratio))
+  ) {
+    throw new Error(
+      `ratio bar = ${JSON.stringify(ratio.children[0]?.props.text)}`,
+    );
   }
   if (ratio.children[1]?.props.text !== "50%") {
-    throw new Error(`ratio readout = ${JSON.stringify(ratio.children[1]?.props.text)}`);
+    throw new Error(
+      `ratio readout = ${JSON.stringify(ratio.children[1]?.props.text)}`,
+    );
   }
   // The ratio is clamped into [0, 1].
   const over = Progress({ ratio: 1.5, width: 6 });
@@ -5771,14 +8039,18 @@ Deno.test("Progress ratio prop drives the bar directly (wins over value/max)", (
     throw new Error("ratio must clamp to 1");
   }
   const under = Progress({ ratio: -0.5, width: 6 });
-  if (under.children[0]?.props.text !== expectedBar(0, progressInnerOf(under))) {
+  if (
+    under.children[0]?.props.text !== expectedBar(0, progressInnerOf(under))
+  ) {
     throw new Error("ratio must clamp to 0");
   }
 });
 
 Deno.test("Progress border_style none fills the full outer width (no frame columns)", () => {
   const node = Progress({ value: 1, max: 4, width: 4, border_style: "none" });
-  if (node.props.border_style !== "none") throw new Error(`border_style = ${node.props.border_style}`);
+  if (node.props.border_style !== "none") {
+    throw new Error(`border_style = ${node.props.border_style}`);
+  }
   // inner = 4 (no border columns): 1 of 4 cells filled.
   if (node.children[0]?.props.text !== "▓░░░") {
     throw new Error(`bar = ${JSON.stringify(node.children[0]?.props.text)}`);
@@ -5788,7 +8060,9 @@ Deno.test("Progress border_style none fills the full outer width (no frame colum
 Deno.test("setProgress updates a live bar in place without rebuilding", () => {
   // width 12 (inner 10): the label "work" (4) + the readout reserve (4) fits.
   const node = Progress({ value: 1, max: 4, width: 12, label: "work" });
-  if (node.children.length !== 3) throw new Error(`label composition = ${node.children.length}`);
+  if (node.children.length !== 3) {
+    throw new Error(`label composition = ${node.children.length}`);
+  }
   const barBefore = node.children[0];
   const labelBefore = node.children[1];
   const readoutBefore = node.children[2];
@@ -5801,16 +8075,26 @@ Deno.test("setProgress updates a live bar in place without rebuilding", () => {
   const readoutText = (): string => node.children[2]?.props.text as string;
 
   setProgress(node, 3);
-  if (valueOf() !== 3 || maxOf() !== 4) throw new Error(`props = ${JSON.stringify(node.props)}`);
+  if (valueOf() !== 3 || maxOf() !== 4) {
+    throw new Error(`props = ${JSON.stringify(node.props)}`);
+  }
   // The composition is not rebuilt: the same leaf instances are repainted.
-  if (node.children[0] !== barBefore) throw new Error("setProgress must not rebuild the fill leaf");
-  if (node.children[1] !== labelBefore) throw new Error("setProgress must not rebuild the label leaf");
-  if (node.children[2] !== readoutBefore) throw new Error("setProgress must not rebuild the readout leaf");
+  if (node.children[0] !== barBefore) {
+    throw new Error("setProgress must not rebuild the fill leaf");
+  }
+  if (node.children[1] !== labelBefore) {
+    throw new Error("setProgress must not rebuild the label leaf");
+  }
+  if (node.children[2] !== readoutBefore) {
+    throw new Error("setProgress must not rebuild the readout leaf");
+  }
   if (barText() !== expectedBar(0.75, progressInnerOf(node))) {
     throw new Error(`bar after setProgress = ${JSON.stringify(barText())}`);
   }
   if (readoutText() !== "75%") {
-    throw new Error(`readout after setProgress = ${JSON.stringify(readoutText())}`);
+    throw new Error(
+      `readout after setProgress = ${JSON.stringify(readoutText())}`,
+    );
   }
 
   // The explicit max argument overrides the node's current max.
@@ -5835,28 +8119,47 @@ Deno.test("Progress resolves the progress component preset through resolveTheme"
   });
   const out = resolveTheme(custom, { component: "progress" });
   if (out.fg !== "#98c379") throw new Error(`fg = ${out.fg}`);
-  if (out.border_style !== "double") throw new Error(`border_style = ${out.border_style}`);
-  if ("component" in out) throw new Error(`component leaked: ${JSON.stringify(out)}`);
+  if (out.border_style !== "double") {
+    throw new Error(`border_style = ${out.border_style}`);
+  }
+  if ("component" in out) {
+    throw new Error(`component leaked: ${JSON.stringify(out)}`);
+  }
   // The preset is stamped onto the framed box by the factory path (the
   // explicit prop wins over the preset). The resolveTheme output is widened
   // NodeProps (its `width` now also admits `"N%"` strings), so it narrows to
   // ProgressProps at the call site — the same cast the react host uses.
   const node = Progress(
-    resolveTheme(custom, { component: "progress", width: 6, value: 1, max: 4 }) as ProgressProps,
+    resolveTheme(custom, {
+      component: "progress",
+      width: 6,
+      value: 1,
+      max: 4,
+    }) as ProgressProps,
   );
-  if (node.props.fg !== "#98c379") throw new Error(`factory fg = ${node.props.fg}`);
-  if (node.props.border_style !== "double") throw new Error(`factory border_style = ${node.props.border_style}`);
+  if (node.props.fg !== "#98c379") {
+    throw new Error(`factory fg = ${node.props.fg}`);
+  }
+  if (node.props.border_style !== "double") {
+    throw new Error(`factory border_style = ${node.props.border_style}`);
+  }
 });
 
 Deno.test("Progress materializes as a box through the native kind map", () => {
   withFakeAddon(() => {
     const renderer = createRenderer();
     // width 12 (inner 10): the label "x" fits alongside the readout.
-    renderer.root.addChild(Progress({ value: 1, max: 4, width: 12, label: "x" }));
+    renderer.root.addChild(
+      Progress({ value: 1, max: 4, width: 12, label: "x" }),
+    );
     // The progress element materializes its root as a box; the composition
     // (fill + label + readout) materializes as text leaves.
-    if (createdNodes.length !== 4) throw new Error(`created = ${JSON.stringify(createdNodes)}`);
-    if (createdNodes[0]?.type !== "box") throw new Error(`root native type = ${createdNodes[0]?.type}`);
+    if (createdNodes.length !== 4) {
+      throw new Error(`created = ${JSON.stringify(createdNodes)}`);
+    }
+    if (createdNodes[0]?.type !== "box") {
+      throw new Error(`root native type = ${createdNodes[0]?.type}`);
+    }
     for (let i = 1; i < 4; i++) {
       if (createdNodes[i]?.type !== "text") {
         throw new Error(`child ${i} native type = ${createdNodes[i]?.type}`);
@@ -5872,20 +8175,46 @@ Deno.test("Progress materializes as a box through the native kind map", () => {
 Deno.test("FocusManager routes keys to the focused element's handler", () => {
   const manager = new FocusManager();
   const received: Array<{ id: string; key: KeyEvent }> = [];
-  manager.register({ id: "a", node: Text({ text: "a" }), onKey: (key) => received.push({ id: "a", key }) });
-  manager.register({ id: "b", node: Text({ text: "b" }), onKey: (key) => received.push({ id: "b", key }) });
-  const key: KeyEvent = { name: "char", char: "x", ctrl: false, alt: false, shift: false };
-  if (manager.routeKey(key) !== false) throw new Error("nothing focused must not route");
+  manager.register({
+    id: "a",
+    node: Text({ text: "a" }),
+    onKey: (key) => received.push({ id: "a", key }),
+  });
+  manager.register({
+    id: "b",
+    node: Text({ text: "b" }),
+    onKey: (key) => received.push({ id: "b", key }),
+  });
+  const key: KeyEvent = {
+    name: "char",
+    char: "x",
+    ctrl: false,
+    alt: false,
+    shift: false,
+  };
+  if (manager.routeKey(key) !== false) {
+    throw new Error("nothing focused must not route");
+  }
   if (manager.focus("a") !== true) throw new Error("focus(a) must succeed");
-  if (manager.activeId !== "a") throw new Error(`activeId = ${manager.activeId}`);
-  if (manager.routeKey(key) !== true) throw new Error("focused route must be handled");
+  if (manager.activeId !== "a") {
+    throw new Error(`activeId = ${manager.activeId}`);
+  }
+  if (manager.routeKey(key) !== true) {
+    throw new Error("focused route must be handled");
+  }
   const afterA = received.length;
-  if (afterA !== 1 || received[0]?.id !== "a") throw new Error(`key must route to a (${afterA})`);
+  if (afterA !== 1 || received[0]?.id !== "a") {
+    throw new Error(`key must route to a (${afterA})`);
+  }
   manager.focus("b");
   manager.routeKey(key);
   const afterB = received.length;
-  if (afterB !== 2 || received[1]?.id !== "b") throw new Error(`key must route to b (${afterB})`);
-  if (received[1]?.key !== key) throw new Error("handler must receive the key event verbatim");
+  if (afterB !== 2 || received[1]?.id !== "b") {
+    throw new Error(`key must route to b (${afterB})`);
+  }
+  if (received[1]?.key !== key) {
+    throw new Error("handler must receive the key event verbatim");
+  }
 });
 
 Deno.test("routeKey with an explicit node routes to that node's handler", () => {
@@ -5894,7 +8223,12 @@ Deno.test("routeKey with an explicit node routes to that node's handler", () => 
   let hits = 0;
   manager.register({ id: "a", node: Text({ text: "a" }), onKey: () => hits++ });
   manager.register({ id: "b", node: bNode, onKey: () => (hits += 10) });
-  const key: KeyEvent = { name: "enter", ctrl: false, alt: false, shift: false };
+  const key: KeyEvent = {
+    name: "enter",
+    ctrl: false,
+    alt: false,
+    shift: false,
+  };
   manager.routeKey(key, bNode);
   if (hits !== 10) throw new Error(`explicit node route = ${hits}`);
 });
@@ -5918,11 +8252,17 @@ Deno.test("FocusManager routes paste to the focused element's paste handler", ()
     onKey: () => {},
     onPaste: (text) => pasted.push({ id: "b", text }),
   });
-  if (manager.routePaste("xy") !== false) throw new Error("nothing focused must not route");
+  if (manager.routePaste("xy") !== false) {
+    throw new Error("nothing focused must not route");
+  }
   if (manager.focus("a") !== true) throw new Error("focus(a) must succeed");
-  if (manager.routePaste("xy") !== true) throw new Error("focused paste must be handled");
+  if (manager.routePaste("xy") !== true) {
+    throw new Error("focused paste must be handled");
+  }
   if (pasteCount() !== 1 || pasted[0]?.id !== "a" || pasted[0]?.text !== "xy") {
-    throw new Error(`paste must route to a verbatim (${JSON.stringify(pasted)})`);
+    throw new Error(
+      `paste must route to a verbatim (${JSON.stringify(pasted)})`,
+    );
   }
   manager.focus("b");
   manager.routePaste("z");
@@ -5935,37 +8275,76 @@ Deno.test("routePaste falls through when the focused element registers no paste 
   const manager = new FocusManager();
   const pasted: string[] = [];
   // Only `a` handles paste; `b` is a key-only focusable.
-  manager.register({ id: "a", node: Text({ text: "a" }), onKey: () => {}, onPaste: (t) => pasted.push(t) });
+  manager.register({
+    id: "a",
+    node: Text({ text: "a" }),
+    onKey: () => {},
+    onPaste: (t) => pasted.push(t),
+  });
   manager.register({ id: "b", node: Text({ text: "b" }), onKey: () => {} });
   manager.focus("b");
-  if (manager.routePaste("xy") !== false) throw new Error("a paste-blind element must not consume");
-  if (pasted.length !== 0) throw new Error(`no dispatch without an onPaste handler (${pasted.length})`);
+  if (manager.routePaste("xy") !== false) {
+    throw new Error("a paste-blind element must not consume");
+  }
+  if (pasted.length !== 0) {
+    throw new Error(
+      `no dispatch without an onPaste handler (${pasted.length})`,
+    );
+  }
   manager.focus("a");
-  if (manager.routePaste("xy") !== true) throw new Error("a paste-handling element must consume");
-  if (pasted.join(",") !== "xy") throw new Error(`pasted = ${pasted.join(",")}`);
+  if (manager.routePaste("xy") !== true) {
+    throw new Error("a paste-handling element must consume");
+  }
+  if (pasted.join(",") !== "xy") {
+    throw new Error(`pasted = ${pasted.join(",")}`);
+  }
 });
 
 Deno.test("routePaste with an explicit node routes to that node's paste handler", () => {
   const manager = new FocusManager();
   const bNode = Text({ text: "b" });
   const pasted: string[] = [];
-  manager.register({ id: "a", node: Text({ text: "a" }), onKey: () => {}, onPaste: (t) => pasted.push("a:" + t) });
-  manager.register({ id: "b", node: bNode, onKey: () => {}, onPaste: (t) => pasted.push("b:" + t) });
+  manager.register({
+    id: "a",
+    node: Text({ text: "a" }),
+    onKey: () => {},
+    onPaste: (t) => pasted.push("a:" + t),
+  });
+  manager.register({
+    id: "b",
+    node: bNode,
+    onKey: () => {},
+    onPaste: (t) => pasted.push("b:" + t),
+  });
   manager.routePaste("xy", bNode);
-  if (pasted.join(",") !== "b:xy") throw new Error(`explicit node paste = ${pasted.join(",")}`);
+  if (pasted.join(",") !== "b:xy") {
+    throw new Error(`explicit node paste = ${pasted.join(",")}`);
+  }
 });
 
 Deno.test("useFocus with an onPaste handler registers paste routing", () => {
   const manager = new FocusManager();
   const node = Text({ text: "x" });
   const pasted: string[] = [];
-  const handle = useFocus("f", node, () => {}, manager, (text) => pasted.push(text));
+  const handle = useFocus(
+    "f",
+    node,
+    () => {},
+    manager,
+    (text) => pasted.push(text),
+  );
   handle.focus();
-  if (manager.routePaste("hi") !== true) throw new Error("routed paste must be handled");
-  if (pasted.join(",") !== "hi") throw new Error(`pasted = ${pasted.join(",")}`);
+  if (manager.routePaste("hi") !== true) {
+    throw new Error("routed paste must be handled");
+  }
+  if (pasted.join(",") !== "hi") {
+    throw new Error(`pasted = ${pasted.join(",")}`);
+  }
   handle.dispose();
   if (manager.has("f")) throw new Error("dispose() must unregister the id");
-  if (manager.routePaste("hi") !== false) throw new Error("disposed handle must not route");
+  if (manager.routePaste("hi") !== false) {
+    throw new Error("disposed handle must not route");
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -5989,16 +8368,27 @@ Deno.test("routePaste round-trips IME-confirmed CJK into a focused Input (plain 
   // caret advances by the total display width (8 for 你好世界).
   const manager = new FocusManager();
   const input = Input({ value: "ab", caret: 1 });
-  useFocus("in", input, () => {}, manager, (text) => pasteInto(input, text)).focus();
-  if (manager.routePaste("你好世界") !== true) throw new Error("a focused input must consume the paste");
+  useFocus("in", input, () => {}, manager, (text) => pasteInto(input, text))
+    .focus();
+  if (manager.routePaste("你好世界") !== true) {
+    throw new Error("a focused input must consume the paste");
+  }
   if (input.props.value !== "a你好世界b") {
-    throw new Error(`value = ${JSON.stringify(input.props.value)}, expected "a你好世界b"`);
+    throw new Error(
+      `value = ${JSON.stringify(input.props.value)}, expected "a你好世界b"`,
+    );
   }
   if (input.children[0]?.props.text !== "a你好世界b") {
-    throw new Error(`leaf text = ${JSON.stringify(input.children[0]?.props.text)}`);
+    throw new Error(
+      `leaf text = ${JSON.stringify(input.children[0]?.props.text)}`,
+    );
   }
   if (input.props.caret !== 9 || input.children[0]?.props.caret !== 9) {
-    throw new Error(`caret = ${input.props.caret}/${input.children[0]?.props.caret}, expected 9`);
+    throw new Error(
+      `caret = ${input.props.caret}/${
+        input.children[0]?.props.caret
+      }, expected 9`,
+    );
   }
 
   // A second composition confirms in a row and accumulates losslessly (an
@@ -6007,45 +8397,73 @@ Deno.test("routePaste round-trips IME-confirmed CJK into a focused Input (plain 
   // previous comparison (see the pasteCount pattern above).
   const readValue = () => input.props.value;
   const readCaret = () => input.props.caret;
-  if (manager.routePaste("こんにちは") !== true) throw new Error("a second paste must be consumed");
+  if (manager.routePaste("こんにちは") !== true) {
+    throw new Error("a second paste must be consumed");
+  }
   if (readValue() !== "a你好世界こんにちはb") {
     throw new Error(`accumulated value = ${JSON.stringify(readValue())}`);
   }
-  if (readCaret() !== 19) throw new Error(`accumulated caret = ${readCaret()}, expected 19`);
+  if (readCaret() !== 19) {
+    throw new Error(`accumulated caret = ${readCaret()}, expected 19`);
+  }
 
   // A decomposed (NFD) form: Hangul jamo — decomposed 한글 is two LVT
   // grapheme clusters (4 display columns) — must round-trip verbatim.
   const jamoManager = new FocusManager();
   const jamo = Input({ value: "ab", caret: 1 });
-  useFocus("jamo", jamo, () => {}, jamoManager, (text) => pasteInto(jamo, text)).focus();
-  if (jamoManager.routePaste("한글") !== true) throw new Error("a jamo paste must be consumed");
+  useFocus("jamo", jamo, () => {}, jamoManager, (text) => pasteInto(jamo, text))
+    .focus();
+  if (jamoManager.routePaste("한글") !== true) {
+    throw new Error("a jamo paste must be consumed");
+  }
   if (jamo.props.value !== "a한글b") {
     throw new Error(`jamo value = ${JSON.stringify(jamo.props.value)}`);
   }
-  if (jamo.props.caret !== 5) throw new Error(`jamo caret = ${jamo.props.caret}, expected 5`);
+  if (jamo.props.caret !== 5) {
+    throw new Error(`jamo caret = ${jamo.props.caret}, expected 5`);
+  }
 
   // A base-plus-combining NFD sequence (é = e + U+0301) is one 1-column
   // cluster and must survive the round-trip as the same code units.
   const combiningManager = new FocusManager();
   const combining = Input({ value: "ab", caret: 1 });
-  useFocus("comb", combining, () => {}, combiningManager, (text) => pasteInto(combining, text)).focus();
-  if (combiningManager.routePaste("e\u{301}") !== true) throw new Error("a combining paste must be consumed");
-  if (combining.props.value !== "ae\u{301}b") {
-    throw new Error(`combining value = ${JSON.stringify(combining.props.value)}`);
+  useFocus(
+    "comb",
+    combining,
+    () => {},
+    combiningManager,
+    (text) => pasteInto(combining, text),
+  ).focus();
+  if (combiningManager.routePaste("e\u{301}") !== true) {
+    throw new Error("a combining paste must be consumed");
   }
-  if (combining.props.caret !== 2) throw new Error(`combining caret = ${combining.props.caret}, expected 2`);
+  if (combining.props.value !== "ae\u{301}b") {
+    throw new Error(
+      `combining value = ${JSON.stringify(combining.props.value)}`,
+    );
+  }
+  if (combining.props.caret !== 2) {
+    throw new Error(`combining caret = ${combining.props.caret}, expected 2`);
+  }
 
   // Cluster-safe insert: a caret column inside a wide glyph (col 1 of the
   // 2-column コ) snaps back to the cluster start — the paste lands before
   // the glyph, never mid-cluster.
   const snapManager = new FocusManager();
   const snap = Input({ value: "コab", caret: 1 });
-  useFocus("snap", snap, () => {}, snapManager, (text) => pasteInto(snap, text)).focus();
-  if (snapManager.routePaste("世") !== true) throw new Error("a snap paste must be consumed");
-  if (snap.props.value !== "世コab") {
-    throw new Error(`snap value = ${JSON.stringify(snap.props.value)}, expected "世コab"`);
+  useFocus("snap", snap, () => {}, snapManager, (text) => pasteInto(snap, text))
+    .focus();
+  if (snapManager.routePaste("世") !== true) {
+    throw new Error("a snap paste must be consumed");
   }
-  if (snap.props.caret !== 3) throw new Error(`snap caret = ${snap.props.caret}, expected 3`);
+  if (snap.props.value !== "世コab") {
+    throw new Error(
+      `snap value = ${JSON.stringify(snap.props.value)}, expected "世コab"`,
+    );
+  }
+  if (snap.props.caret !== 3) {
+    throw new Error(`snap caret = ${snap.props.caret}, expected 3`);
+  }
 });
 
 Deno.test("routePaste round-trips IME-confirmed CJK into a focused Textarea (plain and pre-composed)", () => {
@@ -6054,60 +8472,119 @@ Deno.test("routePaste round-trips IME-confirmed CJK into a focused Textarea (pla
   // code units (4 for 你好世界).
   const manager = new FocusManager();
   const ta = Textarea({ lines: ["ab", "cd"], row: 1, col: 1 });
-  useFocus("ta", ta, () => {}, manager, (text) => pasteIntoTextarea(ta, text)).focus();
-  if (manager.routePaste("你好世界") !== true) throw new Error("a focused textarea must consume the paste");
+  useFocus("ta", ta, () => {}, manager, (text) => pasteIntoTextarea(ta, text))
+    .focus();
+  if (manager.routePaste("你好世界") !== true) {
+    throw new Error("a focused textarea must consume the paste");
+  }
   if ((ta.props as TextareaProps).lines?.join(",") !== "ab,c你好世界d") {
     throw new Error(`lines = ${JSON.stringify(ta.props.lines)}`);
   }
-  if ((ta.props as TextareaProps).row !== 1 || (ta.props as TextareaProps).col !== 5) {
-    throw new Error(`row/col = ${(ta.props as TextareaProps).row}/${(ta.props as TextareaProps).col}, expected 1/5`);
+  if (
+    (ta.props as TextareaProps).row !== 1 ||
+    (ta.props as TextareaProps).col !== 5
+  ) {
+    throw new Error(
+      `row/col = ${(ta.props as TextareaProps).row}/${
+        (ta.props as TextareaProps).col
+      }, expected 1/5`,
+    );
   }
   if (ta.children[1]?.props.text !== "c你好世界d") {
     throw new Error(`leaf = ${JSON.stringify(ta.children[1]?.props.text)}`);
   }
 
   // A second composition accumulates losslessly on the same line.
-  if (manager.routePaste("안녕하세요") !== true) throw new Error("a second textarea paste must be consumed");
-  if ((ta.props as TextareaProps).lines?.join(",") !== "ab,c你好世界안녕하세요d") {
+  if (manager.routePaste("안녕하세요") !== true) {
+    throw new Error("a second textarea paste must be consumed");
+  }
+  if (
+    (ta.props as TextareaProps).lines?.join(",") !== "ab,c你好世界안녕하세요d"
+  ) {
     throw new Error(`accumulated lines = ${JSON.stringify(ta.props.lines)}`);
   }
-  if ((ta.props as TextareaProps).col !== 10) throw new Error(`accumulated col = ${(ta.props as TextareaProps).col}`);
+  if ((ta.props as TextareaProps).col !== 10) {
+    throw new Error(`accumulated col = ${(ta.props as TextareaProps).col}`);
+  }
 
   // A multi-line CJK paste: the pasted \n splits into new logical lines with
   // the post-caret tail joining the last segment.
   const multiManager = new FocusManager();
   const multi = Textarea({ lines: ["你好"], row: 0, col: 2 });
-  useFocus("multi", multi, () => {}, multiManager, (text) => pasteIntoTextarea(multi, text)).focus();
-  if (multiManager.routePaste("世\n界") !== true) throw new Error("a multi-line paste must be consumed");
+  useFocus(
+    "multi",
+    multi,
+    () => {},
+    multiManager,
+    (text) => pasteIntoTextarea(multi, text),
+  ).focus();
+  if (multiManager.routePaste("世\n界") !== true) {
+    throw new Error("a multi-line paste must be consumed");
+  }
   if ((multi.props as TextareaProps).lines?.join(",") !== "你好世,界") {
     throw new Error(`multi lines = ${JSON.stringify(multi.props.lines)}`);
   }
-  if ((multi.props as TextareaProps).row !== 1 || (multi.props as TextareaProps).col !== 1) {
-    throw new Error(`multi row/col = ${(multi.props as TextareaProps).row}/${(multi.props as TextareaProps).col}, expected 1/1`);
+  if (
+    (multi.props as TextareaProps).row !== 1 ||
+    (multi.props as TextareaProps).col !== 1
+  ) {
+    throw new Error(
+      `multi row/col = ${(multi.props as TextareaProps).row}/${
+        (multi.props as TextareaProps).col
+      }, expected 1/1`,
+    );
   }
-  if (multi.children[1]?.props.text !== "界") throw new Error(`multi leaf = ${JSON.stringify(multi.children[1]?.props.text)}`);
+  if (multi.children[1]?.props.text !== "界") {
+    throw new Error(
+      `multi leaf = ${JSON.stringify(multi.children[1]?.props.text)}`,
+    );
+  }
 
   // A decomposed (NFD) Hangul jamo paste inserts verbatim; the caret column
   // advances by code units (3 for 한).
   const jamoManager = new FocusManager();
   const jamo = Textarea({ lines: ["ab"], row: 0, col: 1 });
-  useFocus("jamo", jamo, () => {}, jamoManager, (text) => pasteIntoTextarea(jamo, text)).focus();
-  if (jamoManager.routePaste("한") !== true) throw new Error("a jamo textarea paste must be consumed");
+  useFocus(
+    "jamo",
+    jamo,
+    () => {},
+    jamoManager,
+    (text) => pasteIntoTextarea(jamo, text),
+  ).focus();
+  if (jamoManager.routePaste("한") !== true) {
+    throw new Error("a jamo textarea paste must be consumed");
+  }
   if ((jamo.props as TextareaProps).lines?.join(",") !== "a한b") {
     throw new Error(`jamo lines = ${JSON.stringify(jamo.props.lines)}`);
   }
-  if ((jamo.props as TextareaProps).col !== 4) throw new Error(`jamo col = ${(jamo.props as TextareaProps).col}, expected 4`);
+  if ((jamo.props as TextareaProps).col !== 4) {
+    throw new Error(
+      `jamo col = ${(jamo.props as TextareaProps).col}, expected 4`,
+    );
+  }
 
   // Cluster-safe insert: a mid-cluster caret column (col 3 inside the
   // 3-code-unit 한 cluster) snaps to the cluster end before the paste.
   const snapManager = new FocusManager();
   const snap = Textarea({ lines: ["a한b"], row: 0, col: 3 });
-  useFocus("snap", snap, () => {}, snapManager, (text) => pasteIntoTextarea(snap, text)).focus();
-  if (snapManager.routePaste("文") !== true) throw new Error("a snap textarea paste must be consumed");
+  useFocus(
+    "snap",
+    snap,
+    () => {},
+    snapManager,
+    (text) => pasteIntoTextarea(snap, text),
+  ).focus();
+  if (snapManager.routePaste("文") !== true) {
+    throw new Error("a snap textarea paste must be consumed");
+  }
   if ((snap.props as TextareaProps).lines?.join(",") !== "a한文b") {
     throw new Error(`snap lines = ${JSON.stringify(snap.props.lines)}`);
   }
-  if ((snap.props as TextareaProps).col !== 5) throw new Error(`snap col = ${(snap.props as TextareaProps).col}, expected 5`);
+  if ((snap.props as TextareaProps).col !== 5) {
+    throw new Error(
+      `snap col = ${(snap.props as TextareaProps).col}, expected 5`,
+    );
+  }
 });
 
 Deno.test("unregister clears the active focus and stops dispatch", () => {
@@ -6116,12 +8593,24 @@ Deno.test("unregister clears the active focus and stops dispatch", () => {
   let hits = 0;
   const unsub = manager.register({ id: "x", node, onKey: () => hits++ });
   manager.focus("x");
-  if (manager.active?.node !== node) throw new Error("active entry must expose the node");
+  if (manager.active?.node !== node) {
+    throw new Error("active entry must expose the node");
+  }
   unsub();
-  if (manager.activeId !== null) throw new Error("active must clear on unregister");
+  if (manager.activeId !== null) {
+    throw new Error("active must clear on unregister");
+  }
   if (manager.has("x")) throw new Error("entry must be gone after unregister");
-  const key: KeyEvent = { name: "char", char: "q", ctrl: false, alt: false, shift: false };
-  if (manager.routeKey(key) !== false) throw new Error("unregistered id must not route");
+  const key: KeyEvent = {
+    name: "char",
+    char: "q",
+    ctrl: false,
+    alt: false,
+    shift: false,
+  };
+  if (manager.routeKey(key) !== false) {
+    throw new Error("unregistered id must not route");
+  }
   if (hits !== 0) throw new Error("no dispatch after unregister");
 });
 
@@ -6133,9 +8622,19 @@ Deno.test("useFocus registers, focuses and disposes through the manager", () => 
   if (!manager.has("f")) throw new Error("useFocus must register the id");
   handle.focus();
   if (!handle.isFocused()) throw new Error("focus() must make the id active");
-  const key: KeyEvent = { name: "char", char: "q", ctrl: false, alt: false, shift: false };
-  if (manager.routeKey(key) !== true) throw new Error("routed key must be handled");
-  if (hits !== 1) throw new Error(`routed through the handle's handler = ${hits}`);
+  const key: KeyEvent = {
+    name: "char",
+    char: "q",
+    ctrl: false,
+    alt: false,
+    shift: false,
+  };
+  if (manager.routeKey(key) !== true) {
+    throw new Error("routed key must be handled");
+  }
+  if (hits !== 1) {
+    throw new Error(`routed through the handle's handler = ${hits}`);
+  }
   handle.blur();
   if (handle.isFocused()) throw new Error("blur() must clear the active focus");
   handle.dispose();
@@ -6148,20 +8647,40 @@ Deno.test("the default focus manager is a FocusManager instance", () => {
   }
 });
 
-function assertActiveId(manager: FocusManager, expected: string | null, label: string): void {
+function assertActiveId(
+  manager: FocusManager,
+  expected: string | null,
+  label: string,
+): void {
   const actual = manager.activeId;
   if (actual !== expected) {
-    throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+    throw new Error(
+      `${label}: expected ${JSON.stringify(expected)}, got ${
+        JSON.stringify(actual)
+      }`,
+    );
   }
 }
 
-function assertEvents(events: Array<string | null>, expected: Array<string | null>, label: string): void {
+function assertEvents(
+  events: Array<string | null>,
+  expected: Array<string | null>,
+  label: string,
+): void {
   if (events.length !== expected.length) {
-    throw new Error(`${label}: expected ${expected.length} events, got ${events.length}: ${JSON.stringify(events)}`);
+    throw new Error(
+      `${label}: expected ${expected.length} events, got ${events.length}: ${
+        JSON.stringify(events)
+      }`,
+    );
   }
   for (let i = 0; i < events.length; i++) {
     if (events[i] !== expected[i]) {
-      throw new Error(`${label}: event ${i} = ${JSON.stringify(events[i])}, expected ${JSON.stringify(expected[i])}`);
+      throw new Error(
+        `${label}: event ${i} = ${JSON.stringify(events[i])}, expected ${
+          JSON.stringify(expected[i])
+        }`,
+      );
     }
   }
 }
@@ -6172,7 +8691,9 @@ Deno.test("FocusManager next/prev/focusFirst traverse registration order with wr
   manager.register({ id: "b", node: Text({ text: "b" }), onKey: () => {} });
   manager.register({ id: "c", node: Text({ text: "c" }), onKey: () => {} });
   // With nothing focused, next()/prev() start at the first element.
-  if (manager.next() !== true) throw new Error("next() with no active must focus the first");
+  if (manager.next() !== true) {
+    throw new Error("next() with no active must focus the first");
+  }
   assertActiveId(manager, "a", "next() start");
   if (manager.next() !== true) throw new Error("next() must move forward");
   assertActiveId(manager, "b", "next() forward");
@@ -6186,7 +8707,9 @@ Deno.test("FocusManager next/prev/focusFirst traverse registration order with wr
   assertActiveId(manager, "b", "prev() backward");
   if (manager.prev() !== true) throw new Error("prev() must reach the first");
   assertActiveId(manager, "a", "prev() first");
-  if (manager.focusFirst() !== true) throw new Error("focusFirst() must succeed");
+  if (manager.focusFirst() !== true) {
+    throw new Error("focusFirst() must succeed");
+  }
   assertActiveId(manager, "a", "focusFirst()");
   // A single-element manager: next/prev stay on the only element.
   const single = new FocusManager();
@@ -6197,9 +8720,15 @@ Deno.test("FocusManager next/prev/focusFirst traverse registration order with wr
   assertActiveId(single, "only", "single prev()");
   // An empty manager: traversal is a no-op that reports failure.
   const empty = new FocusManager();
-  if (empty.next() !== false) throw new Error("next() on empty manager must fail");
-  if (empty.prev() !== false) throw new Error("prev() on empty manager must fail");
-  if (empty.focusFirst() !== false) throw new Error("focusFirst() on empty manager must fail");
+  if (empty.next() !== false) {
+    throw new Error("next() on empty manager must fail");
+  }
+  if (empty.prev() !== false) {
+    throw new Error("prev() on empty manager must fail");
+  }
+  if (empty.focusFirst() !== false) {
+    throw new Error("focusFirst() on empty manager must fail");
+  }
 });
 
 Deno.test("FocusManager subscribe fires exactly once per focus/blur/unregister change", () => {
@@ -6226,20 +8755,32 @@ Deno.test("FocusManager focusIdFor maps nodes to registered ids and clears on un
   const manager = new FocusManager();
   const aNode = Text({ text: "a" });
   const bNode = Text({ text: "b" });
-  if (manager.focusIdFor(aNode) !== null) throw new Error("unregistered node must map to null");
+  if (manager.focusIdFor(aNode) !== null) {
+    throw new Error("unregistered node must map to null");
+  }
   manager.register({ id: "a", node: aNode, onKey: () => {} });
   manager.register({ id: "b", node: bNode, onKey: () => {} });
-  if (manager.focusIdFor(aNode) !== "a") throw new Error("focusIdFor(aNode) must be 'a'");
-  if (manager.focusIdFor(bNode) !== "b") throw new Error("focusIdFor(bNode) must be 'b'");
+  if (manager.focusIdFor(aNode) !== "a") {
+    throw new Error("focusIdFor(aNode) must be 'a'");
+  }
+  if (manager.focusIdFor(bNode) !== "b") {
+    throw new Error("focusIdFor(bNode) must be 'b'");
+  }
   if (manager.focusIdFor(Text({ text: "other" })) !== null) {
     throw new Error("foreign node must map to null");
   }
   manager.unregister("a");
-  if (manager.focusIdFor(aNode) !== null) throw new Error("focusIdFor must be null after unregister");
-  if (manager.focusIdFor(bNode) !== "b") throw new Error("other mapping must survive");
+  if (manager.focusIdFor(aNode) !== null) {
+    throw new Error("focusIdFor must be null after unregister");
+  }
+  if (manager.focusIdFor(bNode) !== "b") {
+    throw new Error("other mapping must survive");
+  }
   // Re-registering the same node under a new id updates the mapping.
   manager.register({ id: "a2", node: aNode, onKey: () => {} });
-  if (manager.focusIdFor(aNode) !== "a2") throw new Error("re-registered node must map to the new id");
+  if (manager.focusIdFor(aNode) !== "a2") {
+    throw new Error("re-registered node must map to the new id");
+  }
 });
 
 Deno.test("FocusManager focus/blur are idempotent and notify only on change", () => {
@@ -6258,7 +8799,9 @@ Deno.test("FocusManager focus/blur are idempotent and notify only on change", ()
   manager.blur();
   assertActiveId(manager, null, "idempotent blur");
   // Focusing an unregistered id fails without disturbing state.
-  if (manager.focus("missing") !== false) throw new Error("focus on unregistered id must fail");
+  if (manager.focus("missing") !== false) {
+    throw new Error("focus on unregistered id must fail");
+  }
   assertActiveId(manager, null, "failed focus");
   assertEvents(events, ["a", null], "idempotent notifications");
 });
@@ -6274,28 +8817,48 @@ Deno.test("Keymap matches combos by name and exact modifiers", () => {
     hits.push({ combo: "ctrl+k", event });
   });
   // A printable combo matches a "char" event by character.
-  const ctrlK: KeyEvent = { name: "char", char: "k", ctrl: true, alt: false, shift: false };
+  const ctrlK: KeyEvent = {
+    name: "char",
+    char: "k",
+    ctrl: true,
+    alt: false,
+    shift: false,
+  };
   if (km.dispatch(ctrlK) !== true) throw new Error("ctrl+k must dispatch");
   if (hits.length !== 1 || hits[0]?.combo !== "ctrl+k") {
     throw new Error(`ctrl+k hits = ${hits.length}`);
   }
-  if (hits[0]?.event !== ctrlK) throw new Error("handler must receive the event verbatim");
+  if (hits[0]?.event !== ctrlK) {
+    throw new Error("handler must receive the event verbatim");
+  }
   // Plain k (ctrl released) must not match.
   if (km.dispatch({ ...keyBase, name: "char", char: "k" }) !== false) {
     throw new Error("plain k must not dispatch ctrl+k");
   }
   // ctrl+shift+k must not match (shift must be released — exact modifiers).
-  if (km.dispatch({ name: "char", char: "k", ctrl: true, alt: false, shift: true }) !== false) {
+  if (
+    km.dispatch({
+      name: "char",
+      char: "k",
+      ctrl: true,
+      alt: false,
+      shift: true,
+    }) !== false
+  ) {
     throw new Error("ctrl+shift+k must not dispatch ctrl+k");
   }
   // A named (non-char) key never matches a different combo's name.
   if (km.dispatch({ ...keyBase, name: "enter" }) !== false) {
     throw new Error("enter must not dispatch ctrl+k");
   }
-  if (hits.length !== 1) throw new Error(`non-matching keys must not fire (${hits.length})`);
+  if (hits.length !== 1) {
+    throw new Error(`non-matching keys must not fire (${hits.length})`);
+  }
   // Unsubscribing removes the registration.
   unsub();
-  if (km.dispatch(ctrlK) !== false) throw new Error("unregistered ctrl+k must not dispatch");
+  if (km.dispatch(ctrlK) !== false) {
+    throw new Error("unregistered ctrl+k must not dispatch");
+  }
 });
 
 Deno.test("Keymap matches named keys, super/meta flags, and replaces on re-register", () => {
@@ -6306,8 +8869,13 @@ Deno.test("Keymap matches named keys, super/meta flags, and replaces on re-regis
   let enterHits = 0;
   const enterCount = () => enterHits;
   km.register({ name: "enter" }, () => enterHits++);
-  if (km.dispatch({ ...keyBase, name: "enter" }) !== true) throw new Error("enter must dispatch");
-  if (km.dispatch({ name: "enter", ctrl: true, alt: false, shift: false }) !== false) {
+  if (km.dispatch({ ...keyBase, name: "enter" }) !== true) {
+    throw new Error("enter must dispatch");
+  }
+  if (
+    km.dispatch({ name: "enter", ctrl: true, alt: false, shift: false }) !==
+      false
+  ) {
     throw new Error("ctrl+enter must not dispatch enter");
   }
   if (enterCount() !== 1) throw new Error(`enter hits = ${enterCount()}`);
@@ -6315,7 +8883,9 @@ Deno.test("Keymap matches named keys, super/meta flags, and replaces on re-regis
   let superHits = 0;
   const superCount = () => superHits;
   km.register({ name: "s", super: true }, () => superHits++);
-  if (km.dispatch({ ...keyBase, name: "char", char: "s", super: true }) !== true) {
+  if (
+    km.dispatch({ ...keyBase, name: "char", char: "s", super: true }) !== true
+  ) {
     throw new Error("super+s must dispatch");
   }
   if (km.dispatch({ ...keyBase, name: "char", char: "s" }) !== false) {
@@ -6325,10 +8895,16 @@ Deno.test("Keymap matches named keys, super/meta flags, and replaces on re-regis
   // Re-registering the same combo replaces the earlier handler; the old
   // unsubscribe must not clobber the replacement.
   const replaced = km.register({ name: "enter" }, () => enterHits += 10);
-  if (km.dispatch({ ...keyBase, name: "enter" }) !== true) throw new Error("enter (replaced) must dispatch");
-  if (enterCount() !== 11) throw new Error(`replaced enter hits = ${enterCount()}`);
+  if (km.dispatch({ ...keyBase, name: "enter" }) !== true) {
+    throw new Error("enter (replaced) must dispatch");
+  }
+  if (enterCount() !== 11) {
+    throw new Error(`replaced enter hits = ${enterCount()}`);
+  }
   replaced();
-  if (km.dispatch({ ...keyBase, name: "enter" }) !== false) throw new Error("enter must be removed");
+  if (km.dispatch({ ...keyBase, name: "enter" }) !== false) {
+    throw new Error("enter must be removed");
+  }
 });
 
 Deno.test("Keymap ctrl+k fires ahead of focus routing; unclaimed keys reach the focused element", () => {
@@ -6346,49 +8922,283 @@ Deno.test("Keymap ctrl+k fires ahead of focus routing; unclaimed keys reach the 
     const elementACount = () => elementAHits;
     const elementBCount = () => elementBHits;
     const treeCount = () => treeHits;
-    const unregister = keymap.register({ name: "k", ctrl: true }, () => shortcutHits++);
+    const unregister = keymap.register(
+      { name: "k", ctrl: true },
+      () => shortcutHits++,
+    );
     // The wiring useInput / subscribeInput build: each key routes through
     // the manager; only unclaimed keys reach the tree-level handler.
     renderer.onKey((event) => {
       if (manager.routeKey(event)) return;
       treeHits++;
     });
-    const ctrlK: KeyEvent = { name: "char", char: "k", ctrl: true, alt: false, shift: false };
-    const plainA: KeyEvent = { name: "char", char: "a", ctrl: false, alt: false, shift: false };
+    const ctrlK: KeyEvent = {
+      name: "char",
+      char: "k",
+      ctrl: true,
+      alt: false,
+      shift: false,
+    };
+    const plainA: KeyEvent = {
+      name: "char",
+      char: "a",
+      ctrl: false,
+      alt: false,
+      shift: false,
+    };
     try {
       // Nothing focused: the registered combo still fires.
       pushEvent({ type: "key", key: ctrlK });
       if (shortcutCount() !== 1 || treeCount() !== 0) {
-        throw new Error(`unfocused ctrl+k: shortcut = ${shortcutCount()}, tree = ${treeCount()}`);
+        throw new Error(
+          `unfocused ctrl+k: shortcut = ${shortcutCount()}, tree = ${treeCount()}`,
+        );
       }
       // An unclaimed key with nothing focused falls through to the tree.
       pushEvent({ type: "key", key: plainA });
-      if (treeCount() !== 1) throw new Error(`unfocused plain a: tree = ${treeCount()}`);
+      if (treeCount() !== 1) {
+        throw new Error(`unfocused plain a: tree = ${treeCount()}`);
+      }
       // Focus on a registered element: ctrl+k still fires the shortcut and is
       // NOT delivered to the focused element's handler.
-      manager.register({ id: "a", node: Text({ text: "a" }), onKey: () => elementAHits++ });
-      manager.register({ id: "b", node: Text({ text: "b" }), onKey: () => elementBHits++ });
+      manager.register({
+        id: "a",
+        node: Text({ text: "a" }),
+        onKey: () => elementAHits++,
+      });
+      manager.register({
+        id: "b",
+        node: Text({ text: "b" }),
+        onKey: () => elementBHits++,
+      });
       if (manager.focus("a") !== true) throw new Error("focus(a) must succeed");
       pushEvent({ type: "key", key: ctrlK });
       if (shortcutCount() !== 2 || elementACount() !== 0) {
-        throw new Error(`focused ctrl+k: shortcut = ${shortcutCount()}, element a = ${elementACount()}`);
+        throw new Error(
+          `focused ctrl+k: shortcut = ${shortcutCount()}, element a = ${elementACount()}`,
+        );
       }
       // An unclaimed key reaches the focused element's handler (not swallowed
       // by the keymap, and the tree handler stays skipped).
       pushEvent({ type: "key", key: plainA });
       if (elementACount() !== 1 || treeCount() !== 1) {
-        throw new Error(`focused plain a: element a = ${elementACount()}, tree = ${treeCount()}`);
+        throw new Error(
+          `focused plain a: element a = ${elementACount()}, tree = ${treeCount()}`,
+        );
       }
       // Any registered element: focus b and ctrl+k still fires the shortcut.
       if (manager.focus("b") !== true) throw new Error("focus(b) must succeed");
       pushEvent({ type: "key", key: ctrlK });
       if (shortcutCount() !== 3 || elementBCount() !== 0) {
-        throw new Error(`focused-b ctrl+k: shortcut = ${shortcutCount()}, element b = ${elementBCount()}`);
+        throw new Error(
+          `focused-b ctrl+k: shortcut = ${shortcutCount()}, element b = ${elementBCount()}`,
+        );
       }
     } finally {
       unregister();
     }
   });
+});
+
+Deno.test("Keymap list() returns registered combos in registration order", () => {
+  const km = new Keymap();
+  km.register({ name: "k", ctrl: true }, () => {}, "Copy selection");
+  km.register({ name: "enter" }, () => {});
+  km.register({ name: "f1" }, () => {}, "Help");
+  const listed = km.list();
+  if (listed.length !== 3) throw new Error(`listed = ${listed.length}`);
+  // Registration order is stable; descriptions surface only when supplied.
+  const first = listed[0]!;
+  if (first.combo.name !== "k" || first.combo.ctrl !== true) {
+    throw new Error(`first combo = ${JSON.stringify(first.combo)}`);
+  }
+  if (first.description !== "Copy selection") {
+    throw new Error(`first description = ${JSON.stringify(first.description)}`);
+  }
+  const second = listed[1]!;
+  if (second.combo.name !== "enter" || second.combo.ctrl !== undefined) {
+    throw new Error(`second combo = ${JSON.stringify(second.combo)}`);
+  }
+  if (second.description !== undefined) {
+    throw new Error(
+      `second description = ${JSON.stringify(second.description)}`,
+    );
+  }
+  const third = listed[2]!;
+  if (third.combo.name !== "f1" || third.description !== "Help") {
+    throw new Error(`third = ${JSON.stringify(third)}`);
+  }
+  // Re-registering a combo replaces its description but keeps its position.
+  km.register({ name: "k", ctrl: true }, () => {}, "Copy (replaced)");
+  const afterReplace = km.list();
+  if (afterReplace.length !== 3) {
+    throw new Error(`after replace = ${afterReplace.length}`);
+  }
+  if (
+    afterReplace[0]!.combo.name !== "k" ||
+    afterReplace[0]!.description !== "Copy (replaced)"
+  ) {
+    throw new Error(`replaced entry = ${JSON.stringify(afterReplace[0])}`);
+  }
+  if (afterReplace[1]!.combo.name !== "enter") {
+    throw new Error("replacement must keep position");
+  }
+  // Unsubscribing removes the registration from the listing.
+  const unsub = km.register({ name: "escape" }, () => {});
+  unsub();
+  if (km.list().length !== 3) {
+    throw new Error(`after unsub = ${km.list().length}`);
+  }
+  // list() returns fresh copies: mutating them never affects the keymap.
+  const copies = km.list();
+  copies[0]!.combo.name = "mutated";
+  copies[1] = { combo: { name: "injected" } };
+  const untouched = km.list();
+  if (untouched[0]!.combo.name !== "k") {
+    throw new Error(`copy mutation leaked = ${untouched[0]!.combo.name}`);
+  }
+  if (untouched.length !== 3 || untouched[1]!.combo.name !== "enter") {
+    throw new Error(`injected entry leaked = ${JSON.stringify(untouched)}`);
+  }
+});
+
+Deno.test("HelpPanel renders a key-help overlay: right-aligned key column, dimmed descriptions, optional title", () => {
+  const km = new Keymap();
+  km.register({ name: "k", ctrl: true }, () => {}, "Copy selection");
+  km.register({ name: "enter" }, () => {}, "Confirm");
+  km.register({ name: "escape" }, () => {}); // no description: skipped in the overlay
+  km.register({ name: "f1" }, () => {}, "Help");
+  const panel = HelpPanel({ keymap: km });
+  if (panel.type !== "box") throw new Error(`root type = ${panel.type}`);
+  const flex = (): unknown => panel.props.flex_direction;
+  if (flex() !== "column") {
+    throw new Error(
+      `root flex = ${JSON.stringify(panel.props.flex_direction)}`,
+    );
+  }
+  // keymap/title are JS bookkeeping, never scene props.
+  if ("keymap" in panel.props) {
+    throw new Error("keymap must not reach the scene props");
+  }
+  if ("title" in panel.props) {
+    throw new Error("title must not reach the scene props");
+  }
+  // Three described rows in registration order; the description-less escape
+  // entry is skipped. Key column width = widest hint ("ctrl+k", 6): keys
+  // right-aligned inside it (bubbletea help alignment).
+  const rows = panel.children;
+  if (rows.length !== 3) throw new Error(`rows = ${rows.length}`);
+  const golden = [
+    ["ctrl+k", "Copy selection"],
+    [" enter", "Confirm"],
+    ["    f1", "Help"],
+  ] as const;
+  for (let i = 0; i < golden.length; i++) {
+    const row = rows[i]!;
+    if (row.type !== "box" || row.props.flex_direction !== "row") {
+      throw new Error(
+        `row ${i} must be a row box: ${JSON.stringify(row.props)}`,
+      );
+    }
+    const [keyLeaf, descLeaf] = row.children;
+    if (keyLeaf?.props.text !== golden[i]![0]) {
+      throw new Error(`row ${i} keys = ${JSON.stringify(keyLeaf?.props.text)}`);
+    }
+    if (descLeaf?.props.text !== golden[i]![1]) {
+      throw new Error(
+        `row ${i} desc = ${JSON.stringify(descLeaf?.props.text)}`,
+      );
+    }
+    if (descLeaf?.props.dim !== true) {
+      throw new Error(
+        `row ${i} desc must be dimmed: ${JSON.stringify(descLeaf?.props)}`,
+      );
+    }
+    // The dimmed description carries bubbletea's two-cell separator gap.
+    if (descLeaf?.props.margin_left !== 2) {
+      throw new Error(
+        `row ${i} desc margin_left = ${
+          JSON.stringify(descLeaf?.props.margin_left)
+        }`,
+      );
+    }
+  }
+  // The optional title renders as a plain bold text row above the entries.
+  const titled = HelpPanel({ keymap: km, title: "Keymap" });
+  if (titled.children.length !== 4) {
+    throw new Error(`titled children = ${titled.children.length}`);
+  }
+  const titleLeaf = titled.children[0]!;
+  if (titleLeaf.type !== "text" || titleLeaf.props.text !== "Keymap") {
+    throw new Error(`title leaf = ${JSON.stringify(titleLeaf.props)}`);
+  }
+  if (titleLeaf.props.bold !== true) {
+    throw new Error(`title must be bold: ${JSON.stringify(titleLeaf.props)}`);
+  }
+  // An empty map renders an empty panel (no rows).
+  if (HelpPanel({ keymap: new Keymap() }).children.length !== 0) {
+    throw new Error("empty keymap must render no rows");
+  }
+});
+
+Deno.test("HelpPanel defaults to the module-level keymap and resolves the help component preset", () => {
+  const custom = mergeTheme(defaultTheme, {
+    components: {
+      help: { fg: "#98c379", bg: "#111111", border_style: "double" },
+    },
+  });
+  const out = resolveTheme(custom, { component: "help" });
+  if (out.fg !== "#98c379") throw new Error(`fg = ${out.fg}`);
+  if (out.bg !== "#111111") throw new Error(`bg = ${out.bg}`);
+  if (out.border_style !== "double") {
+    throw new Error(`border_style = ${out.border_style}`);
+  }
+  if ("component" in out) {
+    throw new Error(`component leaked: ${JSON.stringify(out)}`);
+  }
+  // The preset is stamped onto the root box by the factory path (the explicit
+  // prop wins over the preset); the resolveTheme output widens to NodeProps,
+  // so it narrows to HelpPanelProps at the call site — the same cast the
+  // react/solid hosts use.
+  const unreg = keymap.register(
+    { name: "h", ctrl: true },
+    () => {},
+    "Toggle help",
+  );
+  try {
+    const panel = HelpPanel(
+      resolveTheme(custom, { component: "help" }) as HelpPanelProps,
+    );
+    if (panel.props.fg !== "#98c379") {
+      throw new Error(`factory fg = ${panel.props.fg}`);
+    }
+    if (panel.props.bg !== "#111111") {
+      throw new Error(`factory bg = ${panel.props.bg}`);
+    }
+    if (panel.props.border_style !== "double") {
+      throw new Error(`factory border = ${panel.props.border_style}`);
+    }
+    // The module-level keymap is the default source.
+    if (panel.children.length !== 1) {
+      throw new Error(`default keymap rows = ${panel.children.length}`);
+    }
+    const row = panel.children[0]!;
+    if (row.children[0]?.props.text !== "ctrl+h") {
+      throw new Error(`keys = ${JSON.stringify(row.children[0]?.props.text)}`);
+    }
+    if (row.children[1]?.props.text !== "Toggle help") {
+      throw new Error(`desc = ${JSON.stringify(row.children[1]?.props.text)}`);
+    }
+  } finally {
+    unreg();
+  }
+  // "help" is a themeable component preset carried by the default theme.
+  if (!THEME_COMPONENTS.includes("help")) {
+    throw new Error("help must be in THEME_COMPONENTS");
+  }
+  if (defaultTheme.components.help === undefined) {
+    throw new Error("defaultTheme must carry the help component preset");
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -6401,35 +9211,60 @@ Deno.test("Modal composes a dimmed backdrop plus a centered content box at a hig
   if (modal.type !== "modal") throw new Error(`type = ${modal.type}`);
   // The overlay paints above in-flow content (z 0; the scrollbar/sticky
   // header stack at 1): the root box carries the high default z_index.
-  if (modal.props.z_index !== MODAL_Z_INDEX) throw new Error(`z_index = ${modal.props.z_index}`);
-  if (modal.props.position !== "absolute") throw new Error(`position = ${modal.props.position}`);
-  if (modal.props.justify_content !== "center" || modal.props.align_items !== "center") {
+  if (modal.props.z_index !== MODAL_Z_INDEX) {
+    throw new Error(`z_index = ${modal.props.z_index}`);
+  }
+  if (modal.props.position !== "absolute") {
+    throw new Error(`position = ${modal.props.position}`);
+  }
+  if (
+    modal.props.justify_content !== "center" ||
+    modal.props.align_items !== "center"
+  ) {
     throw new Error(`centering = ${JSON.stringify(modal.props)}`);
   }
   if (modal.props.open !== true) throw new Error(`open = ${modal.props.open}`);
-  if (modal.props.hidden !== false) throw new Error(`hidden = ${modal.props.hidden}`);
-  if (modal.props.display !== "flex") throw new Error(`display = ${modal.props.display}`);
+  if (modal.props.hidden !== false) {
+    throw new Error(`hidden = ${modal.props.hidden}`);
+  }
+  if (modal.props.display !== "flex") {
+    throw new Error(`display = ${modal.props.display}`);
+  }
   // An explicit z_index is honored.
   const layered = Modal({ z_index: 5 });
-  if (layered.props.z_index !== 5) throw new Error(`layered z_index = ${layered.props.z_index}`);
+  if (layered.props.z_index !== 5) {
+    throw new Error(`layered z_index = ${layered.props.z_index}`);
+  }
   // Composition: a dimmed backdrop fill + a centered content box holding the
   // content nodes.
-  if (modal.children.length !== 2) throw new Error(`children = ${modal.children.length}`);
+  if (modal.children.length !== 2) {
+    throw new Error(`children = ${modal.children.length}`);
+  }
   const backdrop = modal.children[0];
-  if (backdrop?.props.position !== "absolute") throw new Error("backdrop must be an absolute fill");
-  if (backdrop?.props.bg !== MODAL_BACKDROP_BG || backdrop?.props.dim !== true) {
+  if (backdrop?.props.position !== "absolute") {
+    throw new Error("backdrop must be an absolute fill");
+  }
+  if (
+    backdrop?.props.bg !== MODAL_BACKDROP_BG || backdrop?.props.dim !== true
+  ) {
     throw new Error(`backdrop = ${JSON.stringify(backdrop?.props)}`);
   }
   const box = modal.children[1];
   if (box?.type !== "box" || box?.props.flex_direction !== "column") {
     throw new Error("content box must be a flex column");
   }
-  if (box?.children[0] !== content) throw new Error("content must live inside the content box");
+  if (box?.children[0] !== content) {
+    throw new Error("content must live inside the content box");
+  }
   // `backdrop: false` skips the dim layer (content box only).
   const bare = Modal({ backdrop: false });
-  if (bare.children.length !== 1) throw new Error(`bare children = ${bare.children.length}`);
+  if (bare.children.length !== 1) {
+    throw new Error(`bare children = ${bare.children.length}`);
+  }
   // `content` is JS bookkeeping, never a scene prop.
-  if ("content" in modal.props) throw new Error("content must not reach the scene props");
+  if ("content" in modal.props) {
+    throw new Error("content must not reach the scene props");
+  }
 });
 
 Deno.test("Modal starts hidden and openModal/closeModal toggle the visible state", () => {
@@ -6455,14 +9290,20 @@ Deno.test("Modal starts hidden and openModal/closeModal toggle the visible state
   // overwritten by the focus that now sits inside the overlay).
   openModal(closed);
   openModal(closed);
-  if (open() !== true) throw new Error(`double open = ${JSON.stringify(closed.props)}`);
+  if (open() !== true) {
+    throw new Error(`double open = ${JSON.stringify(closed.props)}`);
+  }
   closeModal(closed);
   closeModal(closed);
-  if (open() !== false) throw new Error(`double close = ${JSON.stringify(closed.props)}`);
+  if (open() !== false) {
+    throw new Error(`double close = ${JSON.stringify(closed.props)}`);
+  }
   // A foreign node (not created by the Modal factory) is left alone.
   const box = Box();
   openModal(box);
-  if ("open" in box.props) throw new Error("openModal must ignore non-modal nodes");
+  if ("open" in box.props) {
+    throw new Error("openModal must ignore non-modal nodes");
+  }
   closeModal(box);
 });
 
@@ -6482,7 +9323,9 @@ Deno.test("openModal focuses the first registered focusable and closeModal resto
     if (activeId() !== "modal-out") throw new Error("setup focus failed");
     openModal(modal, manager);
     if (activeId() !== "modal-in") {
-      throw new Error(`open must focus the first registered focusable, got ${activeId()}`);
+      throw new Error(
+        `open must focus the first registered focusable, got ${activeId()}`,
+      );
     }
     closeModal(modal, manager);
     if (activeId() !== "modal-out") {
@@ -6505,11 +9348,15 @@ Deno.test("closeModal falls back to a blur when nothing was focused before the o
     // Nothing is focused when the modal opens: the record is null.
     openModal(modal, manager);
     if (activeId() !== "modal-fallback-in") {
-      throw new Error(`focusFirst must focus the registered focusable, got ${activeId()}`);
+      throw new Error(
+        `focusFirst must focus the registered focusable, got ${activeId()}`,
+      );
     }
     closeModal(modal, manager);
     if (activeId() !== null) {
-      throw new Error(`close with no recorded focus must blur, got ${activeId()}`);
+      throw new Error(
+        `close with no recorded focus must blur, got ${activeId()}`,
+      );
     }
     // A recorded id that was unregistered meanwhile also falls back to blur.
     manager.focus("modal-fallback-in");
@@ -6517,7 +9364,9 @@ Deno.test("closeModal falls back to a blur when nothing was focused before the o
     inside.dispose(); // unregister the recorded id while the modal is open
     closeModal(modal, manager);
     if (activeId() !== null) {
-      throw new Error(`close with an unregistered recorded id must blur, got ${activeId()}`);
+      throw new Error(
+        `close with an unregistered recorded id must blur, got ${activeId()}`,
+      );
     }
   } finally {
     inside.dispose();
@@ -6556,7 +9405,9 @@ Deno.test("resolveTheme stamps the role palette fg/bg and strips the hint", () =
     throw new Error(`bg = ${out.bg}`);
   }
   if ("role" in out) throw new Error(`role leaked: ${JSON.stringify(out)}`);
-  if ("component" in out) throw new Error(`component leaked: ${JSON.stringify(out)}`);
+  if ("component" in out) {
+    throw new Error(`component leaked: ${JSON.stringify(out)}`);
+  }
 });
 
 Deno.test("resolveTheme stamps a component preset fg/bg/border_style", () => {
@@ -6565,13 +9416,19 @@ Deno.test("resolveTheme stamps a component preset fg/bg/border_style", () => {
   });
   const out = resolveTheme(custom, { component: "input" });
   if (out.fg !== "#123456") throw new Error(`fg = ${out.fg}`);
-  if (out.border_style !== "rounded") throw new Error(`border_style = ${out.border_style}`);
-  if ("component" in out) throw new Error(`component leaked: ${JSON.stringify(out)}`);
+  if (out.border_style !== "rounded") {
+    throw new Error(`border_style = ${out.border_style}`);
+  }
+  if ("component" in out) {
+    throw new Error(`component leaked: ${JSON.stringify(out)}`);
+  }
 });
 
 Deno.test("resolveTheme precedence: explicit props > role palette > component preset", () => {
   const custom = mergeTheme(defaultTheme, {
-    components: { status_bar: { fg: "#111111", bg: "#222222", border_style: "thick" } },
+    components: {
+      status_bar: { fg: "#111111", bg: "#222222", border_style: "thick" },
+    },
   });
   // No explicit style: the component preset fills fg/bg/border_style.
   const presetOnly = resolveTheme(custom, { component: "status_bar" });
@@ -6583,7 +9440,10 @@ Deno.test("resolveTheme precedence: explicit props > role palette > component pr
   }
   // Role added: the role palette overrides the preset's fg/bg (role is the
   // more specific intent), the preset's border_style is kept.
-  const roleWins = resolveTheme(custom, { component: "status_bar", role: "danger" });
+  const roleWins = resolveTheme(custom, {
+    component: "status_bar",
+    role: "danger",
+  });
   if (roleWins.fg !== custom.palette.danger.fg) {
     throw new Error(`role must win over preset fg: ${roleWins.fg}`);
   }
@@ -6591,7 +9451,9 @@ Deno.test("resolveTheme precedence: explicit props > role palette > component pr
     throw new Error(`role must win over preset bg: ${roleWins.bg}`);
   }
   if (roleWins.border_style !== "thick") {
-    throw new Error(`preset border_style must survive: ${roleWins.border_style}`);
+    throw new Error(
+      `preset border_style must survive: ${roleWins.border_style}`,
+    );
   }
   // Explicit props win over both.
   const explicit = resolveTheme(custom, {
@@ -6599,9 +9461,13 @@ Deno.test("resolveTheme precedence: explicit props > role palette > component pr
     role: "danger",
     fg: "#ff0000",
   });
-  if (explicit.fg !== "#ff0000") throw new Error(`explicit fg = ${explicit.fg}`);
+  if (explicit.fg !== "#ff0000") {
+    throw new Error(`explicit fg = ${explicit.fg}`);
+  }
   if (explicit.bg !== custom.palette.danger.bg) {
-    throw new Error(`explicit fg must not suppress the role bg: ${explicit.bg}`);
+    throw new Error(
+      `explicit fg must not suppress the role bg: ${explicit.bg}`,
+    );
   }
 });
 
@@ -6617,7 +9483,9 @@ Deno.test("resolveTheme without hints returns the props unchanged (plain node pr
 });
 
 Deno.test("resolveTheme output feeds the element factories as plain node props", () => {
-  const node = Text(resolveTheme(defaultTheme, { text: "err", role: "danger" }));
+  const node = Text(
+    resolveTheme(defaultTheme, { text: "err", role: "danger" }),
+  );
   if (node.type !== "text") throw new Error(`type = ${node.type}`);
   if (node.props.fg !== defaultTheme.palette.danger.fg) {
     throw new Error(`stamped fg = ${node.props.fg}`);
@@ -6626,7 +9494,9 @@ Deno.test("resolveTheme output feeds the element factories as plain node props",
     throw new Error(`stamped bg = ${node.props.bg}`);
   }
   if ("role" in node.props || "component" in node.props) {
-    throw new Error(`semantic hints reached the node: ${JSON.stringify(node.props)}`);
+    throw new Error(
+      `semantic hints reached the node: ${JSON.stringify(node.props)}`,
+    );
   }
 });
 
@@ -6634,7 +9504,9 @@ Deno.test("mergeTheme merges partial roles and keeps base keys", () => {
   const overrides: ThemeOverrides = { palette: { danger: { fg: "#ff0000" } } };
   const merged = mergeTheme(defaultTheme, overrides);
   // The overridden role keeps its base bg and gains the override fg.
-  if (merged.palette.danger.fg !== "#ff0000") throw new Error(`merged fg = ${merged.palette.danger.fg}`);
+  if (merged.palette.danger.fg !== "#ff0000") {
+    throw new Error(`merged fg = ${merged.palette.danger.fg}`);
+  }
   if (merged.palette.danger.bg !== defaultTheme.palette.danger.bg) {
     throw new Error(`base bg must be kept: ${merged.palette.danger.bg}`);
   }
@@ -6646,7 +9518,9 @@ Deno.test("mergeTheme merges partial roles and keeps base keys", () => {
   if (defaultTheme.palette.danger.fg === "#ff0000") {
     throw new Error("mergeTheme must not mutate the base theme");
   }
-  if (merged === defaultTheme) throw new Error("mergeTheme must return a new theme");
+  if (merged === defaultTheme) {
+    throw new Error("mergeTheme must return a new theme");
+  }
 });
 
 Deno.test("mergeTheme merges component presets per key", () => {
@@ -6654,10 +9528,16 @@ Deno.test("mergeTheme merges component presets per key", () => {
     components: { panels: { border_style: "double" } },
   });
   if (merged.components.panels.border_style !== "double") {
-    throw new Error(`preset border_style = ${merged.components.panels.border_style}`);
+    throw new Error(
+      `preset border_style = ${merged.components.panels.border_style}`,
+    );
   }
   if ("fg" in merged.components.panels) {
-    throw new Error(`unset preset key must stay absent: ${JSON.stringify(merged.components.panels)}`);
+    throw new Error(
+      `unset preset key must stay absent: ${
+        JSON.stringify(merged.components.panels)
+      }`,
+    );
   }
   // Other component presets are untouched.
   if (merged.components.input !== defaultTheme.components.input) {
@@ -6670,8 +9550,13 @@ Deno.test("mergeTheme accepts a full Theme as overrides", () => {
     palette: { primary: { fg: "#0000ff", bg: "#000000" } },
   });
   const merged = mergeTheme(defaultTheme, custom);
-  if (merged.palette.primary.fg !== "#0000ff" || merged.palette.primary.bg !== "#000000") {
-    throw new Error(`full-theme override = ${JSON.stringify(merged.palette.primary)}`);
+  if (
+    merged.palette.primary.fg !== "#0000ff" ||
+    merged.palette.primary.bg !== "#000000"
+  ) {
+    throw new Error(
+      `full-theme override = ${JSON.stringify(merged.palette.primary)}`,
+    );
   }
   if (merged.palette.muted.fg !== defaultTheme.palette.muted.fg) {
     throw new Error(`unoverridden role changed: ${merged.palette.muted.fg}`);
@@ -6736,7 +9621,9 @@ class FakeScrollNodeHandle {
 }
 
 /** The native node types materialized through the size-aware fake. */
-const scrollCreatedNodes: Array<{ type: string; props: Record<string, unknown> | null }> = [];
+const scrollCreatedNodes: Array<
+  { type: string; props: Record<string, unknown> | null }
+> = [];
 
 /** A fake addon whose `content_size` reflects each node's content/layout. */
 const scrollFakeAddon = {
@@ -6771,10 +9658,18 @@ Deno.test("ScrollView builds a scroll_view box with the clip/scroll region props
   if (view.type !== "scroll_view") throw new Error(`type = ${view.type}`);
   if (view.props.clip_x !== 1) throw new Error(`clip_x = ${view.props.clip_x}`);
   if (view.props.clip_y !== 2) throw new Error(`clip_y = ${view.props.clip_y}`);
-  if (view.props.clip_width !== 10) throw new Error(`clip_width = ${view.props.clip_width}`);
-  if (view.props.clip_height !== 4) throw new Error(`clip_height = ${view.props.clip_height}`);
-  if (view.props.scroll_x !== 0) throw new Error(`scroll_x = ${view.props.scroll_x}`);
-  if (view.props.scroll_y !== 3) throw new Error(`scroll_y = ${view.props.scroll_y}`);
+  if (view.props.clip_width !== 10) {
+    throw new Error(`clip_width = ${view.props.clip_width}`);
+  }
+  if (view.props.clip_height !== 4) {
+    throw new Error(`clip_height = ${view.props.clip_height}`);
+  }
+  if (view.props.scroll_x !== 0) {
+    throw new Error(`scroll_x = ${view.props.scroll_x}`);
+  }
+  if (view.props.scroll_y !== 3) {
+    throw new Error(`scroll_y = ${view.props.scroll_y}`);
+  }
 });
 
 Deno.test("ScrollView attaches rest-arg and props children, consuming both keys", () => {
@@ -6783,7 +9678,9 @@ Deno.test("ScrollView attaches rest-arg and props children, consuming both keys"
   const viaProps = ScrollView({ children: [b] }, a);
   const kids = viaProps.children;
   if (kids.length !== 2) throw new Error(`children = ${kids.length}`);
-  if (kids[0] !== a || kids[1] !== b) throw new Error("content order must be rest args then props children");
+  if (kids[0] !== a || kids[1] !== b) {
+    throw new Error("content order must be rest args then props children");
+  }
   // Both keys are consumed by the factory — never scene props.
   if ("children" in viaProps.props || "showScrollbar" in viaProps.props) {
     throw new Error(`consumed keys leaked: ${JSON.stringify(viaProps.props)}`);
@@ -6793,17 +9690,24 @@ Deno.test("ScrollView attaches rest-arg and props children, consuming both keys"
 Deno.test("showScrollbar appends a scrollbar text leaf to the composition", () => {
   const withBar = ScrollView({ showScrollbar: true }, Text({ text: "x" }));
   // Content + the scrollbar leaf (a text node pinned to the right edge).
-  if (withBar.children.length !== 2) throw new Error(`children = ${withBar.children.length}`);
+  if (withBar.children.length !== 2) {
+    throw new Error(`children = ${withBar.children.length}`);
+  }
   const leaf = withBar.children[1];
   if (leaf === undefined || leaf.type !== "text") {
     throw new Error("scrollbar must be a text leaf");
   }
-  if (leaf.props.position !== "absolute" || leaf.props.right !== 0 || leaf.props.width !== 1) {
+  if (
+    leaf.props.position !== "absolute" || leaf.props.right !== 0 ||
+    leaf.props.width !== 1
+  ) {
     throw new Error(`leaf props = ${JSON.stringify(leaf.props)}`);
   }
   // Without the flag no scrollbar leaf is composed.
   const noBar = ScrollView({}, Text({ text: "x" }));
-  if (noBar.children.length !== 1) throw new Error(`no-bar children = ${noBar.children.length}`);
+  if (noBar.children.length !== 1) {
+    throw new Error(`no-bar children = ${noBar.children.length}`);
+  }
 });
 
 Deno.test("scrollTo sets scroll props and clamps to the content bounds", () => {
@@ -6811,10 +9715,15 @@ Deno.test("scrollTo sets scroll props and clamps to the content bounds", () => {
     const renderer = createRenderer();
     // Viewport {5, 2} (from the width/height props); the content text is
     // 5 cells wide, 3 rows tall -> maxY = 1, maxX = 0.
-    const view = ScrollView({ width: 5, height: 2 }, Text({ text: "aaaa\nbbbbb\ncc" }));
+    const view = ScrollView(
+      { width: 5, height: 2 },
+      Text({ text: "aaaa\nbbbbb\ncc" }),
+    );
     renderer.root.addChild(view);
     const applied = scrollTo(view, 0, 5);
-    if (applied.x !== 0 || applied.y !== 1) throw new Error(`applied = ${JSON.stringify(applied)}`);
+    if (applied.x !== 0 || applied.y !== 1) {
+      throw new Error(`applied = ${JSON.stringify(applied)}`);
+    }
     if (view.props.scroll_x !== 0 || view.props.scroll_y !== 1) {
       throw new Error(`props = ${JSON.stringify(view.props)}`);
     }
@@ -6825,36 +9734,55 @@ Deno.test("scrollTo clamps horizontal overflow against the content width", () =>
   withScrollFakeAddon(() => {
     const renderer = createRenderer();
     // Viewport {3, 2}; the content text is 8 cells wide -> maxX = 5.
-    const view = ScrollView({ width: 3, height: 2 }, Text({ text: "abcdefgh" }));
+    const view = ScrollView(
+      { width: 3, height: 2 },
+      Text({ text: "abcdefgh" }),
+    );
     renderer.root.addChild(view);
     const applied = scrollTo(view, 10, 0);
-    if (applied.x !== 5 || applied.y !== 0) throw new Error(`applied = ${JSON.stringify(applied)}`);
-    if (view.props.scroll_x !== 5) throw new Error(`scroll_x = ${view.props.scroll_x}`);
+    if (applied.x !== 5 || applied.y !== 0) {
+      throw new Error(`applied = ${JSON.stringify(applied)}`);
+    }
+    if (view.props.scroll_x !== 5) {
+      throw new Error(`scroll_x = ${view.props.scroll_x}`);
+    }
   });
 });
 
 Deno.test("scrollBy offsets from the current scroll and clamps both directions", () => {
   withScrollFakeAddon(() => {
     const renderer = createRenderer();
-    const view = ScrollView({ width: 5, height: 2 }, Text({ text: "aaaa\nbbbbb\ncc" }));
+    const view = ScrollView(
+      { width: 5, height: 2 },
+      Text({ text: "aaaa\nbbbbb\ncc" }),
+    );
     renderer.root.addChild(view);
     scrollTo(view, 0, 1); // at the max offset
     const applied = scrollBy(view, 0, 3); // past the max -> clamped back
-    if (applied.y !== 1) throw new Error(`applied = ${JSON.stringify(applied)}`);
+    if (applied.y !== 1) {
+      throw new Error(`applied = ${JSON.stringify(applied)}`);
+    }
     const back = scrollBy(view, 0, -1); // back up
     if (back.y !== 0) throw new Error(`back = ${JSON.stringify(back)}`);
-    if (view.props.scroll_y !== 0) throw new Error(`scroll_y = ${view.props.scroll_y}`);
+    if (view.props.scroll_y !== 0) {
+      throw new Error(`scroll_y = ${view.props.scroll_y}`);
+    }
   });
 });
 
 Deno.test("scrollTop resets the vertical offset and keeps the horizontal", () => {
   withScrollFakeAddon(() => {
     const renderer = createRenderer();
-    const view = ScrollView({ width: 3, height: 2 }, Text({ text: "abcdefgh" }));
+    const view = ScrollView(
+      { width: 3, height: 2 },
+      Text({ text: "abcdefgh" }),
+    );
     renderer.root.addChild(view);
     scrollTo(view, 5, 0);
     const applied = scrollTop(view);
-    if (applied.x !== 5 || applied.y !== 0) throw new Error(`applied = ${JSON.stringify(applied)}`);
+    if (applied.x !== 5 || applied.y !== 0) {
+      throw new Error(`applied = ${JSON.stringify(applied)}`);
+    }
     if (view.props.scroll_x !== 5 || view.props.scroll_y !== 0) {
       throw new Error(`props = ${JSON.stringify(view.props)}`);
     }
@@ -6866,15 +9794,23 @@ Deno.test("scroll helpers refresh the scrollbar track and thumb from the clamped
     const renderer = createRenderer();
     // Viewport {5, 3}; content height 5 -> maxY = 2, thumb length 2
     // (round(3*3/5) = 2) on a 1-row track range.
-    const view = ScrollView({ width: 5, height: 3, showScrollbar: true }, Text({ text: "aa\nbb\ncc\ndd\nee" }));
+    const view = ScrollView(
+      { width: 5, height: 3, showScrollbar: true },
+      Text({ text: "aa\nbb\ncc\ndd\nee" }),
+    );
     renderer.root.addChild(view);
     const leaf = view.children[1]!;
 
     // At the top: the thumb fills the first two rows of the track.
     scrollTo(view, 0, 0);
-    if (leaf.props.height !== 3) throw new Error(`leaf height = ${leaf.props.height}`);
+    if (leaf.props.height !== 3) {
+      throw new Error(`leaf height = ${leaf.props.height}`);
+    }
     const topText = leaf.props.text;
-    if (topText !== `${SCROLLBAR_THUMB_CHAR}\n${SCROLLBAR_THUMB_CHAR}\n${SCROLLBAR_TRACK_CHAR}`) {
+    if (
+      topText !==
+        `${SCROLLBAR_THUMB_CHAR}\n${SCROLLBAR_THUMB_CHAR}\n${SCROLLBAR_TRACK_CHAR}`
+    ) {
       throw new Error(`top scrollbar = ${JSON.stringify(topText)}`);
     }
 
@@ -6883,7 +9819,10 @@ Deno.test("scroll helpers refresh the scrollbar track and thumb from the clamped
     // scroll_y 2).
     scrollTo(view, 0, 2);
     const bottomText = leaf.props.text;
-    if (bottomText !== `${SCROLLBAR_TRACK_CHAR}\n${SCROLLBAR_THUMB_CHAR}\n${SCROLLBAR_THUMB_CHAR}`) {
+    if (
+      bottomText !==
+        `${SCROLLBAR_TRACK_CHAR}\n${SCROLLBAR_THUMB_CHAR}\n${SCROLLBAR_THUMB_CHAR}`
+    ) {
       throw new Error(`bottom scrollbar = ${JSON.stringify(bottomText)}`);
     }
     if (leaf.props.top !== 3) throw new Error(`leaf top = ${leaf.props.top}`);
@@ -6904,15 +9843,24 @@ Deno.test("scroll helpers on a detached view throw (contentSize requires the sce
 Deno.test("removing a scroll view clears its scrollbar from the scene", () => {
   withScrollFakeAddon(() => {
     const renderer = createRenderer();
-    const view = ScrollView({ width: 5, height: 2, showScrollbar: true }, Text({ text: "x" }));
+    const view = ScrollView(
+      { width: 5, height: 2, showScrollbar: true },
+      Text({ text: "x" }),
+    );
     renderer.root.addChild(view);
     const leaf = view.children[1]!;
-    if (!view.attached || !leaf.attached) throw new Error("view and scrollbar must attach");
+    if (!view.attached || !leaf.attached) {
+      throw new Error("view and scrollbar must attach");
+    }
     if (view.remove() !== true) throw new Error("remove must succeed");
     // The whole subtree detaches with the view: the scrollbar leaf is
     // cleared from the scene, and the view is spliced out of its parent.
-    if (view.attached || leaf.attached) throw new Error("scrollbar must detach with the view");
-    if (renderer.root.children.length !== 0) throw new Error("view must be spliced out of the scene");
+    if (view.attached || leaf.attached) {
+      throw new Error("scrollbar must detach with the view");
+    }
+    if (renderer.root.children.length !== 0) {
+      throw new Error("view must be spliced out of the scene");
+    }
   });
 });
 
@@ -6934,7 +9882,9 @@ Deno.test("StreamingText defaults to following the tail (scroll_y = content heig
     const renderer = createRenderer();
     const node = StreamingText({ clip_height: 2, width: 10 });
     renderer.root.addChild(node);
-    if (!isStreamFollowing(node)) throw new Error("autoScroll must default to following");
+    if (!isStreamFollowing(node)) {
+      throw new Error("autoScroll must default to following");
+    }
     // A fresh read per assertion — TS property-access narrowing would
     // otherwise reject a later comparison against a different literal.
     const y = (): number => node.props.scroll_y as number;
@@ -6953,7 +9903,9 @@ Deno.test("StreamingText defaults to following the tail (scroll_y = content heig
     if (y() !== 3) throw new Error(`scroll_y after 4 spans = ${y()}`);
     // The autoScroll key is consumed — never a scene prop.
     if ("autoScroll" in node.props) {
-      throw new Error(`autoScroll leaked into props: ${JSON.stringify(node.props)}`);
+      throw new Error(
+        `autoScroll leaked into props: ${JSON.stringify(node.props)}`,
+      );
     }
   });
 });
@@ -6961,16 +9913,24 @@ Deno.test("StreamingText defaults to following the tail (scroll_y = content heig
 Deno.test("StreamingText with autoScroll: false never follows the tail", () => {
   withScrollFakeAddon(() => {
     const renderer = createRenderer();
-    const node = StreamingText({ autoScroll: false, clip_height: 2, width: 10 });
+    const node = StreamingText({
+      autoScroll: false,
+      clip_height: 2,
+      width: 10,
+    });
     if ("autoScroll" in node.props) {
-      throw new Error(`autoScroll leaked into props: ${JSON.stringify(node.props)}`);
+      throw new Error(
+        `autoScroll leaked into props: ${JSON.stringify(node.props)}`,
+      );
     }
     renderer.root.addChild(node);
     for (const t of ["a\n", "b\n", "c\n"]) {
       node.appendSpan(t);
       syncStreamTail(node);
     }
-    if (isStreamFollowing(node)) throw new Error("autoScroll: false must not follow");
+    if (isStreamFollowing(node)) {
+      throw new Error("autoScroll: false must not follow");
+    }
     if (node.props.scroll_y !== undefined) {
       throw new Error(`scroll_y must stay unset, got ${node.props.scroll_y}`);
     }
@@ -6992,8 +9952,12 @@ Deno.test("a manual scroll above the tail detaches the follow and pins the view"
 
     // Scroll up above the tail: the follow detaches and the view pins.
     const applied = scrollTo(node, 0, 0);
-    if (applied.x !== 0 || applied.y !== 0) throw new Error(`applied = ${JSON.stringify(applied)}`);
-    if (isStreamFollowing(node)) throw new Error("a scroll above the tail must detach the follow");
+    if (applied.x !== 0 || applied.y !== 0) {
+      throw new Error(`applied = ${JSON.stringify(applied)}`);
+    }
+    if (isStreamFollowing(node)) {
+      throw new Error("a scroll above the tail must detach the follow");
+    }
 
     // The stream keeps growing, but the view stays pinned at row 0.
     node.appendSpan("d\n");
@@ -7004,8 +9968,12 @@ Deno.test("a manual scroll above the tail detaches the follow and pins the view"
     const by = scrollBy(node, 0, 1);
     if (by.y !== 1) throw new Error(`scrollBy applied = ${JSON.stringify(by)}`);
     const top = scrollTop(node);
-    if (top.y !== 0) throw new Error(`scrollTop applied = ${JSON.stringify(top)}`);
-    if (isStreamFollowing(node)) throw new Error("scrollBy/scrollTop above the tail must detach");
+    if (top.y !== 0) {
+      throw new Error(`scrollTop applied = ${JSON.stringify(top)}`);
+    }
+    if (isStreamFollowing(node)) {
+      throw new Error("scrollBy/scrollTop above the tail must detach");
+    }
   });
 });
 
@@ -7024,7 +9992,9 @@ Deno.test("followTail re-attaches and snaps back to the growing tail", () => {
 
     // Re-attach: followTail snaps straight to the current tail (5 - 2 = 3).
     followTail(node);
-    if (!isStreamFollowing(node)) throw new Error("followTail must re-attach the follow");
+    if (!isStreamFollowing(node)) {
+      throw new Error("followTail must re-attach the follow");
+    }
     if (y() !== 3) throw new Error(`snap scroll_y = ${y()}`);
 
     // And follows subsequent growth again (6 rows -> tail 4).
@@ -7034,7 +10004,9 @@ Deno.test("followTail re-attaches and snaps back to the growing tail", () => {
 
     // A scroll to the tail keeps the follow attached (no detach).
     scrollTo(node, 0, 4);
-    if (!isStreamFollowing(node)) throw new Error("scrolling to the tail must keep the follow");
+    if (!isStreamFollowing(node)) {
+      throw new Error("scrolling to the tail must keep the follow");
+    }
   });
 });
 
@@ -7048,14 +10020,22 @@ Deno.test("followTail on a plain streaming node enables auto-scroll from scratch
     node.appendSpan("b\n");
     node.appendSpan("c\n");
     syncStreamTail(node);
-    if (isStreamFollowing(node)) throw new Error("a raw node must not follow by default");
+    if (isStreamFollowing(node)) {
+      throw new Error("a raw node must not follow by default");
+    }
     if (node.props.scroll_y !== undefined) {
-      throw new Error(`raw node scroll_y must stay unset, got ${node.props.scroll_y}`);
+      throw new Error(
+        `raw node scroll_y must stay unset, got ${node.props.scroll_y}`,
+      );
     }
     followTail(node);
-    if (!isStreamFollowing(node)) throw new Error("followTail must enable a raw node's follow");
+    if (!isStreamFollowing(node)) {
+      throw new Error("followTail must enable a raw node's follow");
+    }
     // 4 rows - clip 2 = tail 2.
-    if (node.props.scroll_y !== 2) throw new Error(`raw snap scroll_y = ${node.props.scroll_y}`);
+    if (node.props.scroll_y !== 2) {
+      throw new Error(`raw snap scroll_y = ${node.props.scroll_y}`);
+    }
   });
 });
 
@@ -7089,7 +10069,9 @@ Deno.test("a manual scroll above the tail stamps the scroll-to-bottom affordance
     // absolutely positioned, right-aligned, at the bottom row of the 2-row
     // viewport (top = clip 2 - 1 + scroll 0), above in-flow content.
     scrollTo(node, 0, 0);
-    if (isStreamFollowing(node)) throw new Error("a scroll above the tail must detach the follow");
+    if (isStreamFollowing(node)) {
+      throw new Error("a scroll above the tail must detach the follow");
+    }
     if (count() !== 1) throw new Error(`affordance children = ${count()}`);
     const leaf = node.children[0]!;
     if (leaf.type !== "text") throw new Error(`affordance type = ${leaf.type}`);
@@ -7102,7 +10084,9 @@ Deno.test("a manual scroll above the tail stamps the scroll-to-bottom affordance
     if (leaf.props.width !== 1 || leaf.props.height !== 1) {
       throw new Error(`affordance size = ${JSON.stringify(leaf.props)}`);
     }
-    if (leaf.props.z_index !== 2) throw new Error(`affordance z_index = ${leaf.props.z_index}`);
+    if (leaf.props.z_index !== 2) {
+      throw new Error(`affordance z_index = ${leaf.props.z_index}`);
+    }
     const top = (): number => leaf.props.top as number;
     if (top() !== 1) throw new Error(`affordance top = ${top()}`);
 
@@ -7118,9 +10102,15 @@ Deno.test("a manual scroll above the tail stamps the scroll-to-bottom affordance
     // followTail re-attaches, snaps back to the tail, and dismisses the
     // affordance.
     followTail(node);
-    if (!isStreamFollowing(node)) throw new Error("followTail must re-attach the follow");
-    if (count() !== 0) throw new Error(`affordance after followTail = ${count()}`);
-    if (node.props.scroll_y !== 2) throw new Error(`snap scroll_y = ${node.props.scroll_y}`);
+    if (!isStreamFollowing(node)) {
+      throw new Error("followTail must re-attach the follow");
+    }
+    if (count() !== 0) {
+      throw new Error(`affordance after followTail = ${count()}`);
+    }
+    if (node.props.scroll_y !== 2) {
+      throw new Error(`snap scroll_y = ${node.props.scroll_y}`);
+    }
   });
 });
 
@@ -7146,10 +10136,16 @@ Deno.test("scrollToBottom jumps to the tail and dismisses the affordance (withou
     // scrollToBottom: a one-shot jump to the current tail (5 - 2 = 3) and
     // the affordance is dismissed; the follow stays detached.
     const applied = scrollToBottom(node);
-    if (applied.x !== 0 || applied.y !== 3) throw new Error(`applied = ${JSON.stringify(applied)}`);
+    if (applied.x !== 0 || applied.y !== 3) {
+      throw new Error(`applied = ${JSON.stringify(applied)}`);
+    }
     if (y() !== 3) throw new Error(`scrollToBottom scroll_y = ${y()}`);
-    if (count() !== 0) throw new Error(`affordance after scrollToBottom = ${count()}`);
-    if (isStreamFollowing(node)) throw new Error("scrollToBottom must not re-attach the follow");
+    if (count() !== 0) {
+      throw new Error(`affordance after scrollToBottom = ${count()}`);
+    }
+    if (isStreamFollowing(node)) {
+      throw new Error("scrollToBottom must not re-attach the follow");
+    }
 
     // Growth after the one-shot jump does not pin the view (still detached).
     node.appendSpan("e\n"); // 6 rows now; the view stays at the old tail
@@ -7166,7 +10162,11 @@ Deno.test("scrollToBottom jumps to the tail and dismisses the affordance (withou
 Deno.test("autoScroll: false nodes never stamp the affordance on a manual scroll", () => {
   withScrollFakeAddon(() => {
     const renderer = createRenderer();
-    const node = StreamingText({ autoScroll: false, clip_height: 2, width: 10 });
+    const node = StreamingText({
+      autoScroll: false,
+      clip_height: 2,
+      width: 10,
+    });
     renderer.root.addChild(node);
     for (const t of ["a\n", "b\n", "c\n"]) {
       node.appendSpan(t);
@@ -7175,8 +10175,12 @@ Deno.test("autoScroll: false nodes never stamp the affordance on a manual scroll
     // A manual scroll above the tail never follows, so there is no follow to
     // detach and no affordance to show.
     scrollTo(node, 0, 0);
-    if (node.children.length !== 0) throw new Error(`children = ${node.children.length}`);
-    if (isStreamFollowing(node)) throw new Error("autoScroll: false must stay detached");
+    if (node.children.length !== 0) {
+      throw new Error(`children = ${node.children.length}`);
+    }
+    if (isStreamFollowing(node)) {
+      throw new Error("autoScroll: false must stay detached");
+    }
   });
 });
 
@@ -7204,7 +10208,9 @@ function makeScrollable(): { renderer: Renderer; view: Node } {
   renderer.root.addChild(view);
   fakeContentSizes.set(view.handle, { width: 5, height: 2 });
   const leaf = view.children.find((child) => child.type === "text");
-  if (leaf === undefined) throw new Error("scroll view must compose a content leaf");
+  if (leaf === undefined) {
+    throw new Error("scroll view must compose a content leaf");
+  }
   fakeContentSizes.set(leaf.handle, { width: 6, height: 3 });
   return { renderer, view };
 }
@@ -7244,12 +10250,16 @@ Deno.test("wheelScroll clamps at the content bounds but stays consumed", () => {
     // maxScroll.y = content 3 - viewport 2 = 1: two downs clamp at 1.
     wheelScroll(view, mouse("scroll_down", 0, 0));
     wheelScroll(view, mouse("scroll_down", 0, 0));
-    if (view.props.scroll_y !== 1) throw new Error(`clamped scroll_y = ${view.props.scroll_y}`);
+    if (view.props.scroll_y !== 1) {
+      throw new Error(`clamped scroll_y = ${view.props.scroll_y}`);
+    }
     // A wheel at the bound is still consumed — it did not fall through.
     if (wheelScroll(view, mouse("scroll_down", 0, 0)) !== true) {
       throw new Error("a wheel event at the scroll bound must stay consumed");
     }
-    if (view.props.scroll_y !== 1) throw new Error(`post-clamp scroll_y = ${view.props.scroll_y}`);
+    if (view.props.scroll_y !== 1) {
+      throw new Error(`post-clamp scroll_y = ${view.props.scroll_y}`);
+    }
   });
 });
 
@@ -7261,13 +10271,18 @@ Deno.test("wheelScroll no-ops on non-scrollable nodes, detached views and non-wh
     if (wheelScroll(plain, mouse("scroll_down", 0, 0)) !== false) {
       throw new Error("a plain box must not consume a wheel event");
     }
-    const detached = ScrollView({ width: 5, height: 2 }, Text({ text: "aaaa\nbbbb\ncc" }));
+    const detached = ScrollView(
+      { width: 5, height: 2 },
+      Text({ text: "aaaa\nbbbb\ncc" }),
+    );
     if (wheelScroll(detached, mouse("scroll_down", 0, 0)) !== false) {
       throw new Error("a detached view must not consume a wheel event");
     }
     const { view } = makeScrollable();
     if (wheelScroll(view, mouse("down_left", 0, 0)) !== false) {
-      throw new Error("a down_left is not a wheel event and must not be consumed");
+      throw new Error(
+        "a down_left is not a wheel event and must not be consumed",
+      );
     }
   });
 });
@@ -7286,7 +10301,9 @@ Deno.test("wheelScroll on a table scrolls its content region (sticky header pinn
     // measures the JS-known full content height (4 rows): maxScroll.y =
     // 4 - 3 = 1.
     const region = table.children[1]!;
-    if (region.children.length !== 3) throw new Error(`windowed rows = ${region.children.length}`);
+    if (region.children.length !== 3) {
+      throw new Error(`windowed rows = ${region.children.length}`);
+    }
 
     if (wheelScroll(table, mouse("scroll_down", 0, 0)) !== true) {
       throw new Error("a wheel event on a table must be consumed");
@@ -7296,14 +10313,20 @@ Deno.test("wheelScroll on a table scrolls its content region (sticky header pinn
     const regionY = (): number => region.props.scroll_y as number;
     if (regionY() !== 1) throw new Error(`region scroll_y = ${regionY()}`);
     if (table.props.scroll_y !== undefined) {
-      throw new Error("the table root must not scroll (the sticky header stays pinned)");
+      throw new Error(
+        "the table root must not scroll (the sticky header stays pinned)",
+      );
     }
     // A second wheel clamps at the full-content bound (max 1) and stays
     // consumed.
     if (wheelScroll(table, mouse("scroll_down", 0, 0)) !== true) {
-      throw new Error("a wheel event at the table's scroll bound must stay consumed");
+      throw new Error(
+        "a wheel event at the table's scroll bound must stay consumed",
+      );
     }
-    if (regionY() !== 1) throw new Error(`clamped region scroll_y = ${regionY()}`);
+    if (regionY() !== 1) {
+      throw new Error(`clamped region scroll_y = ${regionY()}`);
+    }
   });
 });
 
@@ -7322,7 +10345,9 @@ Deno.test("focusAt focuses the topmost registered node on a down_left press", ()
     if (focusAt(renderer, mouse("down_left", 3, 2), manager) !== true) {
       throw new Error("a down_left on a painted cell must be consumed");
     }
-    if (manager.activeId !== "first") throw new Error(`active = ${manager.activeId}`);
+    if (manager.activeId !== "first") {
+      throw new Error(`active = ${manager.activeId}`);
+    }
   });
 });
 
@@ -7337,7 +10362,9 @@ Deno.test("focusAt no-ops on a press off any painted cell (empty hit_test)", () 
     if (focusAt(renderer, mouse("down_left", 0, 0), manager) !== false) {
       throw new Error("a press off any painted cell must not be consumed");
     }
-    if (manager.activeId !== null) throw new Error(`active = ${manager.activeId}`);
+    if (manager.activeId !== null) {
+      throw new Error(`active = ${manager.activeId}`);
+    }
   });
 });
 
@@ -7355,9 +10382,13 @@ Deno.test("focusAt no-ops on non-down_left events and on hits with no registered
     handle.dispose();
     // The press lands on a painted cell, but no node is registered: no-op.
     if (focusAt(renderer, mouse("down_left", 0, 0), manager) !== false) {
-      throw new Error("a press on a cell with no registered node must not be consumed");
+      throw new Error(
+        "a press on a cell with no registered node must not be consumed",
+      );
     }
-    if (manager.activeId !== null) throw new Error(`active = ${manager.activeId}`);
+    if (manager.activeId !== null) {
+      throw new Error(`active = ${manager.activeId}`);
+    }
   });
 });
 
@@ -7368,9 +10399,13 @@ Deno.test("focusAt defaults to the shared focusManager", () => {
     renderer.root.addChild(node);
     const handle = useFocus("shared", node, () => {});
     if (focusAt(renderer, mouse("down_left", 0, 0)) !== true) {
-      throw new Error("a down_left must be consumed by the default focus manager");
+      throw new Error(
+        "a down_left must be consumed by the default focus manager",
+      );
     }
-    if (focusManager.activeId !== "shared") throw new Error(`active = ${focusManager.activeId}`);
+    if (focusManager.activeId !== "shared") {
+      throw new Error(`active = ${focusManager.activeId}`);
+    }
     handle.dispose();
     focusManager.blur();
   });
@@ -7403,15 +10438,23 @@ function assertSelection(
   if (native === null) throw new Error("fake renderer not constructed");
   const actual = native.selection;
   if (expected === null) {
-    if (actual !== null) throw new Error(`selection = ${JSON.stringify(actual)}, expected null`);
+    if (actual !== null) {
+      throw new Error(`selection = ${JSON.stringify(actual)}, expected null`);
+    }
     return;
   }
-  if (actual === null) throw new Error(`selection = null, expected ${JSON.stringify(expected)}`);
+  if (actual === null) {
+    throw new Error(`selection = null, expected ${JSON.stringify(expected)}`);
+  }
   if (
     actual.col1 !== expected.col1 || actual.row1 !== expected.row1 ||
     actual.col2 !== expected.col2 || actual.row2 !== expected.row2
   ) {
-    throw new Error(`selection = ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`);
+    throw new Error(
+      `selection = ${JSON.stringify(actual)}, expected ${
+        JSON.stringify(expected)
+      }`,
+    );
   }
 }
 
@@ -7429,14 +10472,20 @@ Deno.test("selection drag state machine: down starts, drag extends, up ends", ()
     // down_left starts the session anchored at the pressed cell.
     const started = startSelection(renderer, mouse("down_left", 2, 0));
     if (started === null) throw new Error("down_left must start a selection");
-    if (started.col1 !== 2 || started.row1 !== 0 || started.col2 !== 2 || started.row2 !== 0) {
+    if (
+      started.col1 !== 2 || started.row1 !== 0 || started.col2 !== 2 ||
+      started.row2 !== 0
+    ) {
       throw new Error(`started = ${JSON.stringify(started)}`);
     }
     assertSelection({ col1: 2, row1: 0, col2: 2, row2: 0 });
 
     // drag_left moves the active endpoint, keeping the anchor fixed.
     const r1 = dragSelection(renderer, mouse("drag_left", 5, 0));
-    if (r1 === null || r1.col1 !== 2 || r1.row1 !== 0 || r1.col2 !== 5 || r1.row2 !== 0) {
+    if (
+      r1 === null || r1.col1 !== 2 || r1.row1 !== 0 || r1.col2 !== 5 ||
+      r1.row2 !== 0
+    ) {
       throw new Error(`drag 1 = ${JSON.stringify(r1)}`);
     }
     assertSelection({ col1: 2, row1: 0, col2: 5, row2: 0 });
@@ -7444,13 +10493,19 @@ Deno.test("selection drag state machine: down starts, drag extends, up ends", ()
     // Dragging above/left of the anchor still spans the rect (the native
     // overlay normalizes the endpoints).
     const r2 = dragSelection(renderer, mouse("drag_left", 0, 0));
-    if (r2 === null || r2.col1 !== 2 || r2.row1 !== 0 || r2.col2 !== 0 || r2.row2 !== 0) {
+    if (
+      r2 === null || r2.col1 !== 2 || r2.row1 !== 0 || r2.col2 !== 0 ||
+      r2.row2 !== 0
+    ) {
       throw new Error(`drag 2 = ${JSON.stringify(r2)}`);
     }
 
     // up_left ends the session and returns the last rect.
     const ended = endSelection(renderer, mouse("up_left", 0, 0));
-    if (ended === null || ended.col1 !== 2 || ended.row1 !== 0 || ended.col2 !== 0 || ended.row2 !== 0) {
+    if (
+      ended === null || ended.col1 !== 2 || ended.row1 !== 0 ||
+      ended.col2 !== 0 || ended.row2 !== 0
+    ) {
       throw new Error(`ended = ${JSON.stringify(ended)}`);
     }
 
@@ -7472,7 +10527,9 @@ Deno.test("a double-click within 500ms and one cell selects the word; slower or 
     renderer.root.addChild(Box({}, Text({ text: "hello world" })));
     renderer.snapshotFrame(11, 1);
     if (SELECTION_DOUBLE_CLICK_MS !== 500) {
-      throw new Error(`SELECTION_DOUBLE_CLICK_MS = ${SELECTION_DOUBLE_CLICK_MS}`);
+      throw new Error(
+        `SELECTION_DOUBLE_CLICK_MS = ${SELECTION_DOUBLE_CLICK_MS}`,
+      );
     }
 
     // Two presses on the same cell within the window: word select.
@@ -7481,7 +10538,10 @@ Deno.test("a double-click within 500ms and one cell selects the word; slower or 
     endSelection(renderer, mouse("up_left", 6, 0));
     setSelectionClockForTesting(() => 1400); // +400 ms, inside the window
     const word = startSelection(renderer, mouse("down_left", 6, 0));
-    if (word === null || word.col1 !== 6 || word.row1 !== 0 || word.col2 !== 10 || word.row2 !== 0) {
+    if (
+      word === null || word.col1 !== 6 || word.row1 !== 0 || word.col2 !== 10 ||
+      word.row2 !== 0
+    ) {
       throw new Error(`word double-click = ${JSON.stringify(word)}`);
     }
     assertSelection({ col1: 6, row1: 0, col2: 10, row2: 0 });
@@ -7548,13 +10608,17 @@ Deno.test("selection text round-trips: the drag-selected rect extracts the cover
     startSelection(renderer, mouse("down_left", 6, 0));
     dragSelection(renderer, mouse("drag_left", 10, 0));
     if (renderer.selectionText() !== "world") {
-      throw new Error(`selectionText = ${JSON.stringify(renderer.selectionText())}`);
+      throw new Error(
+        `selectionText = ${JSON.stringify(renderer.selectionText())}`,
+      );
     }
 
     // Dragging beyond the text clips at the frame's spaces.
     dragSelection(renderer, mouse("drag_left", 12, 0));
     if (renderer.selectionText() !== "world  ") {
-      throw new Error(`clipped selectionText = ${JSON.stringify(renderer.selectionText())}`);
+      throw new Error(
+        `clipped selectionText = ${JSON.stringify(renderer.selectionText())}`,
+      );
     }
     renderer.destroy();
   });
@@ -7571,7 +10635,9 @@ Deno.test("a drag onto a second row joins the selection text with a newline", ()
     // Rect cols 0-4, rows 0-1: "hello" over the painted row, then a row of
     // five spaces — rows are joined with '\n'.
     if (renderer.selectionText() !== "hello\n     ") {
-      throw new Error(`two-row selectionText = ${JSON.stringify(renderer.selectionText())}`);
+      throw new Error(
+        `two-row selectionText = ${JSON.stringify(renderer.selectionText())}`,
+      );
     }
     renderer.destroy();
   });
@@ -7612,7 +10678,9 @@ Deno.test("selection overlay persists after release (persistent selection)", () 
     dragSelection(renderer, mouse("drag_left", 10, 0));
     // Active during the gesture.
     if (renderer.selectionText() !== "world") {
-      throw new Error(`active selectionText = ${JSON.stringify(renderer.selectionText())}`);
+      throw new Error(
+        `active selectionText = ${JSON.stringify(renderer.selectionText())}`,
+      );
     }
 
     // The release ends the session but leaves the overlay up: the reversed
@@ -7622,7 +10690,11 @@ Deno.test("selection overlay persists after release (persistent selection)", () 
     }
     assertSelection({ col1: 6, row1: 0, col2: 10, row2: 0 });
     if (renderer.selectionText() !== "world") {
-      throw new Error(`selectionText after release = ${JSON.stringify(renderer.selectionText())}`);
+      throw new Error(
+        `selectionText after release = ${
+          JSON.stringify(renderer.selectionText())
+        }`,
+      );
     }
     renderer.destroy();
   });
@@ -7673,7 +10745,11 @@ Deno.test("a bare press outside the persistent selection clears it (click-elsewh
     }
     assertSelection(null);
     if (renderer.selectionText() !== "") {
-      throw new Error(`selectionText after click-elsewhere = ${JSON.stringify(renderer.selectionText())}`);
+      throw new Error(
+        `selectionText after click-elsewhere = ${
+          JSON.stringify(renderer.selectionText())
+        }`,
+      );
     }
 
     // A bare press INSIDE the persistent rect is not click-elsewhere: it
@@ -7701,12 +10777,23 @@ Deno.test("selectionKey escape clears the persistent selection", () => {
     assertSelection({ col1: 6, row1: 0, col2: 10, row2: 0 });
 
     // `escape` is the explicit clear: consumed, and the overlay is gone.
-    if (selectionKey(renderer, { name: "escape", ctrl: false, alt: false, shift: false }) !== true) {
+    if (
+      selectionKey(renderer, {
+        name: "escape",
+        ctrl: false,
+        alt: false,
+        shift: false,
+      }) !== true
+    ) {
       throw new Error("escape must be consumed");
     }
     assertSelection(null);
     if (renderer.selectionText() !== "") {
-      throw new Error(`selectionText after escape = ${JSON.stringify(renderer.selectionText())}`);
+      throw new Error(
+        `selectionText after escape = ${
+          JSON.stringify(renderer.selectionText())
+        }`,
+      );
     }
     renderer.destroy();
   });
@@ -7721,7 +10808,15 @@ Deno.test("selectionKey copies on ctrl+shift+c and leaves plain ctrl+c (exit) un
     dragSelection(renderer, mouse("drag_left", 4, 0));
 
     // ctrl+shift+c copies the active selection text.
-    if (selectionKey(renderer, { name: "char", char: "c", ctrl: true, alt: false, shift: true }) !== true) {
+    if (
+      selectionKey(renderer, {
+        name: "char",
+        char: "c",
+        ctrl: true,
+        alt: false,
+        shift: true,
+      }) !== true
+    ) {
       throw new Error("ctrl+shift+c must be consumed");
     }
     if (lastClipboard !== "hello") {
@@ -7730,11 +10825,27 @@ Deno.test("selectionKey copies on ctrl+shift+c and leaves plain ctrl+c (exit) un
 
     // Plain ctrl+c is the exit convention: never consumed by the selection
     // handler, so the exit binding still sees it.
-    if (selectionKey(renderer, { name: "char", char: "c", ctrl: true, alt: false, shift: false }) !== false) {
+    if (
+      selectionKey(renderer, {
+        name: "char",
+        char: "c",
+        ctrl: true,
+        alt: false,
+        shift: false,
+      }) !== false
+    ) {
       throw new Error("plain ctrl+c must not be consumed");
     }
     // Other keys are not consumed.
-    if (selectionKey(renderer, { name: "char", char: "v", ctrl: true, alt: false, shift: false }) !== false) {
+    if (
+      selectionKey(renderer, {
+        name: "char",
+        char: "v",
+        ctrl: true,
+        alt: false,
+        shift: false,
+      }) !== false
+    ) {
       throw new Error("ctrl+v must not be consumed");
     }
     renderer.destroy();
@@ -7748,7 +10859,10 @@ Deno.test("selectWordAt applies the word range or leaves the selection untouched
     renderer.snapshotFrame(11, 1);
 
     const range = selectWordAt(renderer, 7, 0);
-    if (range === null || range.col1 !== 6 || range.row1 !== 0 || range.col2 !== 10 || range.row2 !== 0) {
+    if (
+      range === null || range.col1 !== 6 || range.row1 !== 0 ||
+      range.col2 !== 10 || range.row2 !== 0
+    ) {
       throw new Error(`word = ${JSON.stringify(range)}`);
     }
     assertSelection({ col1: 6, row1: 0, col2: 10, row2: 0 });
@@ -7778,21 +10892,39 @@ Deno.test("brailleCell maps the 2x4 sub-cell dots to their U+2800 bits (the Rust
     return rows;
   };
   // Left sub-column: dots 1..4 -> 0x01, 0x02, 0x04, 0x08.
-  if (brailleCell(one(0, 0), 0, 0) !== "\u2801") throw new Error(`(0,0) = ${brailleCell(one(0, 0), 0, 0)}`);
-  if (brailleCell(one(0, 1), 0, 0) !== "\u2802") throw new Error(`(0,1) = ${brailleCell(one(0, 1), 0, 0)}`);
-  if (brailleCell(one(0, 2), 0, 0) !== "\u2804") throw new Error(`(0,2) = ${brailleCell(one(0, 2), 0, 0)}`);
-  if (brailleCell(one(0, 3), 0, 0) !== "\u2808") throw new Error(`(0,3) = ${brailleCell(one(0, 3), 0, 0)}`);
+  if (brailleCell(one(0, 0), 0, 0) !== "\u2801") {
+    throw new Error(`(0,0) = ${brailleCell(one(0, 0), 0, 0)}`);
+  }
+  if (brailleCell(one(0, 1), 0, 0) !== "\u2802") {
+    throw new Error(`(0,1) = ${brailleCell(one(0, 1), 0, 0)}`);
+  }
+  if (brailleCell(one(0, 2), 0, 0) !== "\u2804") {
+    throw new Error(`(0,2) = ${brailleCell(one(0, 2), 0, 0)}`);
+  }
+  if (brailleCell(one(0, 3), 0, 0) !== "\u2808") {
+    throw new Error(`(0,3) = ${brailleCell(one(0, 3), 0, 0)}`);
+  }
   // Right sub-column: dots 5..8 -> 0x10, 0x20, 0x40, 0x80.
-  if (brailleCell(one(1, 0), 0, 0) !== "\u2810") throw new Error(`(1,0) = ${brailleCell(one(1, 0), 0, 0)}`);
-  if (brailleCell(one(1, 1), 0, 0) !== "\u2820") throw new Error(`(1,1) = ${brailleCell(one(1, 1), 0, 0)}`);
-  if (brailleCell(one(1, 2), 0, 0) !== "\u2840") throw new Error(`(1,2) = ${brailleCell(one(1, 2), 0, 0)}`);
-  if (brailleCell(one(1, 3), 0, 0) !== "\u2880") throw new Error(`(1,3) = ${brailleCell(one(1, 3), 0, 0)}`);
+  if (brailleCell(one(1, 0), 0, 0) !== "\u2810") {
+    throw new Error(`(1,0) = ${brailleCell(one(1, 0), 0, 0)}`);
+  }
+  if (brailleCell(one(1, 1), 0, 0) !== "\u2820") {
+    throw new Error(`(1,1) = ${brailleCell(one(1, 1), 0, 0)}`);
+  }
+  if (brailleCell(one(1, 2), 0, 0) !== "\u2840") {
+    throw new Error(`(1,2) = ${brailleCell(one(1, 2), 0, 0)}`);
+  }
+  if (brailleCell(one(1, 3), 0, 0) !== "\u2880") {
+    throw new Error(`(1,3) = ${brailleCell(one(1, 3), 0, 0)}`);
+  }
   // All eight dots: every bit set -> U+28FF.
   if (brailleCell(["11", "11", "11", "11"], 0, 0) !== "\u28ff") {
     throw new Error(`full = ${brailleCell(["11", "11", "11", "11"], 0, 0)}`);
   }
   // A sub-cell past the matrix (a partial cell edge) reads as off.
-  if (brailleCell(["1"], 0, 0) !== "\u2801") throw new Error(`partial = ${brailleCell(["1"], 0, 0)}`);
+  if (brailleCell(["1"], 0, 0) !== "\u2801") {
+    throw new Error(`partial = ${brailleCell(["1"], 0, 0)}`);
+  }
 });
 
 Deno.test("brailleRows rasterizes a dot matrix into braille rows", () => {
@@ -7815,8 +10947,12 @@ Deno.test("brailleRows rasterizes a dot matrix into braille rows", () => {
     "1000", // sub-row 7: dot (0, 7)
   ]);
   if (rows.length !== 2) throw new Error(`rows = ${JSON.stringify(rows)}`);
-  if (rows[0] !== "\u2821\u2884") throw new Error(`row0 = ${JSON.stringify(rows[0])}`); // ⠡⢄
-  if (rows[1] !== "\u2808\u2800") throw new Error(`row1 = ${JSON.stringify(rows[1])}`); // ⠈⠀
+  if (rows[0] !== "\u2821\u2884") {
+    throw new Error(`row0 = ${JSON.stringify(rows[0])}`); // ⠡⢄
+  }
+  if (rows[1] !== "\u2808\u2800") {
+    throw new Error(`row1 = ${JSON.stringify(rows[1])}`); // ⠈⠀
+  }
   // A 1-sub-column x 4-sub-row canvas: only the left column's dots (bits
   // 0..3) -> U+280F.
   const left = brailleRows(["1", "1", "1", "1"]);
@@ -7824,7 +10960,9 @@ Deno.test("brailleRows rasterizes a dot matrix into braille rows", () => {
     throw new Error(`left column = ${JSON.stringify(left)}`);
   }
   // An empty matrix rasterizes to no rows.
-  if (brailleRows([]).length !== 0) throw new Error("empty matrix must yield no rows");
+  if (brailleRows([]).length !== 0) {
+    throw new Error("empty matrix must yield no rows");
+  }
 });
 
 Deno.test("Canvas composes a flex-column box of braille text leaves (dots stay JS bookkeeping)", () => {
@@ -7835,15 +10973,23 @@ Deno.test("Canvas composes a flex-column box of braille text leaves (dots stay J
   }
   // The sub-cell matrix is JS bookkeeping — it never reaches the scene props
   // (mirroring Tree's `nodes` / Panels' `panels`).
-  if ("dots" in canvas.props) throw new Error("dots must not reach the scene props");
+  if ("dots" in canvas.props) {
+    throw new Error("dots must not reach the scene props");
+  }
   // 2 sub-columns x 4 sub-rows rasterize to one braille cell: dots 1 + 6.
-  if (canvas.children.length !== 1) throw new Error(`children = ${canvas.children.length}`);
+  if (canvas.children.length !== 1) {
+    throw new Error(`children = ${canvas.children.length}`);
+  }
   const leaf = canvas.children[0];
   if (leaf?.type !== "text") throw new Error(`leaf type = ${leaf?.type}`);
-  if (leaf.props.text !== "\u2821") throw new Error(`leaf text = ${JSON.stringify(leaf.props.text)}`);
+  if (leaf.props.text !== "\u2821") {
+    throw new Error(`leaf text = ${JSON.stringify(leaf.props.text)}`);
+  }
   // The canvas fg paints the braille leaves (mirroring the renderable's row
   // style).
-  if (leaf.props.fg !== "#ff0000") throw new Error(`leaf fg = ${leaf.props.fg}`);
+  if (leaf.props.fg !== "#ff0000") {
+    throw new Error(`leaf fg = ${leaf.props.fg}`);
+  }
 });
 
 Deno.test("Canvas golden snapshot rasterizes the same braille as the Rust renderable", () => {
@@ -7878,7 +11024,9 @@ Deno.test("Canvas golden snapshot rasterizes the same braille as the Rust render
     // The styled snapshot paints the same rows (the binding's documented
     // invariant: a row's run texts reconstruct its plain row string).
     const styled = renderer.snapshotStyled(2, 2);
-    const reconstructed = styled.map((row) => row.map((run) => run.text).join(""));
+    const reconstructed = styled.map((row) =>
+      row.map((run) => run.text).join("")
+    );
     if (!framesEqual(reconstructed, expected)) {
       throw new Error(`styled rows = ${JSON.stringify(reconstructed)}`);
     }
@@ -7924,25 +11072,52 @@ Deno.test("BarChart composes bottom-aligned eighth-block bar columns (data stays
   // The fixed width stamps the root box; the series + scale are JS
   // bookkeeping — they never reach the scene props (mirroring Canvas' `dots`).
   if (chart.props.width !== 7) throw new Error(`width = ${chart.props.width}`);
-  for (const key of ["data", "height", "min", "max", "gap", "bar_width", "show_axis", "full_block"]) {
-    if (key in chart.props) throw new Error(`${key} must not reach the scene props`);
+  for (
+    const key of [
+      "data",
+      "height",
+      "min",
+      "max",
+      "gap",
+      "bar_width",
+      "show_axis",
+      "full_block",
+    ]
+  ) {
+    if (key in chart.props) {
+      throw new Error(`${key} must not reach the scene props`);
+    }
   }
   // 3 bar rows (top to bottom) + the axis row.
-  if (chart.children.length !== 4) throw new Error(`children = ${chart.children.length}`);
-  const texts = chart.children.map((leaf) => (leaf as Node).props.text as string);
+  if (chart.children.length !== 4) {
+    throw new Error(`children = ${chart.children.length}`);
+  }
+  const texts = chart.children.map((leaf) =>
+    (leaf as Node).props.text as string
+  );
   // Bars [3,1,4,2] / max 4 / height 3 -> 24 eighths per bar: [18, 6, 24, 12].
   // Row 2 (top): bar0 partial ▂ (2/8), bar1 empty, bar2 full █, bar3 empty.
-  if (texts[0] !== "▂   █  ") throw new Error(`top row = ${JSON.stringify(texts[0])}`);
+  if (texts[0] !== "▂   █  ") {
+    throw new Error(`top row = ${JSON.stringify(texts[0])}`);
+  }
   // Row 1: bar0 full, bar1 empty, bar2 full, bar3 partial ▄ (4/8).
-  if (texts[1] !== "█   █ ▄") throw new Error(`mid row = ${JSON.stringify(texts[1])}`);
+  if (texts[1] !== "█   █ ▄") {
+    throw new Error(`mid row = ${JSON.stringify(texts[1])}`);
+  }
   // Row 0 (bottom): every bar reaches the shared baseline — bar1 is ▆ (6/8).
-  if (texts[2] !== "█ ▆ █ █") throw new Error(`bottom row = ${JSON.stringify(texts[2])}`);
+  if (texts[2] !== "█ ▆ █ █") {
+    throw new Error(`bottom row = ${JSON.stringify(texts[2])}`);
+  }
   // The axis row spans the fixed width.
-  if (texts[3] !== "───────") throw new Error(`axis row = ${JSON.stringify(texts[3])}`);
+  if (texts[3] !== "───────") {
+    throw new Error(`axis row = ${JSON.stringify(texts[3])}`);
+  }
   for (const leaf of chart.children) {
     if (leaf.type !== "text") throw new Error(`leaf type = ${leaf.type}`);
     // The chart fg paints the glyph leaves (mirroring Canvas' row style).
-    if ((leaf as Node).props.fg !== "#ff0000") throw new Error(`leaf fg = ${(leaf as Node).props.fg}`);
+    if ((leaf as Node).props.fg !== "#ff0000") {
+      throw new Error(`leaf fg = ${(leaf as Node).props.fg}`);
+    }
   }
 });
 
@@ -7950,7 +11125,14 @@ Deno.test("BarChart golden snapshot: bar heights + the axis row span the fixed w
   withFakeAddon(() => {
     const renderer = createRenderer();
     renderer.root.addChild(
-      BarChart({ data: [3, 1, 4, 2], height: 3, max: 4, gap: 1, width: 7, show_axis: true }),
+      BarChart({
+        data: [3, 1, 4, 2],
+        height: 3,
+        max: 4,
+        gap: 1,
+        width: 7,
+        show_axis: true,
+      }),
     );
     const frame = renderer.snapshotFrame(7, 4);
     const expected = ["▂   █  ", "█   █ ▄", "█ ▆ █ █", "───────"];
@@ -7982,7 +11164,9 @@ Deno.test("BarChart full_block mode paints whole-cell columns; natural width der
   const chart = BarChart({ data: [1, 0.5, 1], height: 3, full_block: true });
   // Natural width: 3 bars x 1 cell + 2 gaps = 5.
   if (chart.props.width !== 5) throw new Error(`width = ${chart.props.width}`);
-  const texts = chart.children.map((leaf) => (leaf as Node).props.text as string);
+  const texts = chart.children.map((leaf) =>
+    (leaf as Node).props.text as string
+  );
   // Cells [3, 2, 3]: rows 2/1/0 — bar0 and bar2 full columns, bar1 two cells.
   if (!framesEqual(texts, ["█   █", "█ █ █", "█ █ █"])) {
     throw new Error(`full_block rows = ${JSON.stringify(texts)}`);
@@ -7992,7 +11176,9 @@ Deno.test("BarChart full_block mode paints whole-cell columns; natural width der
 Deno.test("BarChart bar_width repeats each glyph across the bar column", () => {
   const chart = BarChart({ data: [1, 0.5], height: 1, max: 1, bar_width: 2 });
   const text = (chart.children[0] as Node).props.text as string;
-  if (text !== "██ ▄▄") throw new Error(`bar_width rows = ${JSON.stringify(text)}`);
+  if (text !== "██ ▄▄") {
+    throw new Error(`bar_width rows = ${JSON.stringify(text)}`);
+  }
 });
 
 Deno.test("Chart composes braille rows via the canvas rasterizer (data stays JS bookkeeping)", () => {
@@ -8011,19 +11197,29 @@ Deno.test("Chart composes braille rows via the canvas rasterizer (data stays JS 
   }
   if (chart.props.width !== 4) throw new Error(`width = ${chart.props.width}`);
   for (const key of ["data", "height", "min", "max", "show_axis"]) {
-    if (key in chart.props) throw new Error(`${key} must not reach the scene props`);
+    if (key in chart.props) {
+      throw new Error(`${key} must not reach the scene props`);
+    }
   }
   // 2 braille rows (8 sub-rows / 4) + the axis row.
-  if (chart.children.length !== 3) throw new Error(`children = ${chart.children.length}`);
-  const texts = chart.children.map((leaf) => (leaf as Node).props.text as string);
+  if (chart.children.length !== 3) {
+    throw new Error(`children = ${chart.children.length}`);
+  }
+  const texts = chart.children.map((leaf) =>
+    (leaf as Node).props.text as string
+  );
   if (!framesEqual(texts.slice(0, 2), ["⣀⠓⠱⠌", "⠼⠀⠀⣃"])) {
     throw new Error(`braille rows = ${JSON.stringify(texts.slice(0, 2))}`);
   }
-  if (texts[2] !== "────") throw new Error(`axis row = ${JSON.stringify(texts[2])}`);
+  if (texts[2] !== "────") {
+    throw new Error(`axis row = ${JSON.stringify(texts[2])}`);
+  }
   for (const leaf of chart.children) {
     if (leaf.type !== "text") throw new Error(`leaf type = ${leaf.type}`);
     // The chart bg paints the braille leaves (mirroring Canvas' row style).
-    if ((leaf as Node).props.bg !== "#000000") throw new Error(`leaf bg = ${(leaf as Node).props.bg}`);
+    if ((leaf as Node).props.bg !== "#000000") {
+      throw new Error(`leaf bg = ${(leaf as Node).props.bg}`);
+    }
   }
 });
 
@@ -8031,7 +11227,14 @@ Deno.test("Chart golden snapshot: the braille line spans the fixed width; the ax
   withFakeAddon(() => {
     const renderer = createRenderer();
     renderer.root.addChild(
-      Chart({ data: [0, 3, 3, 0], height: 2, width: 4, min: 0, max: 3, show_axis: true }),
+      Chart({
+        data: [0, 3, 3, 0],
+        height: 2,
+        width: 4,
+        min: 0,
+        max: 3,
+        show_axis: true,
+      }),
     );
     const frame = renderer.snapshotFrame(4, 3);
     const expected = ["⣀⠓⠱⠌", "⠼⠀⠀⣃", "────"];
@@ -8040,7 +11243,9 @@ Deno.test("Chart golden snapshot: the braille line spans the fixed width; the ax
     }
     // The plot rows are exactly the fixed width (4 cells — every braille row
     // is `width` codepoints wide), and the axis row beneath spans it exactly.
-    if (frame[0]!.length !== 4 || frame[1]!.length !== 4 || frame[2]!.length !== 4) {
+    if (
+      frame[0]!.length !== 4 || frame[1]!.length !== 4 || frame[2]!.length !== 4
+    ) {
       throw new Error(`row widths = ${frame.map((r) => r.length).join(",")}`);
     }
     for (const node of createdNodes) {
@@ -8084,13 +11289,19 @@ Deno.test("Sparkline braille golden: dots rasterize through the canvas rasterize
     // Series [1,3,2,4] at its own scale: dots at sub-rows 3, 1, 2, 0 (from
     // the bottom baseline) in successive sub-columns — cell 0 holds points
     // 0+1 (⠨ = dots 1 + 6), cell 1 holds points 2+3 (⠔ = dots 3 + 5).
-    renderer.root.addChild(Sparkline({ data: [1, 3, 2, 4], use_braille: true }));
+    renderer.root.addChild(
+      Sparkline({ data: [1, 3, 2, 4], use_braille: true }),
+    );
     const frame = renderer.snapshotFrame(4, 1);
     if (!framesEqual(frame, ["⠨⠔⠀⠀"])) {
-      throw new Error(`unexpected braille sparkline rows: ${JSON.stringify(frame)}`);
+      throw new Error(
+        `unexpected braille sparkline rows: ${JSON.stringify(frame)}`,
+      );
     }
     // The fixed-width window: the last `width` points only.
-    renderer.root.addChild(Sparkline({ data: [1, 3, 2, 4], width: 2, use_braille: true }));
+    renderer.root.addChild(
+      Sparkline({ data: [1, 3, 2, 4], width: 2, use_braille: true }),
+    );
     const windowed = renderer.snapshotFrame(2, 1);
     if (!framesEqual(windowed, ["⠔⠀"])) {
       throw new Error(`windowed rows = ${JSON.stringify(windowed)}`);
