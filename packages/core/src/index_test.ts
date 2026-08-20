@@ -332,6 +332,7 @@ class FakeTuiRenderer {
     osc52: true,
     bracketedPaste: true,
     focusEvents: true,
+    scrollRegion: true,
     probed: true,
   };
   set_title(title: string): void {
@@ -1520,6 +1521,7 @@ Deno.test("renderer capabilities getter routes to the native addon", () => {
     if (caps.osc52 !== true) throw new Error(`osc52 = ${caps.osc52}`);
     if (caps.bracketedPaste !== true) throw new Error(`bracketedPaste = ${caps.bracketedPaste}`);
     if (caps.focusEvents !== true) throw new Error(`focusEvents = ${caps.focusEvents}`);
+    if (caps.scrollRegion !== true) throw new Error(`scrollRegion = ${caps.scrollRegion}`);
     if (caps.probed !== true) throw new Error(`probed = ${caps.probed}`);
     renderer.destroy();
   });
@@ -2163,6 +2165,103 @@ Deno.test("Renderer.snapshotFrame paints the scene to golden rows via render_to_
       throw new Error(`created nodes = ${JSON.stringify(createdNodes)}`);
     }
     renderer.destroy();
+  });
+});
+
+Deno.test("scrollOptimization on/off renderers snapshot identical golden frames across a scroll and a mutation", () => {
+  withFakeAddon(() => {
+    // Two headless renderers with identical scenes — the only difference is
+    // the M2.1 scroll fast-path flag (`scrollOptimization`). The flag only
+    // changes the native FLUSH strategy for a scroll frame (one DECSTBM
+    // scroll command + the exposed band vs a cell-by-cell diff); it must
+    // never change the painted screen, so the `snapshotFrame()` sequences
+    // (each a full repaint) are cell-for-cell identical across the flag,
+    // and the final frame is exactly the full repaint of the final scene.
+    const on = createRenderer({
+      headless: true,
+      size: { width: 40, height: 10 },
+      scrollOptimization: true,
+    });
+    const onOptions = lastRendererOptions as Record<string, unknown>;
+    const off = createRenderer({
+      headless: true,
+      size: { width: 40, height: 10 },
+      scrollOptimization: false,
+    });
+    const offOptions = lastRendererOptions as Record<string, unknown>;
+    // The camelCase flag routes to the snake_case native constructor option
+    // in both directions.
+    if (onOptions.scroll_optimization !== true) {
+      throw new Error(`scrollOptimization: true not forwarded: ${JSON.stringify(onOptions)}`);
+    }
+    if (offOptions.scroll_optimization !== false) {
+      throw new Error(`scrollOptimization: false not forwarded: ${JSON.stringify(offOptions)}`);
+    }
+
+    // Identical scenes: a borderless box stacking three text leaves as a
+    // flex column at the origin (rows 0..2) — the shape a scrolled content
+    // region takes. The row leaves are mutated for the scroll / mutation
+    // edits below.
+    const onBox = on.root.addChild(
+      Box({}, Text({ text: "aaaaa" }), Text({ text: "bbbbb" }), Text({ text: "ccccc" })),
+    );
+    const offBox = off.root.addChild(
+      Box({}, Text({ text: "aaaaa" }), Text({ text: "bbbbb" }), Text({ text: "ccccc" })),
+    );
+    const W = 40;
+    const H = 10;
+    // The full repaint a fresh compositor produces for a column of `texts`
+    // at the origin: one row per text, blanks padded to the viewport.
+    const golden = (...texts: string[]): string[] => [
+      ...texts.map((t) => t + " ".repeat(W - t.length)),
+      ...Array.from({ length: H - texts.length }, () => " ".repeat(W)),
+    ];
+
+    // Frame 1 — the initial paint: both renderers start from the same scene.
+    on.render();
+    off.render();
+    const f1on = on.snapshotFrame(W, H);
+    const f1off = off.snapshotFrame(W, H);
+    if (!framesEqual(f1on, f1off)) throw new Error("initial frames differ across the flag");
+    if (!framesEqual(f1on, golden("aaaaa", "bbbbb", "ccccc"))) {
+      throw new Error("initial frame is not the full repaint");
+    }
+
+    // Frame 2 — the content scrolls up one row (in a real terminal this
+    // frame's diff is a full-width vertical scroll, the fast-path trigger):
+    // the top two rows shift down one row and a new row appears at the
+    // bottom.
+    for (const rows of [onBox.children, offBox.children]) {
+      rows[0]!.setProps({ text: "bbbbb" });
+      rows[1]!.setProps({ text: "ccccc" });
+      rows[2]!.setProps({ text: "ddddd" });
+    }
+    on.render();
+    off.render();
+    const f2on = on.snapshotFrame(W, H);
+    const f2off = off.snapshotFrame(W, H);
+    if (!framesEqual(f2on, f2off)) throw new Error("scrolled frames differ across the flag");
+    if (!framesEqual(f2on, golden("bbbbb", "ccccc", "ddddd"))) {
+      throw new Error("scrolled frame is not the full repaint");
+    }
+
+    // Frame 3 — an in-place mutation in the middle row (a normal diff
+    // against the retained post-scroll frame, not a scroll): the fast path
+    // must not corrupt the retained buffer, so the final screen is still the
+    // cell-for-cell full repaint of the final scene.
+    onBox.children[1]!.setProps({ text: "XXXXX" });
+    offBox.children[1]!.setProps({ text: "XXXXX" });
+    on.render();
+    off.render();
+    const f3on = on.snapshotFrame(W, H);
+    const f3off = off.snapshotFrame(W, H);
+    if (!framesEqual(f3on, f3off)) throw new Error("mutated frames differ across the flag");
+    if (!framesEqual(f3on, golden("bbbbb", "XXXXX", "ddddd"))) {
+      throw new Error("final frame is not the full repaint of the final scene");
+    }
+
+    on.destroy();
+    off.destroy();
   });
 });
 

@@ -33,6 +33,15 @@
 //! changes, stream appends, raw borrows) — while keeping cell-for-cell
 //! parity with the oracle.
 //!
+//! M2 adds a sixth class: the **full-width scroll region**. A full-width
+//! clipped pane (`x == 0`, right edge == viewport width — the DECSTBM
+//! constraint the terminal-native scroll optimization targets) whose
+//! `scroll_y` steps +1/-1 across frames, panning whole rows inside the
+//! window. This is the mutation class the M2.1 scroll-region optimization
+//! must keep golden: the incremental path must equal a fresh full recompute
+//! cell-for-cell (including wide-glyph masked continuation cells scrolling
+//! with their row) and produce an identical renderer diff.
+//!
 //! On a mismatch the failure message reports the scenario, the frame index,
 //! and the first differing cell (x, y, ch, style, width) on both buffers —
 //! never a weakened assertion.
@@ -555,6 +564,78 @@ fn incremental_buffer_parity_on_clip_scroll_prop_changes() {
         prev = assert_frame_parity(
             "clip/scroll prop change",
             frame,
+            &mut warm,
+            &prev,
+            &scene,
+            true,
+        );
+    }
+}
+
+#[test]
+fn incremental_buffer_parity_on_full_width_scroll_steps() {
+    // The M2.1 scroll-path mutation class: a FULL-WIDTH clipped region
+    // (x == 0, right edge == the 80-cell viewport width — the DECSTBM
+    // constraint, since a terminal scrolls whole rows) whose `scroll_y`
+    // steps +1/-1 across frames. Hard line breaks lay out 11 content rows;
+    // the full-width 8-row clip is the viewport, and scroll_y pans the
+    // content up (+1) / back down (-1) one row per frame:
+    //
+    //   frame 1:  scroll_y =  1  -> rows  1..8 visible  (panned up)
+    //   frame 2:  scroll_y =  2  -> rows  2..9 visible
+    //   frame 3:  scroll_y =  3  -> rows  3..10 visible
+    //   frame 4:  scroll_y =  2  -> rows  2..9 visible  (panned down)
+    //   frame 5:  scroll_y =  1  -> rows  1..8 visible
+    //   frame 6:  scroll_y =  0  -> rows  0..7 visible
+    //   frame 7:  scroll_y = -1  -> rows  0..6 visible, row 0 blank
+    //   frame 8:  scroll_y = -2  -> rows  0..5 visible, rows 0-1 blank
+    //   frame 9:  scroll_y = -1  -> rows  0..6 visible
+    //   frame 10: scroll_y =  0  -> rows  0..7 visible
+    //
+    // Every layout rect stays identical across frames (`scroll_*` / `clip_*`
+    // are compositor-consumed, never layout keywords), so only the pushed
+    // ids keep the dirty pass honest — the same harness premise as the
+    // clip/scroll class above. Content includes a wide character (row 4), so
+    // its masked continuation cell must scroll with the row.
+    let mut scene = Scene::new();
+    let root = scene.root_id();
+    let content = [
+        "row 0: alpha",
+        "row 1: bravo",
+        "row 2: charlie",
+        "row 3: delta",
+        "row 4: echo コ wide",
+        "row 5: foxtrot",
+        "row 6: golf",
+        "row 7: hotel",
+        "row 8: india",
+        "row 9: juliet",
+        "row 10: kilo",
+    ]
+    .join("\n");
+    let t = scene
+        .add_text(root, &content, Style::new().fg(Color::Indexed(3)))
+        .unwrap();
+    assert!(scene.set_prop(t, "width", PropValue::Int(80)));
+    assert!(scene.set_prop(t, "height", PropValue::Int(8)));
+    assert!(scene.set_clip_rect(t, Rect::new(0, 0, 80, 8)));
+
+    let mut warm = Compositor::new();
+    let blank = Buffer::new(VIEWPORT.width, VIEWPORT.height);
+    let mut prev = assert_frame_parity(
+        "full-width scroll steps",
+        0,
+        &mut warm,
+        &blank,
+        &scene,
+        false,
+    );
+    let steps = [1, 2, 3, 2, 1, 0, -1, -2, -1, 0];
+    for (frame, &sy) in steps.iter().enumerate() {
+        assert!(scene.set_scroll_offset(t, 0, sy));
+        prev = assert_frame_parity(
+            "full-width scroll steps",
+            frame + 1,
             &mut warm,
             &prev,
             &scene,
