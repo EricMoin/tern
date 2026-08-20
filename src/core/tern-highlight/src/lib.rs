@@ -11,10 +11,13 @@
 //! ## Approach
 //!
 //! Each grammar crate (tree-sitter-rust, tree-sitter-typescript,
-//! tree-sitter-json, tree-sitter-bash) bundles its own `HIGHLIGHTS_QUERY`
-//! (bash names it `HIGHLIGHT_QUERY`) and exposes its language as a
-//! `LanguageFn` (`LANGUAGE` / `LANGUAGE_TYPESCRIPT` / `LANGUAGE_TSX`), which
-//! converts into the tree-sitter runtime `Language` via `From`. Parsing runs
+//! tree-sitter-json, tree-sitter-bash, plus the M3.7 expansion:
+//! tree-sitter-python, tree-sitter-go, tree-sitter-toml-ng,
+//! tree-sitter-yaml, tree-sitter-c, tree-sitter-cpp) bundles its own
+//! `HIGHLIGHTS_QUERY` (bash, C and C++ name it `HIGHLIGHT_QUERY`) and exposes
+//! its language as a `LanguageFn` (`LANGUAGE` / `LANGUAGE_TYPESCRIPT` /
+//! `LANGUAGE_TSX`), which converts into the tree-sitter runtime `Language`
+//! via `From`. Parsing runs
 //! once over the whole source — tree-sitter is error-tolerant, so half-open
 //! streaming input still yields tokens. Capture names (e.g. `@keyword`,
 //! `@string`, `@comment`, `@function.macro`) map onto a small One-Dark
@@ -64,6 +67,20 @@ pub enum Language {
     Json,
     /// The Bash / POSIX shell grammar (`tree-sitter-bash`).
     Shell,
+    /// The Python grammar (`tree-sitter-python`).
+    Python,
+    /// The Go grammar (`tree-sitter-go`).
+    Go,
+    /// The TOML grammar (`tree-sitter-toml-ng` — the maintained
+    /// tree-sitter-grammars fork; the plain `tree-sitter-toml` crate is
+    /// abandoned on an old binding and unused).
+    Toml,
+    /// The YAML grammar (`tree-sitter-yaml`).
+    Yaml,
+    /// The C grammar (`tree-sitter-c`).
+    C,
+    /// The C++ grammar (`tree-sitter-cpp`).
+    Cpp,
 }
 
 impl Language {
@@ -77,6 +94,12 @@ impl Language {
             "javascript" | "js" | "jsx" => Self::JavaScript,
             "json" => Self::Json,
             "bash" | "shell" | "sh" | "zsh" => Self::Shell,
+            "python" | "py" => Self::Python,
+            "go" | "golang" => Self::Go,
+            "toml" => Self::Toml,
+            "yaml" | "yml" => Self::Yaml,
+            "c" => Self::C,
+            "cpp" | "c++" | "cxx" => Self::Cpp,
             _ => return None,
         })
     }
@@ -90,15 +113,23 @@ impl Language {
             Self::JavaScript => tree_sitter_javascript::LANGUAGE,
             Self::Json => tree_sitter_json::LANGUAGE,
             Self::Shell => tree_sitter_bash::LANGUAGE,
+            Self::Python => tree_sitter_python::LANGUAGE,
+            Self::Go => tree_sitter_go::LANGUAGE,
+            Self::Toml => tree_sitter_toml_ng::LANGUAGE,
+            Self::Yaml => tree_sitter_yaml::LANGUAGE,
+            Self::C => tree_sitter_c::LANGUAGE,
+            Self::Cpp => tree_sitter_cpp::LANGUAGE,
         }
     }
 
     /// The grammar's bundled highlight queries, in application order.
     ///
     /// TypeScript / TSX run the JavaScript query first and the TypeScript
-    /// query second, so the more specific TypeScript captures win on tie.
-    /// Bash names its const `HIGHLIGHT_QUERY`; the other grammars use
-    /// `HIGHLIGHTS_QUERY`.
+    /// query second, so the more specific TypeScript captures win on tie;
+    /// C++ does the same with the C query first and the C++ query second
+    /// (the C++ grammar is a superset of C, and its bundled query only
+    /// carries the C++-specific captures). Bash, C and C++ name their const
+    /// `HIGHLIGHT_QUERY`; the other grammars use `HIGHLIGHTS_QUERY`.
     fn highlights_queries(self) -> &'static [&'static str] {
         match self {
             Self::Rust => &[tree_sitter_rust::HIGHLIGHTS_QUERY],
@@ -109,6 +140,15 @@ impl Language {
             Self::JavaScript => &[tree_sitter_javascript::HIGHLIGHT_QUERY],
             Self::Json => &[tree_sitter_json::HIGHLIGHTS_QUERY],
             Self::Shell => &[tree_sitter_bash::HIGHLIGHT_QUERY],
+            Self::Python => &[tree_sitter_python::HIGHLIGHTS_QUERY],
+            Self::Go => &[tree_sitter_go::HIGHLIGHTS_QUERY],
+            Self::Toml => &[tree_sitter_toml_ng::HIGHLIGHTS_QUERY],
+            Self::Yaml => &[tree_sitter_yaml::HIGHLIGHTS_QUERY],
+            Self::C => &[tree_sitter_c::HIGHLIGHT_QUERY],
+            Self::Cpp => &[
+                tree_sitter_c::HIGHLIGHT_QUERY,
+                tree_sitter_cpp::HIGHLIGHT_QUERY,
+            ],
         }
     }
 }
@@ -482,6 +522,21 @@ mod tests {
                 Language::Shell,
                 "#!/bin/sh\n# comment\necho \"hello $name\"\n",
             ),
+            (Language::Python, "def add(a, b):\n    return a + b  # sum\n"),
+            (
+                Language::Go,
+                "package main\n\nfunc add(a, b int) int {\n    return a + b\n}\n",
+            ),
+            (Language::Toml, "[package]\nname = \"tern\"\n# comment\n"),
+            (Language::Yaml, "name: tern\nversion: 0.2.0\n# comment\n"),
+            (
+                Language::C,
+                "int main(void) {\n    return 0; // ok\n}\n",
+            ),
+            (
+                Language::Cpp,
+                "int main() {\n    std::cout << \"hi\";\n    return 0;\n}\n",
+            ),
         ];
         for (language, source) in cases {
             let spans = highlight(*language, source);
@@ -514,8 +569,22 @@ mod tests {
         assert_eq!(Language::from_fence_name("shell"), Some(Language::Shell));
         assert_eq!(Language::from_fence_name("sh"), Some(Language::Shell));
         assert_eq!(Language::from_fence_name("zsh"), Some(Language::Shell));
+        assert_eq!(Language::from_fence_name("python"), Some(Language::Python));
+        assert_eq!(Language::from_fence_name("py"), Some(Language::Python));
+        assert_eq!(Language::from_fence_name("go"), Some(Language::Go));
+        assert_eq!(Language::from_fence_name("golang"), Some(Language::Go));
+        assert_eq!(Language::from_fence_name("toml"), Some(Language::Toml));
+        assert_eq!(Language::from_fence_name("yaml"), Some(Language::Yaml));
+        assert_eq!(Language::from_fence_name("yml"), Some(Language::Yaml));
+        assert_eq!(Language::from_fence_name("c"), Some(Language::C));
+        assert_eq!(Language::from_fence_name("cpp"), Some(Language::Cpp));
+        assert_eq!(Language::from_fence_name("c++"), Some(Language::Cpp));
+        assert_eq!(Language::from_fence_name("cxx"), Some(Language::Cpp));
         assert_eq!(Language::from_fence_name("RUST"), Some(Language::Rust));
+        assert_eq!(Language::from_fence_name("PYTHON"), Some(Language::Python));
         assert_eq!(Language::from_fence_name("ruby"), None);
+        assert_eq!(Language::from_fence_name("markdown"), None);
+        assert_eq!(Language::from_fence_name("md"), None);
         assert_eq!(Language::from_fence_name(""), None);
     }
 
@@ -748,6 +817,256 @@ mod tests {
         assert_eq!(buffer, expected);
     }
 
+    /// Pin one row of the expected buffer: each `(start_x, text, style)`
+    /// segment paints its glyphs left-to-right from `start_x`.
+    fn pin_row(buf: &mut Buffer, y: u16, segments: &[(usize, &str, Style)]) {
+        for &(x, text, ref style) in segments {
+            for (i, ch) in text.chars().enumerate() {
+                buf.set_char(x as u16 + i as u16, y, ch, style.clone());
+            }
+        }
+    }
+
+    /// The shared golden-buffer harness (mirrors
+    /// `golden_rust_snippet_token_colors`): highlight `source`, verify the
+    /// span stream reconstructs it, paint into a buffer, and assert the full
+    /// painted grid equals the pinned expectation (per-cell glyphs + fg).
+    fn assert_golden(language: Language, source: &str, width: u16, height: u16, rows: &[&[(usize, &str, Style)]]) {
+        let spans = highlight(language, source);
+        assert_eq!(concat(&spans), source, "span stream must reconstruct source");
+        let buffer = paint_spans(&spans, width, height);
+        let mut expected = Buffer::new(width, height);
+        for (y, segments) in rows.iter().enumerate() {
+            pin_row(&mut expected, y as u16, segments);
+        }
+        assert_eq!(buffer, expected);
+    }
+
+    // M3.7 golden buffer tests — one per new grammar. The pinned colors are
+    // the actual engine output for the grammar's bundled highlight queries
+    // (verified against the crate sources): python/go/c/toml/yaml map
+    // captures onto the same One-Dark palette as the rust golden; c++ runs
+    // the C query first and the C++ query on top (the C++ grammar's bundled
+    // query alone only carries the C++-specific captures).
+
+    #[test]
+    fn golden_python_snippet_token_colors() {
+        assert_golden(
+            Language::Python,
+            "def add(a, b):\n    return a + b  # sum\n",
+            40,
+            3,
+            &[
+                // `def` keyword, `add` function, `a`/`b` parameters.
+                &[
+                    (0, "def", fg(KEYWORD_FG)),
+                    (3, " ", Style::new()),
+                    (4, "add", fg(FUNCTION_FG)),
+                    (7, "(", Style::new()),
+                    (8, "a", fg(VARIABLE_FG)),
+                    (9, ", ", Style::new()),
+                    (11, "b", fg(VARIABLE_FG)),
+                    (12, "):", Style::new()),
+                ],
+                // `return` keyword, `a`/`b` parameters, `+` operator, comment.
+                &[
+                    (0, "    ", Style::new()),
+                    (4, "return", fg(KEYWORD_FG)),
+                    (10, " ", Style::new()),
+                    (11, "a", fg(VARIABLE_FG)),
+                    (12, " ", Style::new()),
+                    (13, "+", fg(BUILTIN_FG)),
+                    (14, " ", Style::new()),
+                    (15, "b", fg(VARIABLE_FG)),
+                    (16, "  ", Style::new()),
+                    (18, "# sum", fg(COMMENT_FG).add_modifier(Modifiers::ITALIC)),
+                ],
+            ],
+        );
+    }
+
+    #[test]
+    fn golden_go_snippet_token_colors() {
+        assert_golden(
+            Language::Go,
+            "package main\n\nfunc add(a, b int) int {\n    return a + b\n}\n",
+            40,
+            6,
+            &[
+                // `package` keyword; the package name carries no capture.
+                &[(0, "package", fg(KEYWORD_FG)), (7, " main", Style::new())],
+                // Row 1: blank.
+                &[],
+                // `func` keyword, `add` (the later generic `(identifier)
+                // @variable` capture wins on tie over `@function`), `a`/`b`
+                // parameters, `int` types.
+                &[
+                    (0, "func", fg(KEYWORD_FG)),
+                    (4, " ", Style::new()),
+                    (5, "add", fg(VARIABLE_FG)),
+                    (8, "(", Style::new()),
+                    (9, "a", fg(VARIABLE_FG)),
+                    (10, ", ", Style::new()),
+                    (12, "b", fg(VARIABLE_FG)),
+                    (13, " ", Style::new()),
+                    (14, "int", fg(TYPE_FG)),
+                    (17, ") ", Style::new()),
+                    (19, "int", fg(TYPE_FG)),
+                    (22, " {", Style::new()),
+                ],
+                // `return` keyword, `a`/`b`, `+` operator.
+                &[
+                    (0, "    ", Style::new()),
+                    (4, "return", fg(KEYWORD_FG)),
+                    (10, " ", Style::new()),
+                    (11, "a", fg(VARIABLE_FG)),
+                    (12, " ", Style::new()),
+                    (13, "+", fg(BUILTIN_FG)),
+                    (14, " ", Style::new()),
+                    (15, "b", fg(VARIABLE_FG)),
+                ],
+                &[(0, "}", Style::new())],
+            ],
+        );
+    }
+
+    #[test]
+    fn golden_toml_snippet_token_colors() {
+        assert_golden(
+            Language::Toml,
+            "[package]\nname = \"tern\"\nversion = \"0.2.0\"\n# comment\n",
+            40,
+            5,
+            &[
+                // `[package]` — `package` is a bare_key under a table:
+                // `(bare_key) @type` is the smallest covering capture.
+                &[
+                    (0, "[", Style::new()),
+                    (1, "package", fg(TYPE_FG)),
+                    (8, "]", Style::new()),
+                ],
+                // `name = "tern"` — the pair-level `(pair ...) @property`
+                // capture spans the whole `k = v` and wins on the gap cells
+                // (the spaces either side of `=`); the bare_key `@type`, the
+                // `"=" @operator` and the string `@string` are each more
+                // specific on their own cells.
+                &[
+                    (0, "name", fg(TYPE_FG)),
+                    (4, " ", fg(VARIABLE_FG)),
+                    (5, "=", fg(BUILTIN_FG)),
+                    (6, " ", fg(VARIABLE_FG)),
+                    (7, "\"tern\"", fg(STRING_FG)),
+                ],
+                // Same shape for `version`.
+                &[
+                    (0, "version", fg(TYPE_FG)),
+                    (7, " ", fg(VARIABLE_FG)),
+                    (8, "=", fg(BUILTIN_FG)),
+                    (9, " ", fg(VARIABLE_FG)),
+                    (10, "\"0.2.0\"", fg(STRING_FG)),
+                ],
+                // Comment.
+                &[(0, "# comment", fg(COMMENT_FG).add_modifier(Modifiers::ITALIC))],
+            ],
+        );
+    }
+
+    #[test]
+    fn golden_yaml_snippet_token_colors() {
+        assert_golden(
+            Language::Yaml,
+            "name: tern\nversion: 0.2.0\n# comment\n",
+            40,
+            4,
+            &[
+                // `name` key is `@property`; the plain scalar value `tern`
+                // is `@string`.
+                &[
+                    (0, "name", fg(VARIABLE_FG)),
+                    (4, ": ", Style::new()),
+                    (6, "tern", fg(STRING_FG)),
+                ],
+                &[
+                    (0, "version", fg(VARIABLE_FG)),
+                    (7, ": ", Style::new()),
+                    (9, "0.2.0", fg(STRING_FG)),
+                ],
+                &[(0, "# comment", fg(COMMENT_FG).add_modifier(Modifiers::ITALIC))],
+            ],
+        );
+    }
+
+    #[test]
+    fn golden_c_snippet_token_colors() {
+        assert_golden(
+            Language::C,
+            "int main(void) {\n    return 0; // ok\n}\n",
+            40,
+            4,
+            &[
+                // `int` / `void` primitive types, `main` function.
+                &[
+                    (0, "int", fg(TYPE_FG)),
+                    (3, " ", Style::new()),
+                    (4, "main", fg(FUNCTION_FG)),
+                    (8, "(", Style::new()),
+                    (9, "void", fg(TYPE_FG)),
+                    (13, ") {", Style::new()),
+                ],
+                // `return` keyword, `0` number, `// ok` comment.
+                &[
+                    (0, "    ", Style::new()),
+                    (4, "return", fg(KEYWORD_FG)),
+                    (10, " ", Style::new()),
+                    (11, "0", fg(NUMBER_FG)),
+                    (12, "; ", Style::new()),
+                    (14, "// ok", fg(COMMENT_FG).add_modifier(Modifiers::ITALIC)),
+                ],
+                &[(0, "}", Style::new())],
+            ],
+        );
+    }
+
+    #[test]
+    fn golden_cpp_snippet_token_colors() {
+        assert_golden(
+            Language::Cpp,
+            "int main() {\n    std::cout << \"hi\";\n    return 0;\n}\n",
+            40,
+            5,
+            &[
+                // `int` type and `main` function come from the C query; the
+                // C++ query adds nothing on this row.
+                &[
+                    (0, "int", fg(TYPE_FG)),
+                    (3, " ", Style::new()),
+                    (4, "main", fg(FUNCTION_FG)),
+                    (8, "() {", Style::new()),
+                ],
+                // `std::` unstyled (lowercase namespace misses the C++ `@type`
+                // match predicate), `cout` field property (C query), `<<` has
+                // no operator capture in either query, string (C query).
+                &[
+                    (0, "    ", Style::new()),
+                    (4, "std::", Style::new()),
+                    (9, "cout", fg(VARIABLE_FG)),
+                    (13, " << ", Style::new()),
+                    (17, "\"hi\"", fg(STRING_FG)),
+                    (21, ";", Style::new()),
+                ],
+                // `return` keyword, `0` number (both C query).
+                &[
+                    (0, "    ", Style::new()),
+                    (4, "return", fg(KEYWORD_FG)),
+                    (10, " ", Style::new()),
+                    (11, "0", fg(NUMBER_FG)),
+                    (12, ";", Style::new()),
+                ],
+                &[(0, "}", Style::new())],
+            ],
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Incremental highlighter: tail-only re-parse, span parity with the
     // one-shot path, and the no-reuse contrast.
@@ -844,3 +1163,4 @@ mod tests {
         assert_eq!(hl.last_changed_span(), (0, fence.len()));
     }
 }
+
