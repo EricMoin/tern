@@ -42,7 +42,7 @@ dim), a row of bg-colored boxes, and a wide CJK char + ZWJ emoji (the
 masked-continuation cells are skipped by the painter) — re-laid out on
 window resize.
 
-## What is deliberately deferred (see `docs/roadmap.md`, Phase 6)
+## What is deliberately deferred (wasm/web track)
 
 - Full `@tern/core` reconciler parity on wasm (this spike exposes the scene
   API directly; the React/Solid reconcilers and the event stream are not

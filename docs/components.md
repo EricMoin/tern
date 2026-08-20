@@ -63,8 +63,8 @@ composition reaches the app as a bracket-pasted string and flows through the
 `Paste` event → `FocusManager.routePaste` → `pasteInto` / `pasteIntoTextarea`
 path above — multi-codepoint CJK/IME-confirmed strings (pre-composed and
 decomposed) are regression-tested to round-trip losslessly into a focused
-`Input` and `Textarea`. Full rationale in
-[roadmap.md](roadmap.md#ime-posture--composition-stays-a-non-goal).
+`Input` and `Textarea`. Full rationale: IME composition stays a non-goal (see the
+Input/Textarea design notes in this document).
 
 ## Status legend
 
@@ -73,7 +73,7 @@ decomposed) are regression-tested to round-trip losslessly into a focused
 | ✅ MVP | Ships in the first runnable milestone |
 | ✅ Shipped | JS element + renderer wiring complete |
 | 🔜 Soon | Next after MVP; small, well-understood |
-| 🧭 Later | Needs a prerequisite phase (see [roadmap.md](roadmap.md)) |
+| 🧭 Later | Needs a prerequisite phase |
 
 | Component | Status | Needs |
 |-----------|--------|-------|
@@ -296,8 +296,8 @@ cell-buffer renderer that repaints per frame.
 - **Editing:** insert/delete, cursor movement (left/right, home/end), word
   jumps (option-arrow), selection + clipboard paste, and confirmed-IME input
   via bracketed paste. IME composition/preedit itself stays with the terminal
-  emulator — see the [IME posture](roadmap.md#ime-posture--composition-stays-a-non-goal)
-  decision (crossterm surfaces no preedit events and the emulator owns the
+  emulator — the IME-posture decision: crossterm surfaces no preedit events
+  and the emulator owns the
   composing overlay; a confirmed composition arrives as a `Paste` event).
 - **History:** up/down arrows walk a bounded ring buffer; empty-entry resets
   to draft.
@@ -347,8 +347,7 @@ determinate progress (tool execution, file upload, token budget).
 paint-on-demand pipeline. The JS side provides it — `<Spinner>` in
 `@tern-tui/react` runs a tick interval while mounted (see the Rust renderable note
 below), and the tick pauses while the terminal is unfocused (focus-aware
-redraw, [roadmap Phase 2](roadmap.md#phase-2--resize-focus--mouse-events--done) —
-shipped).
+redraw — shipped).
 
 **Design:**
 
@@ -1005,4 +1004,4 @@ Cluster-aware cursor movement is shipped: the editing components (`Input`,
 `Textarea`) now step and measure cursor/segment positions by grapheme cluster
 via `tern_core::clusters` — move/delete/word-jump land on cluster boundaries,
 backspace/delete remove whole clusters, and `display_col` sums cluster width
-(see Phase 8 of [roadmap.md](roadmap.md)).
+(shipped in Phase 8).

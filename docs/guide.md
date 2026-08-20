@@ -4,8 +4,7 @@ This guide walks through building a tern TUI with `@tern-tui/react` or
 `@tern-tui/solid`: getting started, the component set, the event model, and
 theme usage. For the rendering pipeline see
 [architecture.md](architecture.md); for the widget roadmap status see
-[components.md](components.md); for the post-MVP phases see
-[roadmap.md](roadmap.md).
+[components.md](components.md).
 
 ## Getting started
 
