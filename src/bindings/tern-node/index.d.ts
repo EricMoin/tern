@@ -357,7 +357,7 @@ export interface ContentSize {
  * when it is added to a bound parent via `NodeHandle.add_child`. See
  * `set_props` for the style-key convention.
  */
-export declare function create_node(node_type: string, props?: Record<string, any> | undefined | null): NodeHandle
+export declare function create_node(nodeType: string, props?: Record<string, any> | undefined | null): NodeHandle
 
 /**
  * Token-highlight `source` in `language` (a Markdown fence info string:
