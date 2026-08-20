@@ -149,7 +149,10 @@ export declare class TuiRenderer {
   /**
    * Paint the shared scene into a fresh buffer at the current terminal
    * size and flush the minimal diff (vs the previous frame) to the
-   * terminal.
+   * terminal — a single DECSTBM + SU/SD scroll command plus the newly
+   * exposed rows when the diff is exactly a vertical scroll of a
+   * full-width row band and the terminal supports scroll-region painting
+   * (the M2.1 fast path, opt-in via `scroll_optimization`).
    *
    * No-op fast path: when the scene has not mutated since the last paint
    * and the viewport is unchanged, the previous frame is still on screen,
@@ -208,10 +211,10 @@ export declare class TuiRenderer {
    * backend (`{ truecolor, colors }` — see `tern-terminal`'s
    * `Backend::capabilities`) merged with the interactive probe report
    * (`terminalIdentity`, `kittyKeyboard`, `kittyUnderline`, `osc52`,
-   * `bracketedPaste`, `focusEvents`, `probed` — see `tern-terminal`'s
-   * `probe::TerminalCapabilities`). The probe result is cached per
-   * process; a probe skipped for a non-TTY or `TERM=dumb` reports
-   * conservative defaults with `probed: false`.
+   * `bracketedPaste`, `focusEvents`, `scrollRegion`, `probed` — see
+   * `tern-terminal`'s `probe::TerminalCapabilities`). The probe result is
+   * cached per process; a probe skipped for a non-TTY or `TERM=dumb`
+   * reports conservative defaults with `probed: false`.
    */
   get capabilities(): RendererCapabilities
   /**
@@ -561,6 +564,15 @@ export interface RendererCapabilities {
    */
   focusEvents: boolean
   /**
+   * Whether the terminal supports scroll-region (DECSTBM) painting, as
+   * derived from the interactive probe: a self-identified terminal that
+   * is not tmux or screen (whose DECSTBM quirks make scroll-region
+   * painting unsafe) gets the scroll optimization. `false` for an
+   * unknown or silent terminal, which keeps the full-screen redraw
+   * fallback.
+   */
+  scrollRegion: boolean
+  /**
    * Whether the interactive probe parsed any query reply. `false` when
    * the probe was skipped (non-TTY or `TERM=dumb`) or every query went
    * unanswered (timeout / empty reply); every probe field is then a
@@ -725,6 +737,15 @@ export interface TuiRendererOptions {
    * on destroy. Default `true`.
    */
   keyboard_enhancement?: boolean
+  /**
+   * When `false`, the renderer skips the scroll-region (DECSTBM) fast
+   * path: a frame whose diff is exactly a vertical scroll of a full-width
+   * region flushes as one terminal scroll command plus the newly exposed
+   * rows instead of a cell-by-cell repaint. Only active on terminals the
+   * interactive probe reports as scroll-region safe (never tmux/screen).
+   * Default `true`.
+   */
+  scroll_optimization?: boolean
   /**
    * The virtual width in cells for `headless` mode (default 80). Ignored
    * when `headless` is `false`.
