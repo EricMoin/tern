@@ -9,6 +9,12 @@
 # event loop quit on 'q' — each demo asserts its scene, paints it, and
 # prints "ok: ..." lines (with a final "quit on 'q'" line) before exiting 0.
 #
+# Beyond the demos the harness runs the signal-lifecycle cases (M1.4:
+# SIGTERM clean exit + termios restored, SIGTSTP/SIGCONT suspend-resume
+# against signal-demo.ts) and the TERM=dumb degradation case (M1.5:
+# dumb-term-demo.ts — createRenderer must refuse the non-interactive
+# terminal with no ESC bytes written).
+#
 # Runtime: Deno-first (project preference). Each demo runs under
 # `deno run --allow-all`; a demo falls back to `node` on its own only when
 # Deno cannot load the native Node-API addon, and reports which runtime it
@@ -17,7 +23,8 @@
 # says so. Either way the runtime each demo used is reported below.
 #
 # Usage: bash packages/examples/run-smoke.sh
-# Exit: 0 when all seven demos pass; 1 otherwise.
+# Exit: 0 when all seven demos and the signal/TERM=dumb cases pass;
+# 1 otherwise.
 
 set -u
 
@@ -53,6 +60,11 @@ fi
 # here. The timings (resize 0.8s, input 1.5s) land inside every demo's 5s
 # event-loop deadline while keeping the resize strictly before the input.
 PTY_CMD=(script -q /dev/null sh -c 'stty rows 24 cols 80; (sleep 0.8; stty -f /dev/tty rows 31 cols 111) & exec "$@"' sh)
+
+# The signal-case PTY: the same `script` PTY without the mid-session resize.
+# The signal cases hold a stable 24x80 viewport so the termios snapshot
+# comparison (SIGTERM case) and the suspend/resume timing are deterministic.
+PTY_SIG_CMD=(script -q /dev/null sh -c 'stty rows 24 cols 80; exec "$@"' sh)
 
 # Deno-first; node only when deno is not installed. The addon-load fallback
 # (deno present but unable to load the native addon) is handled inside the
@@ -105,10 +117,133 @@ run_demo agent-transcript "$SCRIPT_DIR/agent-transcript.ts"
 run_demo file-browser "$SCRIPT_DIR/file-browser.ts"
 run_demo diff-review "$SCRIPT_DIR/diff-review.ts"
 
+# ---------------------------------------------------------------------------
+# Signal lifecycle cases (roadmap M1.4): SIGTERM clean exit and
+# SIGTSTP/SIGCONT suspend-resume against the signal demo.
+#
+# The demo runs in the FOREGROUND of the PTY (exactly like the seven demos,
+# so its push event loop reads 'q' from the PTY master); a background helper
+# inside the same sh drives the signals, addressing the demo through the
+# pidfile the demo writes at startup. The sh survives the demo (it is not
+# exec'd), so the SIGTERM case can snapshot `stty -g` after the demo exited
+# — the PTY is still alive — proving the signal teardown restored the
+# termios (no raw-mode residue).
+# ---------------------------------------------------------------------------
+
+# (a) SIGTERM to a live demo: the native signal thread runs the destroy-style
+# teardown and exits with 128 + SIGTERM = 143; the PTY must show the
+# pre-demo termios again.
+run_sigterm_case() {
+  local name="signal-term"
+  echo "==> [$name] SIGTERM at 1.5s: clean exit 143 + termios restored"
+  local out status termios_ok sigterm_status
+  out="$("${PTY_SIG_CMD[@]}" sh -c '
+    stty -g > /tmp/tern-termios.sane
+    ( sleep 1.5; DEMO=$(cat /tmp/tern-signal-demo.pid 2>/dev/null); kill -TERM "$DEMO" ) &
+    "$@"
+    STATUS=$?
+    stty -g > /tmp/tern-termios.after
+    echo "SIGTERM_STATUS=$STATUS"
+    if cmp -s /tmp/tern-termios.sane /tmp/tern-termios.after; then
+      echo "TERMIOS_SANE=yes"
+    else
+      echo "TERMIOS_SANE=no"
+    fi
+    rm -f /tmp/tern-termios.sane /tmp/tern-termios.after
+  ' sh "${RUN_CMD[@]}" "$SIGNAL_DEMO" 2>&1)"
+  status=$?
+  termios_ok="$(printf '%s\n' "$out" | sed -n 's/.*TERMIOS_SANE=\([a-z]*\).*/\1/p' | tail -1)"
+  sigterm_status="$(printf '%s\n' "$out" | sed -n 's/.*SIGTERM_STATUS=\([0-9]*\).*/\1/p' | tail -1)"
+  if [ "$status" -eq 0 ] && [ "$sigterm_status" -eq 143 ] && [ "$termios_ok" = "yes" ] \
+    && printf '%s\n' "$out" | grep -q "ok: rendered (alive)"; then
+    pass=$((pass + 1))
+    echo "==> [$name] PASS (exit $sigterm_status, termios restored, demo marker present)"
+  else
+    fail=$((fail + 1))
+    echo "==> [$name] FAIL (script exit $status, demo exit ${sigterm_status:-?}, termios $termios_ok)"
+  fi
+  printf '%s\n' "$out" | sed 's/^/    /'
+  echo
+}
+
+# (b) SIGTSTP then SIGCONT: the demo suspends (terminal restored), resumes
+# (terminal re-entered + full repaint), and quits on 'q' with exit 0. The
+# 'q' is piped into the PTY master after the suspend/resume window, so the
+# demo reads it once its event loop is live again.
+run_tstp_cont_case() {
+  local name="signal-tstp-cont"
+  echo "==> [$name] SIGTSTP at 1.5s, SIGCONT at 2.3s, 'q' at 5s: resume + repaint + exit 0"
+  local out status tstp_status
+  out="$({ sleep 5; printf 'q'; } | "${PTY_SIG_CMD[@]}" sh -c '
+    ( sleep 1.5; DEMO=$(cat /tmp/tern-signal-demo.pid 2>/dev/null); kill -TSTP "$DEMO"; sleep 0.8; kill -CONT "$DEMO" ) &
+    "$@"
+    echo "TSTP_CONT_STATUS=$?"
+  ' sh "${RUN_CMD[@]}" "$SIGNAL_DEMO" 2>&1)"
+  status=$?
+  tstp_status="$(printf '%s\n' "$out" | sed -n 's/.*TSTP_CONT_STATUS=\([0-9]*\).*/\1/p' | tail -1)"
+  if [ "$status" -eq 0 ] && [ "$tstp_status" -eq 0 ] \
+    && printf '%s\n' "$out" | grep -q "ok: resumed after SIGCONT + repainted" \
+    && printf '%s\n' "$out" | grep -q "quit on 'q'"; then
+    pass=$((pass + 1))
+    echo "==> [$name] PASS (exit 0, resumed + repainted, quit on 'q')"
+  else
+    fail=$((fail + 1))
+    echo "==> [$name] FAIL (script exit $status, demo exit ${tstp_status:-?})"
+  fi
+  printf '%s\n' "$out" | sed 's/^/    /'
+  echo
+}
+
+SIGNAL_DEMO="$SCRIPT_DIR/signal-demo.ts"
+run_sigterm_case
+run_tstp_cont_case
+
+# (c) TERM=dumb degradation (roadmap M1.5): `createRenderer({})`
+# (non-headless) must refuse to construct on a non-interactive terminal —
+# the native guard errors with "tern requires an interactive terminal
+# (TERM=dumb or non-TTY)" BEFORE any terminal I/O. The demo catches the
+# expected error and exits 0. Assert the message appears AND that no ESC
+# byte was written: a guard that fired before any terminal I/O leaves the
+# demo's stdout pure text (an escape sequence before the error would mean
+# the guard ran too late and dirtied the terminal).
+#
+# The demo's stderr is redirected INSIDE the PTY (to a file, displayed below
+# but not asserted on): deno writes its own TTY progress-erase escape
+# sequences to stderr at startup whenever the PTY has a valid window size —
+# a deno artifact, not tern — so a merged 2>&1 capture would fail the no-ESC
+# assertion no matter how clean the renderer behaved. The demo prints its
+# markers and the expected error message via console.log (stdout), which is
+# where any premature renderer sequence would land.
+run_dumb_term_case() {
+  local name="term-dumb"
+  echo "==> [$name] TERM=dumb: createRenderer refuses the non-interactive terminal"
+  local out err status
+  local stderr_file="/tmp/tern-dumb-stderr.txt"
+  rm -f "$stderr_file"
+  out="$(TERM=dumb script -q /dev/null sh -c 'stty rows 24 cols 80; exec "$@" 2>/tmp/tern-dumb-stderr.txt' sh "${RUN_CMD[@]}" "$DUMB_DEMO" 2>&1)"
+  status=$?
+  err="$(cat "$stderr_file" 2>/dev/null)"
+  rm -f "$stderr_file"
+  if [ "$status" -eq 0 ] \
+    && printf '%s\n' "$out" | grep -q "tern requires an interactive terminal" \
+    && ! printf '%s\n' "$out" | grep -q "$(printf '\033')"; then
+    pass=$((pass + 1))
+    echo "==> [$name] PASS (exit 0, expected error, no ESC bytes written)"
+  else
+    fail=$((fail + 1))
+    echo "==> [$name] FAIL (exit $status)"
+  fi
+  { printf '%s\n' "$out"; printf '%s\n' "$err"; } | sed 's/^/    /'
+  echo
+}
+
+DUMB_DEMO="$SCRIPT_DIR/dumb-term-demo.ts"
+run_dumb_term_case
+
 echo "======================="
 if [ "$fail" -eq 0 ]; then
-  echo "run-smoke: PASS — all 7 demos (react-demo, solid-demo, kitchen-sink-react, kitchen-sink-solid, agent-transcript, file-browser, diff-review) survived the pty resize (80x24 -> 111x31), rendered, asserted their scenes, and quit on 'q'"
+  echo "run-smoke: PASS — all 7 demos (react-demo, solid-demo, kitchen-sink-react, kitchen-sink-solid, agent-transcript, file-browser, diff-review) survived the pty resize (80x24 -> 111x31), rendered, asserted their scenes, and quit on 'q'; signal cases passed (SIGTERM clean exit 143 + termios restored; SIGTSTP/SIGCONT resume + repaint + exit 0); TERM=dumb degradation case passed (createRenderer refused the non-interactive terminal, no ESC bytes)"
   exit 0
 fi
-echo "run-smoke: FAIL — $fail demo(s) failed"
+echo "run-smoke: FAIL — $fail demo(s)/case(s) failed (7 demos, signal cases, or the TERM=dumb case)"
 exit 1
