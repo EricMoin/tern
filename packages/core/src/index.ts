@@ -480,6 +480,22 @@ export interface CreateRendererOptions {
    * when `headless` is `false`. Maps to the native `width`/`height`.
    */
   size?: { width: number; height: number };
+  /**
+   * The renderer's frame-rate cap for **coalesced** frames: the maximum
+   * number of native renders per second a {@link Renderer.requestFrame}
+   * schedule can trigger. A frame scheduled sooner than `1000 / maxFps`
+   * after the previous native render waits out the remainder of the budget
+   * instead of firing on the next macrotask, so a high-frequency
+   * `requestFrame` loop downsamples to at most `maxFps` paints per second
+   * under load. The cap does not change coalescing — a burst of
+   * `requestFrame` calls within one tick still collapses into a single
+   * native render, it is simply delayed to the cap — and an explicit
+   * {@link Renderer.render} always paints immediately, bypassing the
+   * throttle. Default `0` (or unset): no cap, every coalesced frame fires
+   * on the next macrotask exactly as today. JS-side only: not forwarded to
+   * the native renderer.
+   */
+  maxFps?: number;
 }
 
 /**
@@ -7150,12 +7166,22 @@ export class Renderer {
   #frameCallbacks: Array<() => void> = [];
   /** The macrotask handle of the pending coalesced frame, or `null`. */
   #frameTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The configured frame-rate cap for coalesced frames (from
+   * `CreateRendererOptions.maxFps`), or `0` for no throttle. JS-side only:
+   * never forwarded to the native renderer. */
+  #maxFps = 0;
+  /** The `performance.now()` timestamp of the most recent native render
+   * (an explicit `render()` or a coalesced frame) — the anchor the frame
+   * budget spaces the next coalesced frame from. `0` means "never
+   * rendered", so the first scheduled frame is always immediate. */
+  #lastNativeRenderAt = 0;
 
   /** The scene root. Attach content under it with `Node.addChild`. */
   readonly root: Node;
 
   /** @internal — use `createRenderer`. */
   constructor(options: CreateRendererOptions = {}) {
+    this.#maxFps = options.maxFps ?? 0;
     const addon = loadAddon();
     const nativeOptions: TuiRendererOptions = {
       exit_on_ctrl_c: options.exitOnCtrlC ?? false,
@@ -7418,6 +7444,10 @@ export class Renderer {
     const callbacks = this.#frameCallbacks;
     this.#cancelFrame();
     this.#native.render();
+    // An explicit render is a native render: it anchors the frame budget,
+    // so the next coalesced frame spaces from this paint. Immediate by
+    // construction — the throttle never delays the explicit path.
+    this.#lastNativeRenderAt = performance.now();
     for (const callback of callbacks) callback();
   }
 
@@ -7427,6 +7457,12 @@ export class Renderer {
    * unavailable). Several `requestFrame` calls within one tick collapse into
    * a single native `render()` — the pending-frame flag dedupes the schedule
    * — so a burst of scene mutations repaints once instead of once per call.
+   * With a `maxFps` cap configured (see {@link CreateRendererOptions}), the
+   * coalesced frame fires no earlier than `1000 / maxFps` after the previous
+   * native render: a high-frequency schedule loop downsamples to the cap
+   * under load, while a burst still collapses into one native render — just
+   * delayed to the budget. An explicit {@link render} bypasses the cap and
+   * paints immediately.
    * The optional `callback` runs after the native render completes (every
    * call's callback, in call order). An explicit {@link render} while a
    * coalesced frame is pending paints immediately and supersedes it, running
@@ -7460,12 +7496,22 @@ export class Renderer {
       this.#frameTimer = null;
       this.#framePending = false;
       this.#native.render();
+      // Anchor the frame budget: the next coalesced frame spaces from this
+      // native render, never earlier than the cap allows.
+      this.#lastNativeRenderAt = performance.now();
       const callbacks = this.#frameCallbacks;
       this.#frameCallbacks = [];
       for (const callback of callbacks) callback();
     };
     if (typeof setTimeout === "function") {
-      this.#frameTimer = setTimeout(run, 0);
+      // With a `maxFps` cap, delay to the end of the current frame budget
+      // (never before the last native render + 1000/maxFps); without one
+      // the delay is exactly 0 — the next macrotask, unchanged from the
+      // unthrottled schedule. The microtask fallback stays throttle-free.
+      const delay = this.#maxFps > 0
+        ? Math.max(0, 1000 / this.#maxFps - (performance.now() - this.#lastNativeRenderAt))
+        : 0;
+      this.#frameTimer = setTimeout(run, delay);
     } else {
       queueMicrotask(run);
     }
