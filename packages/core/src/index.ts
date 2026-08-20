@@ -444,6 +444,15 @@ export interface CreateRendererOptions {
    */
   keyboardEnhancement?: boolean;
   /**
+   * When `false`, the renderer skips the scroll-region (DECSTBM) fast path:
+   * a frame whose diff is exactly a vertical scroll of a full-width region
+   * flushes as one terminal scroll command plus the newly exposed rows
+   * instead of a cell-by-cell repaint. Only active on terminals the
+   * interactive probe reports as scroll-region safe (never tmux/screen).
+   * Maps to the native `scroll_optimization`. Default `true`.
+   */
+  scrollOptimization?: boolean;
+  /**
    * The terminal window title, applied when the renderer is constructed.
    * Maps to the native `title`.
    */
@@ -7156,6 +7165,8 @@ export class Renderer {
     if (options.headless !== undefined) nativeOptions.headless = options.headless;
     if (options.keyboardEnhancement !== undefined)
       nativeOptions.keyboard_enhancement = options.keyboardEnhancement;
+    if (options.scrollOptimization !== undefined)
+      nativeOptions.scroll_optimization = options.scrollOptimization;
     if (options.size !== undefined) {
       nativeOptions.width = options.size.width;
       nativeOptions.height = options.size.height;
@@ -7169,9 +7180,10 @@ export class Renderer {
    * native backend (`{ truecolor, colors }` — whether 24-bit RGB is
    * supported, and the palette size 16_777_216 / 256 / 16 / 0) merged with
    * the interactive probe report (`terminalIdentity`, `kittyKeyboard`,
-   * `kittyUnderline`, `osc52`, `bracketedPaste`, `focusEvents`, `probed` —
-   * the terminal's self-reported identity and protocol supports from the
-   * native side's DA1/DA2/XTVERSION/XTGETTCAP probe). The probe result is
+   * `kittyUnderline`, `osc52`, `bracketedPaste`, `focusEvents`,
+   * `scrollRegion`, `probed` — the terminal's self-reported identity and
+   * protocol supports from the native side's DA1/DA2/XTVERSION/XTGETTCAP
+   * probe). The probe result is
    * cached per process; a probe skipped for a non-TTY or `TERM=dumb`
    * reports conservative defaults with `probed: false`.
    */
