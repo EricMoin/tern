@@ -320,12 +320,31 @@ class FakeTuiRenderer {
   destroy(): void {
     this.destroyed = true;
   }
-  capabilities = { truecolor: true, colors: 16_777_216 };
+  /** The terminal's capabilities the fake reports: the backend color report
+   * merged with the interactive probe report (a kitty-style terminal that
+   * answered every query), mirroring the real `capabilities` getter. */
+  capabilities = {
+    truecolor: true,
+    colors: 16_777_216,
+    terminalIdentity: "kitty(0.36.0)",
+    kittyKeyboard: true,
+    kittyUnderline: true,
+    osc52: true,
+    bracketedPaste: true,
+    focusEvents: true,
+    probed: true,
+  };
   set_title(title: string): void {
     lastSetTitle = title;
   }
   set_clipboard(text: string): void {
     lastClipboard = text;
+  }
+  /** The `set_any_event_mouse` calls recorded by the fake, in call order
+   * (the 1003 any-event toggle the `onMouse` listener count drives). */
+  anyEventMouseCalls: boolean[] = [];
+  set_any_event_mouse(enabled: boolean): void {
+    this.anyEventMouseCalls.push(enabled);
   }
   set_selection(col1: number, row1: number, col2: number, row2: number): void {
     this.selection = { col1, row1, col2, row2 };
@@ -1488,8 +1507,20 @@ Deno.test("renderer capabilities getter routes to the native addon", () => {
   withFakeAddon(() => {
     const renderer = createRenderer();
     const caps = renderer.capabilities;
+    // The backend color report.
     if (caps.truecolor !== true) throw new Error(`truecolor = ${caps.truecolor}`);
     if (caps.colors !== 16_777_216) throw new Error(`colors = ${caps.colors}`);
+    // The interactive probe report: the fake answers like a kitty terminal
+    // that supports every queried protocol, so every field surfaces.
+    if (caps.terminalIdentity !== "kitty(0.36.0)") {
+      throw new Error(`terminalIdentity = ${JSON.stringify(caps.terminalIdentity)}`);
+    }
+    if (caps.kittyKeyboard !== true) throw new Error(`kittyKeyboard = ${caps.kittyKeyboard}`);
+    if (caps.kittyUnderline !== true) throw new Error(`kittyUnderline = ${caps.kittyUnderline}`);
+    if (caps.osc52 !== true) throw new Error(`osc52 = ${caps.osc52}`);
+    if (caps.bracketedPaste !== true) throw new Error(`bracketedPaste = ${caps.bracketedPaste}`);
+    if (caps.focusEvents !== true) throw new Error(`focusEvents = ${caps.focusEvents}`);
+    if (caps.probed !== true) throw new Error(`probed = ${caps.probed}`);
     renderer.destroy();
   });
 });
@@ -1839,6 +1870,68 @@ Deno.test("push events dispatch mouse events to onMouse", () => {
     pushEvent({ type: "mouse", mouse });
     if (mouseEvents.length !== 1 || mouseEvents[0] !== mouse) {
       throw new Error("onMouse must receive the MouseEventJs payload");
+    }
+  });
+});
+
+Deno.test("onMouse toggles any-event mouse exactly on the 0->1 and 1->0 transitions", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer();
+    const native = lastFakeRenderer;
+    if (native === null) throw new Error("no fake renderer constructed");
+    const calls = native.anyEventMouseCalls;
+    const callsJson = () => JSON.stringify(calls);
+    // Read the length through a function so TS does not narrow it to a
+    // literal after the pre-subscribe guard below.
+    const n = () => calls.length;
+
+    // No listeners: the native mode must never have been touched.
+    if (n() !== 0) {
+      throw new Error(`pre-subscribe toggles = ${callsJson()}`);
+    }
+
+    // 0 -> 1: the first subscribe enables the mode, exactly once.
+    const unsub1 = renderer.onMouse(() => {});
+    if (n() !== 1 || calls[0] !== true) {
+      throw new Error(`first subscribe must toggle once true, got ${callsJson()}`);
+    }
+
+    // 1 -> 2: a further subscribe must not re-toggle.
+    const unsub2 = renderer.onMouse(() => {});
+    if (n() !== 1) {
+      throw new Error(`1->1 re-subscribe must not re-toggle, got ${callsJson()}`);
+    }
+
+    // 2 -> 1: unsubscribing one of two must not toggle.
+    unsub1();
+    if (n() !== 1) {
+      throw new Error(`2->1 unsubscribe must not toggle, got ${callsJson()}`);
+    }
+
+    // 1 -> 2 again: re-subscribing while one remains must not re-toggle.
+    const unsub3 = renderer.onMouse(() => {});
+    if (n() !== 1) {
+      throw new Error(`re-subscribe with one active must not re-toggle, got ${callsJson()}`);
+    }
+
+    // 2 -> 0: only the last unsubscribe disables the mode, exactly once.
+    unsub2();
+    if (n() !== 1) {
+      throw new Error(`2->1 must not toggle, got ${callsJson()}`);
+    }
+    unsub3();
+    if (n() !== 2 || calls[1] !== false) {
+      throw new Error(`last unsubscribe must toggle once false, got ${callsJson()}`);
+    }
+
+    // 0 -> 1 again: a fresh subscribe re-enables.
+    const unsub4 = renderer.onMouse(() => {});
+    if (n() !== 3 || calls[2] !== true) {
+      throw new Error(`subscribe after empty must toggle true again, got ${callsJson()}`);
+    }
+    unsub4();
+    if (n() !== 4 || calls[3] !== false) {
+      throw new Error(`last unsubscribe must toggle false again, got ${callsJson()}`);
     }
   });
 });

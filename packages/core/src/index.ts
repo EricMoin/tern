@@ -102,6 +102,7 @@ export type {
   ContentSize,
   HighlightSpanJs,
   KeyEvent,
+  LifecycleEvent,
   MouseEventJs,
   NodeHandle,
   RendererCapabilities,
@@ -171,6 +172,7 @@ import type {
   ContentSize,
   HighlightSpanJs,
   KeyEvent,
+  LifecycleEvent,
   MouseEventJs,
   NodeHandle as NativeNodeHandle,
   RendererCapabilities,
@@ -380,6 +382,8 @@ export type FocusHandler = (event: { focus_gained: boolean }) => void;
 export type MouseHandler = (event: MouseEventJs) => void;
 /** Receives the pasted text string. */
 export type PasteHandler = (text: string) => void;
+/** Receives the lifecycle event: `{ phase: "suspend" | "resume" }`. */
+export type LifecycleHandler = (event: LifecycleEvent) => void;
 
 /**
  * A single styled segment of a `streaming_text` node's stream, appended via
@@ -7126,6 +7130,7 @@ export class Renderer {
   #focusHandlers = new Set<FocusHandler>();
   #mouseHandlers = new Set<MouseHandler>();
   #pasteHandlers = new Set<PasteHandler>();
+  #lifecycleHandlers = new Set<LifecycleHandler>();
   #events = new TernEventStream();
   #streamStarted = false;
   #destroyed = false;
@@ -7160,9 +7165,15 @@ export class Renderer {
   }
 
   /**
-   * The terminal's color capabilities: `{ truecolor, colors }` — whether
-   * 24-bit RGB is supported, and the palette size (16_777_216 for
-   * truecolor, 256, 16, or 0). Detected once by the native backend.
+   * The terminal's capabilities: the color report detected once by the
+   * native backend (`{ truecolor, colors }` — whether 24-bit RGB is
+   * supported, and the palette size 16_777_216 / 256 / 16 / 0) merged with
+   * the interactive probe report (`terminalIdentity`, `kittyKeyboard`,
+   * `kittyUnderline`, `osc52`, `bracketedPaste`, `focusEvents`, `probed` —
+   * the terminal's self-reported identity and protocol supports from the
+   * native side's DA1/DA2/XTVERSION/XTGETTCAP probe). The probe result is
+   * cached per process; a probe skipped for a non-TTY or `TERM=dumb`
+   * reports conservative defaults with `probed: false`.
    */
   get capabilities(): RendererCapabilities {
     return this.#native.capabilities;
@@ -7369,6 +7380,16 @@ export class Renderer {
           for (const handler of this.#pasteHandlers) handler(event.paste);
         }
         break;
+      case "lifecycle":
+        // A job-control lifecycle event pushed by the native signal thread:
+        // `"suspend"` (SIGTSTP — terminal restored, process about to stop)
+        // or `"resume"` (SIGCONT — terminal re-entered, full repaint
+        // pending). On `"resume"` the screen was invalidated, so the app
+        // must re-render.
+        if (event.lifecycle !== undefined) {
+          for (const handler of this.#lifecycleHandlers) handler(event.lifecycle);
+        }
+        break;
     }
   }
 
@@ -7533,10 +7554,27 @@ export class Renderer {
    * Register a handler invoked for every mouse event delivered by the push
    * event stream. The handler receives the `MouseEventJs` payload. Returns an
    * unsubscribe function.
+   *
+   * The listener count drives the native any-event mouse mode (`?1003h`):
+   * the first handler to register enables it — the terminal then reports
+   * every motion, not just presses and drags — and the last unsubscribe
+   * disables it (`?1003l`), so motion events flow only while a listener is
+   * actually registered. A re-subscribe while a handler is already active
+   * (1→1) does not re-toggle the native mode. After the renderer is
+   * destroyed the toggles are skipped: the native teardown already emitted
+   * `?1003l`.
    */
   onMouse(handler: MouseHandler): () => void {
     this.#mouseHandlers.add(handler);
-    return () => this.#mouseHandlers.delete(handler);
+    if (this.#mouseHandlers.size === 1 && !this.destroyed) {
+      this.#native.set_any_event_mouse(true);
+    }
+    return () => {
+      this.#mouseHandlers.delete(handler);
+      if (this.#mouseHandlers.size === 0 && !this.destroyed) {
+        this.#native.set_any_event_mouse(false);
+      }
+    };
   }
 
   /**
@@ -7547,6 +7585,21 @@ export class Renderer {
   onPaste(handler: PasteHandler): () => void {
     this.#pasteHandlers.add(handler);
     return () => this.#pasteHandlers.delete(handler);
+  }
+
+  /**
+   * Register a handler invoked on every job-control lifecycle event pushed
+   * by the native signal thread: `{ phase: "suspend" }` when SIGTSTP
+   * (Ctrl+Z) is about to stop the process — the terminal has been restored
+   * to its pre-TUI state, so the app can flush anything it must persist —
+   * and `{ phase: "resume" }` after SIGCONT re-entered raw mode + the
+   * alternate screen and invalidated the screen. On `"resume"` the app must
+   * re-render (`renderer.render()`) to repaint the full screen. Returns an
+   * unsubscribe function.
+   */
+  onLifecycle(handler: LifecycleHandler): () => void {
+    this.#lifecycleHandlers.add(handler);
+    return () => this.#lifecycleHandlers.delete(handler);
   }
 
   /**

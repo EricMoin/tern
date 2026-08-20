@@ -1604,6 +1604,7 @@ class FakeStreamTuiRenderer {
   start_event_stream(callback: (err: Error | null, event: TernEventJs) => void): void {
     streamCallback = callback;
   }
+  set_any_event_mouse(_enabled: boolean): void {}
   render(): void {}
   destroy(): void {
     this.destroyed = true;
@@ -1640,6 +1641,7 @@ class DragFakeTuiRenderer {
     // overridden by the wheel/click tests (an empty path = off any cell).
     return dragFakeHitPath;
   }
+  set_any_event_mouse(_enabled: boolean): void {}
   render(): void {
     dragFakeRenders.push(1);
     this.lastRows = [...selectionFakeRows];
