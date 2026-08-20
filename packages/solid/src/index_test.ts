@@ -566,6 +566,7 @@ class FakeStreamTuiRenderer {
   start_event_stream(callback: (err: Error | null, event: TernEventJs) => void): void {
     streamCallback = callback;
   }
+  set_any_event_mouse(_enabled: boolean): void {}
   hit_test(_col: number, _row: number): bigint[] {
     // The wheel/click wiring gates on this; `solidFakeHitPath` is overridden
     // by the wheel/click tests (an empty path = off any painted cell).

@@ -47,6 +47,18 @@ export interface TernAddon {
    * above re-parses everything per call).
    */
   IncrementalHighlighter: new (language: string) => NativeIncrementalHighlighter;
+  /**
+   * Enable or disable any-event mouse tracking (`?1003h` / `?1003l`) on a
+   * `TuiRenderer` instance — the terminal reports every mouse motion while
+   * enabled, not just presses and drags. The JS `Renderer.onMouse` listener
+   * count drives this: the first handler to register enables the mode and
+   * the last to unsubscribe disables it, so motion events flow only while a
+   * listener is actually registered. This is an instance method on the
+   * renderer class (reachable as `renderer.set_any_event_mouse(...)`), not
+   * a module-level export; it is declared here so the addon seam carries
+   * the full JS-facing native surface.
+   */
+  set_any_event_mouse(enabled: boolean): void;
 }
 
 /**
