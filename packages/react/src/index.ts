@@ -9,15 +9,19 @@
  *   Bare string children are rejected at render time — text lives in an
  *   explicit `<Text text="..." />` element.
  * - The roadmap host components `<Input>` / `<Spinner>` / `<StatusBar>` /
- *   `<Panels>` / `<DiffView>` / `<Select>` / `<ScrollView>` / `<Table>` /
+ *   `<Panels>` / `<DiffView>` / `<Select>` / `<Menu>` / `<ScrollView>` /
+ *   `<Table>` /
  *   `<Tabs>` / `<Progress>` / `<Modal>` / `<BarChart>` / `<Chart>` /
  *   `<Sparkline>`
  *   materialize the core factories of the same name. `<Spinner>` runs its
  *   tick timer while mounted (cleared on unmount); `<Input>` / `<Select>` /
- *   `<Tabs>`
+ *   `<Menu>` / `<Tabs>`
  *   with a `focusId` register with a `FocusManager` so routed keys edit them
- *   (`onChange` / `onSubmit`, `onChange` / `onConfirm` / `onDismiss`, and
- *   `onChange` / `onClose` for tabs).
+ *   (`onChange` / `onSubmit`, `onChange` / `onConfirm` / `onDismiss`,
+ *   `onSelect` / `onDismiss`, and
+ *   `onChange` / `onClose` for tabs). `<Menu>` additionally wires the
+ *   renderer's mouse events onto the core `menuHover` / `menuClick` while it
+ *   is open.
  *   `<ScrollView>` is a clip/scroll region box (the engine's `clip_*` /
  *   `scroll_*` props); the core `scrollTo` / `scrollBy` / `scrollTop`
  *   helpers drive its offsets (clamped against `Node.contentSize()`),
@@ -87,6 +91,9 @@ import {
   focusAt,
   focusManager,
   mergeTheme,
+  menuClick,
+  menuHover,
+  menuKey,
   pasteInto,
   pasteIntoTextarea,
   resolveTheme,
@@ -104,6 +111,8 @@ import {
   type DiffLine,
   type FocusHandle,
   type KeyHandler,
+  type MenuItem,
+  type MenuState,
   type Node,
   type NodeProps,
   type PanelSpec,
@@ -358,6 +367,7 @@ const HOST_STATUS_BAR: string = "status_bar";
 const HOST_PANELS: string = "panels";
 const HOST_DIFF: string = "diff";
 const HOST_SELECT: string = "select";
+const HOST_MENU: string = "menu";
 const HOST_SCROLL_VIEW: string = "scroll_view";
 const HOST_TABLE: string = "table";
 const HOST_TREE: string = "tree";
@@ -515,6 +525,46 @@ export interface SelectProps extends TernNodeProps {
   onConfirm?: (state: SelectState) => void;
   /** Fired when the Escape key routes to this select (dismissal). */
   onDismiss?: (state: SelectState) => void;
+}
+
+/**
+ * Props for `<Menu>`: the tern node props plus the hierarchical item model,
+ * the interactive state (forwarded verbatim to the core `Menu` factory — the
+ * item model and the render mode are JS bookkeeping and never reach the scene
+ * props) and the focus/callback wiring (consumed by the component).
+ */
+export interface MenuProps extends TernNodeProps {
+  /** The menu items, in display order (top to bottom). */
+  items: MenuItem[];
+  /** The highlighted visible-item index (default 0). */
+  highlighted?: number;
+  /** The keys of submenus open initially (default none). */
+  open_submenus?: string[];
+  /** Whether the menu is open (default `false` — a closed menu is hidden).
+   *  `openMenu` / `closeMenu` toggle it. */
+  open?: boolean;
+  /** Render the menu as a floating overlay via the root box's `z_index` prop
+   *  (default 0). */
+  floating?: boolean;
+  /** The overlay's paint z-order (used when `floating`; default 0). */
+  z_index?: number;
+  /** Submenu rendering: `"inline"` (default, tree-style indented rows) or
+   *  `"flyout"` (each open submenu as a separate overlay layer). */
+  submenu?: "inline" | "flyout";
+  /**
+   * Register the menu with a `FocusManager` under this id so routed keys
+   * (via `useInput`) drive it through the core `menuKey`. Omit to leave
+   * the menu inert to keys.
+   */
+  focusId?: string;
+  /** The `FocusManager` to register with (defaults to the tree's current
+   *  manager — `useFocusManager()`). */
+  focusManager?: FocusManager;
+  /** Fired when a leaf item is activated (the Enter key or a mouse click on
+   *  it) — the state's `activated` carries the item's key. */
+  onSelect?: (state: MenuState) => void;
+  /** Fired when the Escape key routes to this menu (dismissal). */
+  onDismiss?: (state: MenuState) => void;
 }
 
 /**
@@ -795,6 +845,79 @@ export function Select(props: SelectProps): ReactElement<SelectProps> {
 
   return createElement(HOST_SELECT, {
     ...(resolveTheme(theme, { ...props, component: "select" }) as SelectProps),
+    ref: nodeRef,
+  });
+}
+
+/**
+ * The `<Menu>` host component: a flex column of text leaves — one leaf per
+ * *visible* item of the hierarchical `items` model, the highlighted item
+ * reversed (core `Menu` factory). When `focusId` is given, the menu registers
+ * with a `FocusManager` on mount and routed keys (via `useInput`) drive it
+ * through the core `menuKey` — `onSelect` fires when a leaf item is
+ * activated (Enter) and `onDismiss` on Escape. While mounted, the menu also
+ * subscribes to the renderer's mouse events: a `moved` event drives the core
+ * `menuHover` (moving the highlight to the hovered row) and a `down_left`
+ * press drives `menuClick` (opening a branch's submenu or activating a leaf —
+ * which fires `onSelect`) whenever the menu is open (mirroring the
+ * `usePanelMouseDrag` / `useSelection` wiring; the event's row is the visible
+ * item index, the established scene-origin convention). The menu's ref is
+ * managed internally (like `<Select>`); the element takes no React children —
+ * its composition is fixed by the factory.
+ */
+export function Menu(props: MenuProps): ReactElement<MenuProps> {
+  const theme = useTheme();
+  const nodeRef = useRef<Node | null>(null);
+  const manager = props.focusManager ?? useFocusManager();
+  const { renderer } = useApp();
+  // The callbacks are read through refs so a parent re-render with new
+  // callbacks is picked up without re-registering the element.
+  const onSelectRef = useRef(props.onSelect);
+  onSelectRef.current = props.onSelect;
+  const onDismissRef = useRef(props.onDismiss);
+  onDismissRef.current = props.onDismiss;
+
+  useEffect(() => {
+    const node = nodeRef.current;
+    if (node === null || props.focusId === undefined) return;
+    return coreUseFocus(props.focusId, node, (event) => {
+      const next = menuKey(node, event);
+      // Enter on a leaf activates it (the state's `activated` carries the
+      // item's key) and dismisses the menu; Enter on a branch opens the
+      // submenu (no callback). Escape dismisses without a selection.
+      if (next.activated !== null) {
+        onSelectRef.current?.(next);
+      } else if (event.name === "escape") {
+        onDismissRef.current?.(next);
+      }
+    }, manager).dispose;
+  }, [props.focusId, manager]);
+
+  // Mouse wiring: a hover (`moved`) moves the highlight through the core
+  // `menuHover`; a `down_left` press clicks through `menuClick` (a branch
+  // opens its submenu, a leaf activates — firing `onSelect`). Both only
+  // apply while the menu is open; a hover that moves the highlight and any
+  // click repaint the scene. The subscription is torn down on unmount.
+  useEffect(() => {
+    return renderer.onMouse((event) => {
+      const menu = nodeRef.current;
+      if (menu === null || menu.props.open !== true) return;
+      if (event.kind === "moved") {
+        const before = typeof menu.props.highlighted === "number"
+          ? menu.props.highlighted
+          : 0;
+        const next = menuHover(menu, event.row);
+        if (next.highlighted !== before) renderer.render();
+      } else if (event.kind === "down_left") {
+        const next = menuClick(menu, event.row);
+        renderer.render();
+        if (next.activated !== null) onSelectRef.current?.(next);
+      }
+    });
+  }, [renderer]);
+
+  return createElement(HOST_MENU, {
+    ...(resolveTheme(theme, { ...props, component: "menu" }) as MenuProps),
     ref: nodeRef,
   });
 }
@@ -1596,6 +1719,8 @@ export type {
   FocusHandle,
   KeyEvent,
   KeyHandler,
+  MenuItem,
+  MenuState,
   Node,
   NodeProps,
   PanelDragHandle,
@@ -1628,6 +1753,7 @@ export type {
 export {
   activateTab,
   closeTab,
+  closeMenu,
   closeModal,
   copySelection,
   defaultTheme,
@@ -1643,7 +1769,12 @@ export {
   FocusManager,
   isStreamFollowing,
   mergeTheme,
+  MENU_Z_INDEX,
+  menuClick,
+  menuHover,
+  menuKey,
   MODAL_Z_INDEX,
+  openMenu,
   openModal,
   pasteInto,
   pasteIntoTextarea,

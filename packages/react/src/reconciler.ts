@@ -13,7 +13,8 @@
  * - `createInstance(type, props)` -> tern node via `Box(props)` /
  *   `Text(props)` / `StreamingText(props)` / `Input(props)` / `Spinner(props)`
  *   / `StatusBar(props)` / `Panels(props)` / `DiffView(props)` /
- *   `Select(props)` / `ScrollView(props)` / `Table(props)` / `Modal(props)`.
+ *   `Select(props)` / `Menu(props)` / `ScrollView(props)` / `Table(props)` /
+ *   `Modal(props)`.
  * - `createTextInstance` throws — tern requires an explicit `<Text>` element,
  *   bare string children are rejected at render time.
  * - `appendChild` / `insertBefore` / `removeChild` -> tern tree ops. The core
@@ -58,6 +59,7 @@ import {
   DiffView as CoreDiffView,
   Input as CoreInput,
   Modal as CoreModal,
+  Menu as CoreMenu,
   Panels as CorePanels,
   Progress as CoreProgress,
   ScrollView as CoreScrollView,
@@ -78,6 +80,7 @@ import {
   type FocusManager,
   type KeyEvent,
   type ModalProps,
+  type MenuProps,
   type Node,
   type NodeProps,
   type PanelsProps,
@@ -230,6 +233,15 @@ const SPINNER_PROPS = new Set(["interval"]);
 const SELECT_PROPS = new Set(["onChange", "onConfirm", "onDismiss", "focusId", "focusManager"]);
 
 /**
+ * Component-consumed props of `<Menu>` that must never reach a scene node:
+ * the callbacks and the focus wiring (mirroring `<Select>`). The `items`
+ * model and the `floating`/`submenu`/state props flow through to the core
+ * factory, which consumes the bookkeeping keys itself (the item model is JS
+ * bookkeeping, `floating` maps to the root box's `z_index`).
+ */
+const MENU_PROPS = new Set(["onSelect", "onDismiss", "focusId", "focusManager"]);
+
+/**
  * Component-consumed props of `<Modal>` that must never reach a scene node:
  * `content` is the core `Node[]` modal body (JS bookkeeping the core factory
  * consumes, mirroring `<Panels>`' `panels`). The open/backdrop/z_index state
@@ -269,6 +281,7 @@ export function toNodeProps(props: TernProps, type?: string): NodeProps {
     if (type === "textarea" && TEXTAREA_PROPS.has(key)) continue;
     if (type === "spinner" && SPINNER_PROPS.has(key)) continue;
     if (type === "select" && SELECT_PROPS.has(key)) continue;
+    if (type === "menu" && MENU_PROPS.has(key)) continue;
     if (type === "modal" && MODAL_PROPS.has(key)) continue;
     if (type === "tabs" && TABS_PROPS.has(key)) continue;
     if (type === "tree" && TREE_PROPS.has(key)) continue;
@@ -390,6 +403,10 @@ export const hostConfig: HostConfig = {
         // The options list is JS bookkeeping the core factory consumes;
         // `SelectProps` requires it while `NodeProps` is an open record.
         return CoreSelect(nodeProps as SelectProps);
+      case "menu":
+        // The item model is JS bookkeeping the core factory consumes;
+        // `MenuProps` requires it while `NodeProps` is an open record.
+        return CoreMenu(nodeProps as MenuProps);
       case "scroll_view":
         // The clip/scroll region props and the scrollbar flag flow to the
         // core factory; React children are appended after the (absolutely
