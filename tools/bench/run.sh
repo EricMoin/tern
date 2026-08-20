@@ -48,9 +48,23 @@
 #
 # Exit codes: 0 when both benches ran (the TS bench may SKIP headlessly and
 # still exit 0, per its contract); non-zero when the Rust bench fails or the
-# script itself errors.
+# script itself errors. With --check the script also gates every Rust metric
+# against its recorded constant (±10% tolerance, see section 7) and exits 1
+# with a GATE FAIL list when any metric regressed past the tolerance; the TS
+# bench is never gated (it self-skips headlessly, and locally its absolute
+# numbers depend on the built addon profile).
 
 set -u
+
+# --- Mode ------------------------------------------------------------------
+# --check turns the run into a regression gate (section 7): after the Rust
+# bench parses its metrics, each is compared against the recorded constants
+# (the baseline block below) with a 10% tolerance, and the script exits
+# non-zero if any metric exceeded it. Plain runs (no args) are unchanged.
+CHECK_MODE=0
+if [ "${1:-}" = "--check" ]; then
+  CHECK_MODE=1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -58,7 +72,9 @@ cd "$REPO_ROOT" || { echo "run.sh: cannot cd to repo root $REPO_ROOT" >&2; exit 
 
 # --- Recorded baselines (from tools/bench/BASELINE.md, 2026-08-04) ---------
 # Keep these in sync with the tables in BASELINE.md. They are the canonical
-# numbers recorded when the harness landed.
+# numbers recorded when the harness landed. They double as the gate constants
+# for --check mode (section 7): each Rust metric parsed below is compared
+# against its R*_BASE_* counterpart with a 10% tolerance.
 #
 # Round 1 (the canonical pre-optimization baseline, recorded when the harness
 # landed; the round-1 optimization round measured ~0.5% Rust / ~1.8% TS p50
@@ -166,6 +182,44 @@ row_ratio() {
     ratio="$(awk -v n="$after" -v o="$before" 'BEGIN { if (o == 0) { print "n/a"; exit } printf "x%.1f", n / o }')"
   fi
   printf "  %-30s %-7s %-14s %-14s %s\n" "$metric" "$unit" "$before" "$after" "$ratio"
+}
+
+# --- Regression-gate helpers (--check mode, section 7) ----------------------
+
+# Print one gate-table row: <metric> <unit> <constant> <now> <status>
+gate_row() {
+  local metric="$1" unit="$2" base="$3" now="$4" status="$5"
+  local delta
+  if [ -z "$now" ] || [ -z "$base" ]; then
+    delta="n/a"
+  else
+    delta="$(pct_change "$now" "$base")"
+  fi
+  printf "  %-30s %-7s %-14s %-14s %-8s %s\n" "$metric" "$unit" "$base" "$now" "$delta" "$status"
+}
+
+# Compare one Rust metric against its recorded constant with a 10% tolerance
+# and print its gate-table row. `hib` = 1 for higher-is-better metrics
+# (throughput: a drop below 90% of the constant fails), 0 for
+# lower-is-better (times/bytes: a rise above 110% fails). Exceedances are
+# appended to $GATE_FAILS; a missing fresh value is marked "skip" and never
+# fails the gate (the RUST_P50 parse guard above already exits on a
+# fundamentally unparseable run).
+gate_metric() {
+  local label="$1" unit="$2" base="$3" now="$4" hib="${5:-0}"
+  local status
+  if [ -z "$now" ]; then
+    status="skip"
+  elif awk -v n="$now" -v o="$base" -v hib="$hib" 'BEGIN {
+      if (hib == 1) { if (n < o * 0.9) exit 1 } else { if (n > o * 1.1) exit 1 }
+      exit 0 }'; then
+    status="pass"
+  else
+    status="FAIL"
+    GATE_FAILS="$GATE_FAILS
+  $label — now $now $unit vs constant $base $unit ($(pct_change "$now" "$base"))"
+  fi
+  gate_row "$label" "$unit" "$base" "$now" "$status"
 }
 
 # Extract the n-th occurrence of a numeric metric from a text blob:
@@ -445,4 +499,59 @@ echo "    scenarios never exercise. Scenario 5's bytes/frame (native"
 echo "    last_flush_bytes, fed by the backend queue) and the Rust scroll"
 echo "    bytes/frame (sink length) quantify the ANSI byte cost of a"
 echo "    full-repaint frame. Round 4's optimization work must beat these."
+echo "  - Round 5 (M2 acceptance 1): the scroll-churn bench and TS scenario 4"
+echo "    now flush through the terminal-native scroll path when the diff is a"
+echo "    clean one-row shift (detect_vertical_scroll + flush_scroll_to: one"
+echo "    DECSTBM + SU scroll command plus the newly exposed row) instead of a"
+echo "    full repaint — Rust scroll bytes/frame dropped 4904 -> ~203 B"
+echo "    (≥60% target met). The time rows in the round-4 table carry the"
+echo "    +17-24% drift from ~18 commits since the 2026-08-05 recording (the"
+echo "    reason the R5_* gate constants were refreshed — see the constants"
+echo "    block); the TS s4 bytes baseline was not recorded in round 4 (n/a)."
+echo "    The TS s4 bytes number shown is the fallback full-repaint flush when"
+echo "    the bench's PTY cannot answer the capability probe (scrollRegion"
+echo "    off); on a real terminal the scroll path fires and lastFlushBytes"
+echo "    reports the optimized stream."
 echo "  - Full methodology: tools/bench/BASELINE.md."
+
+# --- 7. Regression gate (--check mode) --------------------------------------
+#
+# The gate reuses the Rust metrics parsed in section 1 (the RUST_* / R2_RUST_*
+# / R4_RUST_* variables) and compares each against its recorded constant from
+# the baseline block at the top with a 10% tolerance. Every Rust metric is a
+# time (ms) or a byte count — lower is better — except throughput
+# (cells/sec), which is higher-is-better and fails when it drops below 90% of
+# the constant. The TS bench is not gated: it self-skips headlessly per its
+# contract (render.bench.ts `skip()`), and locally its absolute numbers
+# depend on the built addon profile, so a TS gate would be flaky. The
+# constants are the round-5 set (R5_* — refreshed 2026-08-20 after the
+# scroll-region fast path landed; the round-1/2/4 constants went stale with
+# ~18 commits of drift, which made the gate fail on the then-current tree).
+
+if [ "$CHECK_MODE" = "1" ]; then
+  echo
+  echo "======================================================================"
+  echo "Regression gate (--check): Rust metrics vs recorded constants (±10%)"
+  echo "======================================================================"
+  printf "  %-30s %-7s %-14s %-14s %-8s %s\n" "metric" "unit" "constant" "now" "delta" "status"
+
+  GATE_FAILS=""
+  gate_metric "Rust p50 frame (static)" "ms" "$R5_RUST_STATIC_P50_MS" "$RUST_P50" 0
+  gate_metric "Rust mean frame (static)" "ms" "$R5_RUST_STATIC_MEAN_MS" "$RUST_MEAN" 0
+  gate_metric "Rust p95 frame (static)" "ms" "$R5_RUST_STATIC_P95_MS" "$RUST_P95" 0
+  gate_metric "Rust throughput (static)" "cells/s" "$R5_RUST_STATIC_CELLS" "$RUST_CELLS" 1
+  gate_metric "Rust single-cell mean" "ms" "$R5_RUST_SC_MEAN_MS" "$R2_RUST_MEAN" 0
+  gate_metric "Rust single-cell p50" "ms" "$R5_RUST_SC_P50_MS" "$R2_RUST_P50" 0
+  gate_metric "Rust scroll mean" "ms" "$R5_RUST_BASE_MEAN_MS" "$R4_RUST_MEAN" 0
+  gate_metric "Rust scroll p50" "ms" "$R5_RUST_BASE_P50_MS" "$R4_RUST_P50" 0
+  gate_metric "Rust scroll bytes/frame" "B" "$R5_RUST_BASE_BYTES" "$R4_RUST_BYTES" 0
+
+  echo "======================================================================"
+  if [ -n "$GATE_FAILS" ]; then
+    echo "GATE FAIL — the following Rust metrics exceeded the ±10% tolerance:"
+    printf '%s\n' "$GATE_FAILS"
+    exit 1
+  fi
+  echo "GATE PASS — all Rust metrics within 10% of the recorded constants."
+  exit 0
+fi

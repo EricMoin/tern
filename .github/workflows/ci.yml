@@ -84,6 +84,42 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace
 
+  bench:
+    # Render-bench regression gate (M2): re-runs the Rust compositor bench
+    # and gates every metric against the recorded constants (±10%) via
+    # tools/bench/run.sh --check. Wired to the same rust path filter as the
+    # rust job — the bench lives under src/core/tern-components.
+    # The bench_timing cargo test runs as its own step first so a bench
+    # binary compile/failure surfaces as that step instead of inside run.sh's
+    # captured output; run.sh --check then re-runs it (cargo cache makes the
+    # second invocation fast) and applies the gate. The TS bench self-skips
+    # headlessly (render.bench.ts `skip()` contract — no addon / unusable
+    # terminal on a bare ubuntu runner), so only the Rust segment is gated.
+    name: Bench (Rust regression gate)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    steps:
+      - uses: actions/checkout@v7
+
+      # Same pinned toolchain + cargo cache as the rust job: rustflags is
+      # cleared so the release bench build matches a plain local invocation.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+          # Cargo caching is handled by Swatinem/rust-cache below; disabling
+          # the built-in cache (default on) avoids two overlapping cache
+          # entries for the same cargo registry and target dirs.
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run Rust bench (bench_timing)
+        run: cargo test --release -p tern-components --test bench_timing -- --ignored --nocapture
+
+      - name: Regression gate (run.sh --check)
+        run: bash tools/bench/run.sh --check
+
   js:
     name: JS workspace (check + test)
     runs-on: ubuntu-latest
