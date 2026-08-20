@@ -2942,7 +2942,7 @@ function assertSolidSelection(
   }
 }
 
-Deno.test("subscribeSelection wires the core selection state machine (down/drag/up, copy-on-release, double-click word select)", () => {
+Deno.test("subscribeSelection wires the core selection state machine (down/drag/up, copy-on-release, persistent overlay, double-click word select)", () => {
   setAddonForTesting(streamFakeAddon);
   try {
     const renderer = createRenderer();
@@ -2973,18 +2973,20 @@ Deno.test("subscribeSelection wires the core selection state machine (down/drag/
     assertSolidSelection(sel(), { col1: 6, row1: 0, col2: 10, row2: 0 });
     if (renderCount() !== 2) throw new Error(`a drag must re-render (renders = ${renderCount()})`);
 
-    // An up_* release copies the selected text (copy-on-release) and clears
-    // the overlay (clear-on-release) — the transient highlight leaves no
-    // reversed cells after the gesture.
+    // An up_* release copies the selected text (copy-on-release) and ends
+    // the session but leaves the overlay up (persistent selection): the
+    // highlight survives until escape or a bare press outside it
+    // (click-elsewhere) clears it.
     emit("up_left", 10, 0);
     if (clipboard() !== "world") throw new Error(`copy-on-release = ${JSON.stringify(clipboard())}`);
-    assertSolidSelection(sel(), null);
+    assertSolidSelection(sel(), { col1: 6, row1: 0, col2: 10, row2: 0 });
     if (renderCount() !== 3) throw new Error(`an up must re-render (renders = ${renderCount()})`);
 
-    // A non-mouse event falls through: no selection, no re-render.
+    // A non-mouse event falls through: the persistent overlay is untouched
+    // and nothing re-renders.
     const rendersBefore = renderCount();
     dispatchEvent({ type: "key", key: { name: "char", char: "q", ctrl: false, alt: false, shift: false } });
-    assertSolidSelection(sel(), null);
+    assertSolidSelection(sel(), { col1: 6, row1: 0, col2: 10, row2: 0 });
     if (renderCount() !== rendersBefore) throw new Error("a key event must not re-render");
 
     // A double-click (a second press on a nearby cell within the window)

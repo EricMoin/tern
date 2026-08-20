@@ -1422,8 +1422,10 @@ export function subscribeWheelScroll(renderer: Renderer, view: Node): () => void
  * under the pointer), each `drag_left` extends the selection to the dragged
  * cell (`dragSelection`), and any `up_*` release copies the selected text
  * to the clipboard and ends the session (`copySelection` before
- * `endSelection` — copy-on-release: the overlay is clear-on-release, so the
- * text must be read while the gesture is still active). The native overlay
+ * `endSelection` — copy-on-release). The overlay is persistent after
+ * release: the highlight survives until `escape` (via the core
+ * `selectionKey`), a bare press outside it (click-elsewhere), or a new
+ * selection replaces it. The native overlay
  * paints at the next `render()`, so every applied step re-invokes
  * `renderer.render()`; non-mouse events fall through untouched. Hosts that
  * want a copy *key* can route the core `selectionKey` (ctrl+shift+c)
