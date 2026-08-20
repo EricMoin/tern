@@ -36,8 +36,10 @@ pub fn create_node(
 
 /// Token-highlight `source` in `language` (a Markdown fence info string:
 /// `"rust"` / `"typescript"` / `"ts"` / `"tsx"` / `"javascript"` / `"js"` /
-/// `"json"` / `"bash"` / `"shell"` / `"sh"` / `"zsh"`) into a complete span
-/// stream for a code fence or a `streaming_text` node.
+/// `"json"` / `"bash"` / `"shell"` / `"sh"` / `"zsh"` / `"python"` / `"py"` /
+/// `"go"` / `"golang"` / `"toml"` / `"yaml"` / `"yml"` / `"c"` / `"cpp"` /
+/// `"c++"` / `"cxx"`) into a complete span stream for a code fence or a
+/// `streaming_text` node.
 ///
 /// The returned spans cover every byte of `source` (gaps carry no style) and
 /// merge adjacent same-style runs, so concatenating their `text` reconstructs
