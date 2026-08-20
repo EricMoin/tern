@@ -30,6 +30,7 @@ import {
   setSelectionClockForTesting,
   useFocus as coreUseFocus,
   type KeyEvent,
+  type MouseEventJs,
   type Node,
   type Renderer,
   type ResizeHandler,
@@ -48,6 +49,7 @@ import {
   DiffView,
   FocusManagerContext,
   Input,
+  Menu,
   Modal,
   Panels,
   Progress,
@@ -106,6 +108,7 @@ function mockRenderer(): {
   resizeHandlers: Set<ResizeHandler>;
   focusHandlers: Set<(event: { focus_gained: boolean }) => void>;
   pasteHandlers: Set<(text: string) => void>;
+  mouseHandlers: Set<(event: MouseEventJs) => void>;
 } {
   const renderCalls: number[] = [];
   // The reported terminal size: `renderer.size` in the real renderer reads
@@ -116,6 +119,7 @@ function mockRenderer(): {
   const resizeHandlers = new Set<ResizeHandler>();
   const focusHandlers = new Set<(event: { focus_gained: boolean }) => void>();
   const pasteHandlers = new Set<(text: string) => void>();
+  const mouseHandlers = new Set<(event: MouseEventJs) => void>();
   const root = CoreBox();
   const renderer = {
     root,
@@ -141,13 +145,21 @@ function mockRenderer(): {
       pasteHandlers.add(handler);
       return () => pasteHandlers.delete(handler);
     },
+    onMouse: (handler: (event: MouseEventJs) => void) => {
+      mouseHandlers.add(handler);
+      return () => mouseHandlers.delete(handler);
+    },
     destroy: () => {},
   } as unknown as Renderer;
-  return { renderer, root, renderCalls, size, keyHandlers, resizeHandlers, focusHandlers, pasteHandlers };
+  return { renderer, root, renderCalls, size, keyHandlers, resizeHandlers, focusHandlers, pasteHandlers, mouseHandlers };
 }
 
 function keyEvent(over: Partial<KeyEvent> = {}): KeyEvent {
   return { name: "char", char: "q", ctrl: false, alt: false, shift: false, ...over };
+}
+
+function mouseEvent(kind: string, column: number, row: number): MouseEventJs {
+  return { kind, column, row, ctrl: false, alt: false, shift: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +181,7 @@ Deno.test("public API surface is exported", () => {
     Text,
     StreamingText,
     Input,
+    Menu,
     Spinner,
     StatusBar,
     Panels,
@@ -2551,6 +2564,201 @@ Deno.test("Select floating mode sets a z_index prop", async () => {
   if (!select || select.type !== "select") throw new Error("expected a select node");
   if (select.props.z_index !== 0) throw new Error(`z_index = ${select.props.z_index}`);
   if ("floating" in select.props) throw new Error("floating must not reach the scene props");
+});
+
+Deno.test("Menu materializes with item rows and strips component props", async () => {
+  const { renderer, root } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+
+  await act(() => {
+    ternRoot.render(
+      createElement(Menu, {
+        items: [
+          { label: "New" },
+          { label: "Open", children: [{ label: "File" }, { label: "Dir" }] },
+          { label: "Quit" },
+        ],
+        focusId: "m",
+        onSelect: () => {},
+        onDismiss: () => {},
+      }),
+    );
+  });
+
+  const menu = root.children[0];
+  if (!menu || menu.type !== "menu") throw new Error("expected a menu node");
+  // Component-consumed props must never reach the scene node.
+  for (const key of ["focusId", "focusManager", "onSelect", "onDismiss"]) {
+    if (key in menu.props) throw new Error(`menu component prop leaked: ${key}`);
+  }
+  // The item model is JS bookkeeping, never scene props.
+  if ("items" in menu.props) throw new Error("items must not reach the scene props");
+  // One text leaf per visible item (the submenu branch is collapsed).
+  if (menu.children.length !== 3) throw new Error(`rows = ${menu.children.length}`);
+  if (menu.children[0]?.props.text !== "New" || menu.children[1]?.props.text !== "Open") {
+    throw new Error(`rows = ${menu.children.map((c) => c.props.text).join(",")}`);
+  }
+  if (menu.children[2]?.props.text !== "Quit") {
+    throw new Error(`rows = ${menu.children.map((c) => c.props.text).join(",")}`);
+  }
+  // The highlighted (first) row is reversed; the others are not.
+  if (menu.children[0]?.props.reversed !== true) {
+    throw new Error("the highlighted row must be reversed");
+  }
+  if (menu.children[1]?.props.reversed === true || menu.children[2]?.props.reversed === true) {
+    throw new Error("only the highlighted row may be reversed");
+  }
+});
+
+Deno.test("a focused Menu receives routed keys: down moves the highlight, enter selects, escape dismisses", async () => {
+  const { renderer, root, keyHandlers } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const manager = new FocusManager();
+  const selects: Array<{ activated: string | null; open: boolean }> = [];
+  const dismisses: Array<{ open: boolean }> = [];
+  // Length read through functions: TS narrows a const-typed empty array's
+  // `length` to 0 (the pushes happen inside closures it cannot see).
+  const selectCount = () => selects.length;
+  const dismissCount = () => dismisses.length;
+
+  function App() {
+    // The tree-level key subscription routes each key through the manager
+    // before falling back to its own (no-op) handler.
+    useInput(() => {}, { focusManager: manager });
+    return createElement(Menu, {
+      items: [
+        { label: "New", id: "new" },
+        { label: "Open", id: "open", children: [{ label: "File", id: "file" }] },
+        { label: "Quit", id: "quit" },
+      ],
+      focusId: "menu",
+      focusManager: manager,
+      onSelect: (state) => selects.push(state),
+      onDismiss: (state) => dismisses.push(state),
+    });
+  }
+
+  await act(() => {
+    ternRoot.render(createElement(App));
+  });
+
+  if (!manager.has("menu")) throw new Error("menu must register under focusId");
+  const menu = root.children[0]!;
+  // Accessors: menuKey mutates the node in place, which TS's control flow
+  // cannot see — reading through functions defeats the stale narrowing.
+  const highlightOf = () => menu.props.highlighted as number;
+
+  // Not focused: keys fall through to the tree handler (a no-op here).
+  for (const handler of keyHandlers) handler(keyEvent({ name: "down" }));
+  if (highlightOf() !== 0 || selectCount() !== 0) {
+    throw new Error("unfocused menu must not receive keys");
+  }
+
+  // Focused: down moves the highlight (clamped into the visible items).
+  if (!manager.focus("menu")) throw new Error("focus(menu) must succeed");
+  for (const handler of keyHandlers) handler(keyEvent({ name: "down" }));
+  if (highlightOf() !== 1) throw new Error(`highlight = ${highlightOf()}`);
+  // The moved highlight is stamped on the rebuilt rows.
+  if (menu.children[1]?.props.reversed !== true) {
+    throw new Error("the highlighted row must be reversed after down");
+  }
+
+  // Down again onto the leaf row, then Enter activates it and fires
+  // onSelect with the item's key.
+  for (const handler of keyHandlers) handler(keyEvent({ name: "down" }));
+  if (highlightOf() !== 2) throw new Error(`highlight = ${highlightOf()}`);
+  for (const handler of keyHandlers) handler(keyEvent({ name: "enter" }));
+  if (selectCount() !== 1 || selects[0]!.activated !== "quit") {
+    throw new Error(`onSelect = ${JSON.stringify(selects)}`);
+  }
+  if (selects[0]!.open !== false) throw new Error("a leaf activation must dismiss the menu");
+
+  // Escape fires onDismiss without a selection.
+  for (const handler of keyHandlers) handler(keyEvent({ name: "escape" }));
+  if (dismissCount() !== 1 || dismisses[0]!.open !== false) {
+    throw new Error(`onDismiss = ${JSON.stringify(dismisses)}`);
+  }
+  if (selectCount() !== 1) throw new Error("escape must not fire onSelect");
+
+  await act(() => {
+    ternRoot.unmount();
+  });
+  if (manager.has("menu")) throw new Error("menu must unregister on unmount");
+  if (manager.activeId !== null) throw new Error("active focus must clear on unregister");
+});
+
+Deno.test("Menu mouse hover/click drive menuHover/menuClick while open; a closed menu ignores them", async () => {
+  const { renderer, root, mouseHandlers, renderCalls } = mockRenderer();
+  const ternRoot = createRoot(renderer);
+  const selects: Array<{ activated: string | null }> = [];
+  // Length read through a function: TS narrows a const-typed empty array's
+  // `length` to 0 (the pushes happen inside closures it cannot see).
+  const selectCount = () => selects.length;
+
+  await act(() => {
+    ternRoot.render(
+      createElement(Menu, {
+        items: [
+          { label: "New", id: "new" },
+          { label: "Open", id: "open", children: [{ label: "File", id: "file" }] },
+          { label: "Quit", id: "quit" },
+        ],
+        open: true,
+        onSelect: (state) => selects.push(state),
+      }),
+    );
+  });
+  await act(() => {}); // flush the mount effect (mouse subscription)
+
+  const menu = root.children[0]!;
+  const highlightOf = () => menu.props.highlighted as number;
+  const emit = (kind: string, column: number, row: number): void => {
+    for (const handler of mouseHandlers) handler(mouseEvent(kind, column, row));
+  };
+
+  // A hover on row 2 moves the highlight there (menuHover).
+  emit("moved", 0, 2);
+  if (highlightOf() !== 2) throw new Error(`hover highlight = ${highlightOf()}`);
+
+  // Hovering a branch row moves the highlight back without opening it.
+  emit("moved", 0, 1);
+  if (highlightOf() !== 1) throw new Error(`branch hover = ${highlightOf()}`);
+
+  // A click on a branch opens its submenu — the inline rows grow to include
+  // the child (and no leaf activates).
+  emit("down_left", 0, 1);
+  if (selectCount() !== 0) throw new Error("a branch click must not activate");
+  if (menu.children.length !== 4) throw new Error(`rows after branch click = ${menu.children.length}`);
+  if (menu.children[2]?.props.text !== "  File") {
+    throw new Error(`child row = ${menu.children[2]?.props.text}`);
+  }
+
+  // A click on the now-visible leaf activates it and fires onSelect; the
+  // click repaints the scene.
+  const before = renderCalls.length;
+  emit("down_left", 0, 3);
+  if (selectCount() !== 1 || selects[0]!.activated !== "quit") {
+    throw new Error(`click onSelect = ${JSON.stringify(selects)}`);
+  }
+  if (renderCalls.length <= before) throw new Error("a click must repaint the scene");
+
+  // A closed menu ignores both hover and click: the leaf activation
+  // dismissed the menu, so the highlight stays put and no callback fires.
+  const closedHighlight = () => menu.props.highlighted as number;
+  const closedSelects = selectCount();
+  const closedRenders = renderCalls.length;
+  emit("moved", 0, 99);
+  emit("down_left", 0, 99);
+  if (closedHighlight() !== 3) throw new Error("a closed menu must ignore hover");
+  if (selectCount() !== closedSelects) throw new Error("a closed menu must ignore clicks");
+  if (renderCalls.length !== closedRenders) {
+    throw new Error("a closed menu must not repaint");
+  }
+
+  await act(() => {
+    ternRoot.unmount();
+  });
+  if (mouseHandlers.size !== 0) throw new Error("the mouse subscription must detach on unmount");
 });
 
 Deno.test("Modal host materializes an overlay and strips the content prop", async () => {
