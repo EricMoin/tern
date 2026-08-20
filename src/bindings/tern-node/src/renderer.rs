@@ -83,6 +83,15 @@ pub(crate) struct RendererInner {
     /// alternate screen, event listening, or a window title (its backend is
     /// an in-memory no-op), so `destroy` must skip terminal teardown.
     pub(crate) headless: bool,
+    /// Whether the scroll-region (DECSTBM) fast path may be used: the
+    /// caller's opt-in (`scroll_optimization`, default on) AND the
+    /// terminal's probe-derived scroll-region capability — `false` for a
+    /// headless renderer (nothing to scroll), tmux/screen (DECSTBM quirks),
+    /// and unknown terminals (see
+    /// [`should_scroll_optimize`](crate::should_scroll_optimize) and the
+    /// `scroll_region` capability on [`TuiRenderer::capabilities`]). The
+    /// render path gates vertical-scroll detection on this.
+    pub(crate) scroll_region: bool,
     /// Whether the kitty keyboard protocol enhancement was pushed — `destroy`
     /// pops it so the terminal returns to its previous state.
     pub(crate) keyboard_enhancement: bool,
@@ -212,6 +221,25 @@ pub(crate) fn should_push_keyboard_enhancement(
     option && !headless && caps.kitty_keyboard
 }
 
+/// Whether the scroll-region (DECSTBM) fast path is enabled for this
+/// renderer.
+///
+/// The pure decision behind the constructor's scroll gate (mirroring
+/// [`should_push_keyboard_enhancement`]): the path is enabled only when the
+/// caller opted in (`scroll_optimization`, default on), the renderer is not
+/// `headless` (nothing to scroll; a headless flush is a no-op either way),
+/// and the interactive probe reports the terminal supports scroll-region
+/// painting (`caps.scroll_region` — `false` for tmux/screen, whose DECSTBM
+/// quirks make scroll-region painting unsafe, and for an unknown or silent
+/// terminal, which keeps the full-redraw fallback).
+pub(crate) fn should_scroll_optimize(
+    option: bool,
+    headless: bool,
+    caps: &TerminalCapabilities,
+) -> bool {
+    option && !headless && caps.scroll_region
+}
+
 /// Whether a non-headless renderer must refuse to construct on this
 /// terminal: `Some(message)` when construction must error, `None` when the
 /// terminal is interactive.
@@ -260,6 +288,11 @@ impl TuiRenderer {
         // reporting kitty keyboard support — see
         // `should_push_keyboard_enhancement`.
         let keyboard_enhancement = options.keyboard_enhancement.unwrap_or(true);
+        // The caller's opt-in for the scroll-region (DECSTBM) fast path
+        // (default on). Whether the path is actually enabled additionally
+        // requires a non-headless renderer and the interactive probe
+        // reporting scroll-region support — see `should_scroll_optimize`.
+        let scroll_optimization = options.scroll_optimization.unwrap_or(true);
         // A headless renderer never touches a terminal: no raw mode, no
         // alternate screen, no event listening, no title. Its in-memory
         // backend reports the configured virtual size (default 80x24) and
@@ -341,6 +374,11 @@ impl TuiRenderer {
             exit_on_ctrl_c: options.exit_on_ctrl_c.unwrap_or(false),
             use_alt_screen,
             headless,
+            scroll_region: should_scroll_optimize(
+                scroll_optimization,
+                headless,
+                tern_terminal::probe(),
+            ),
             keyboard_enhancement: keyboard_enhancement_pushed,
             any_event_mouse: false,
             destroyed: false,
@@ -423,7 +461,10 @@ impl TuiRenderer {
 
     /// Paint the shared scene into a fresh buffer at the current terminal
     /// size and flush the minimal diff (vs the previous frame) to the
-    /// terminal.
+    /// terminal — a single DECSTBM + SU/SD scroll command plus the newly
+    /// exposed rows when the diff is exactly a vertical scroll of a
+    /// full-width row band and the terminal supports scroll-region painting
+    /// (the M2.1 fast path, opt-in via `scroll_optimization`).
     ///
     /// No-op fast path: when the scene has not mutated since the last paint
     /// and the viewport is unchanged, the previous frame is still on screen,
@@ -492,23 +533,69 @@ impl TuiRenderer {
             Some(prev) => buffer.diff_from(prev),
             None => diff(&Buffer::new(w, h), &buffer),
         };
+        // The scroll-region fast path (roadmap M2.1): when the frame diff is
+        // exactly a vertical scroll of a full-width row band, flush one
+        // DECSTBM + SU/SD scroll command plus the newly exposed rows instead
+        // of repainting every changed cell. `detect_vertical_scroll` returns
+        // Some only when every row of the band's overlap matches the previous
+        // frame `rows` away cell-for-cell — the guarantee that the terminal's
+        // own scroll reproduces those rows exactly (the diff's updates there
+        // are the moved content, already correct once the scroll lands) — so
+        // the exposed band, together with the scroll, covers ALL updates:
+        // nothing outside it needs repainting. The diff still lands in
+        // `inner.last` in full (below), so post-scroll frames diff against
+        // the correct retained frame. Gated on the caller's opt-in
+        // (`scroll_optimization`, default on) and the terminal's
+        // probe-derived scroll-region capability, both folded into
+        // `inner.scroll_region` at construction; a set caret override
+        // bypasses the path (the scroll flush parks the cursor without
+        // shape/visibility control).
+        let scroll_flush = match &inner.last {
+            Some(prev) if inner.scroll_region && inner.cursor.is_none() && !updates.is_empty() => {
+                let min_y = updates.iter().map(|u| u.y).min().expect("non-empty updates");
+                let max_y = updates.iter().map(|u| u.y).max().expect("non-empty updates");
+                // The changed row band: min/max of the update rows, expanded
+                // to the full viewport width (DECSTBM scrolls whole rows).
+                let band = Rect::new(0, min_y as i32, w as u32, (max_y - min_y) as u32 + 1);
+                detect_vertical_scroll(prev, &buffer, band, w).and_then(|shift| {
+                    let exposed = exposed_band_updates(&updates, &shift);
+                    if exposed.is_empty() {
+                        // Nothing new to repaint — keep the diff flush.
+                        return None;
+                    }
+                    Some((
+                        ScrollOp {
+                            top: shift.region.y as u16,
+                            bottom: (shift.region.bottom() - 1) as u16,
+                            rows: shift.rows as u16,
+                            up: shift.up,
+                        },
+                        exposed,
+                    ))
+                })
+            }
+            _ => None,
+        };
         // A set cursor flushes through the cursor-aware path — the frame's
         // diff, then MoveTo + SetCursorStyle + Show/Hide for the caret — so
-        // the hardware caret tracks the model. With no cursor set, the legacy
-        // position-only flush (parking at the top-left, no visibility or
-        // shape control) is used, byte-identical to before the feature.
-        let flushed = {
-            let cursor = inner.cursor.clone();
-            match cursor {
-                Some(cursor) => inner
-                    .backend
-                    .flush_diff_with_cursor(&updates, cursor)
-                    .map_err(|e| Error::from_reason(format!("flush: {e}")))?,
-                None => inner
-                    .backend
-                    .flush_diff(&updates, (0, 0))
-                    .map_err(|e| Error::from_reason(format!("flush: {e}")))?,
-            }
+        // the hardware caret tracks the model. With no cursor set, a detected
+        // scroll takes the scroll-region flush (one scroll command + the
+        // exposed band); otherwise the legacy position-only flush (parking at
+        // the top-left, no visibility or shape control) is used, byte-
+        // identical to before the feature.
+        let flushed = match (inner.cursor.clone(), scroll_flush) {
+            (None, Some((op, exposed))) => inner
+                .backend
+                .flush_scroll(&op, &exposed, (0, 0))
+                .map_err(|e| Error::from_reason(format!("flush: {e}")))?,
+            (Some(cursor), _) => inner
+                .backend
+                .flush_diff_with_cursor(&updates, cursor)
+                .map_err(|e| Error::from_reason(format!("flush: {e}")))?,
+            (None, None) => inner
+                .backend
+                .flush_diff(&updates, (0, 0))
+                .map_err(|e| Error::from_reason(format!("flush: {e}")))?,
         };
         inner.last_flush_bytes = flushed as u64;
         inner.last = Some(buffer);
@@ -637,10 +724,10 @@ impl TuiRenderer {
     /// backend (`{ truecolor, colors }` — see `tern-terminal`'s
     /// `Backend::capabilities`) merged with the interactive probe report
     /// (`terminalIdentity`, `kittyKeyboard`, `kittyUnderline`, `osc52`,
-    /// `bracketedPaste`, `focusEvents`, `probed` — see `tern-terminal`'s
-    /// `probe::TerminalCapabilities`). The probe result is cached per
-    /// process; a probe skipped for a non-TTY or `TERM=dumb` reports
-    /// conservative defaults with `probed: false`.
+    /// `bracketedPaste`, `focusEvents`, `scrollRegion`, `probed` — see
+    /// `tern-terminal`'s `probe::TerminalCapabilities`). The probe result is
+    /// cached per process; a probe skipped for a non-TTY or `TERM=dumb`
+    /// reports conservative defaults with `probed: false`.
     #[napi(getter, js_name = "capabilities")]
     pub fn capabilities(&self) -> RendererCapabilities {
         let caps = tern_terminal::backend::capabilities();
@@ -654,6 +741,7 @@ impl TuiRenderer {
             osc52: probe.osc52,
             bracketed_paste: probe.bracketed_paste,
             focus_events: probe.focus_events,
+            scroll_region: probe.scroll_region,
             probed: probe.probed,
         }
     }

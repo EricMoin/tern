@@ -60,14 +60,14 @@ use napi::bindgen_prelude::*;
 #[cfg(feature = "push-events")]
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
-use tern_components::Compositor;
+use tern_components::{Compositor, detect_vertical_scroll, exposed_band_updates};
 use tern_core::buffer::{diff, Buffer};
 use tern_core::cell::CellUpdate;
 use tern_core::rect::Rect;
 use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene, Span};
 use tern_core::style::{BorderStyle, Modifiers, Style, UnderlineStyle};
 use tern_core::{Color, Cursor, Size};
-use tern_terminal::backend::Backend;
+use tern_terminal::backend::{Backend, ScrollOp};
 #[cfg(feature = "poll-fallback")]
 use tern_terminal::event as event_module;
 use tern_terminal::event::KeyName;

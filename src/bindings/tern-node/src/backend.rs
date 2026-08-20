@@ -38,6 +38,17 @@ pub(crate) trait RenderBackend: Send + Sync {
         updates: &[CellUpdate],
         cursor: Cursor,
     ) -> io::Result<usize>;
+    /// Flush a scroll-region operation to the terminal: set the DECSTBM
+    /// region, scroll it by `op.rows`, paint the exposed band, reset the
+    /// region, then park the cursor at `cursor_pos`. Returns the number of
+    /// bytes queued, like
+    /// [`flush_diff`](RenderBackend::flush_diff).
+    fn flush_scroll(
+        &mut self,
+        op: &ScrollOp,
+        updates: &[CellUpdate],
+        cursor_pos: (u16, u16),
+    ) -> io::Result<usize>;
     /// Set the terminal window title (OSC 0).
     fn set_title(&self, title: &str) -> io::Result<()>;
     /// Copy `text` to the system clipboard (OSC 52).
@@ -96,6 +107,15 @@ impl RenderBackend for Backend {
         cursor: Cursor,
     ) -> io::Result<usize> {
         Backend::flush_diff_with_cursor(self, updates, cursor)
+    }
+
+    fn flush_scroll(
+        &mut self,
+        op: &ScrollOp,
+        updates: &[CellUpdate],
+        cursor_pos: (u16, u16),
+    ) -> io::Result<usize> {
+        Backend::flush_scroll(self, op, updates, cursor_pos)
     }
 
     fn set_title(&self, title: &str) -> io::Result<()> {
@@ -186,6 +206,17 @@ impl RenderBackend for HeadlessBackend {
         &mut self,
         _updates: &[CellUpdate],
         _cursor: Cursor,
+    ) -> io::Result<usize> {
+        // Headless frames are never flushed to a terminal; report 0 bytes so
+        // `last_flush_bytes` stays honest about the absent I/O.
+        Ok(0)
+    }
+
+    fn flush_scroll(
+        &mut self,
+        _op: &ScrollOp,
+        _updates: &[CellUpdate],
+        _cursor_pos: (u16, u16),
     ) -> io::Result<usize> {
         // Headless frames are never flushed to a terminal; report 0 bytes so
         // `last_flush_bytes` stays honest about the absent I/O.
