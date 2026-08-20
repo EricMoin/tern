@@ -414,6 +414,14 @@ pub struct TuiRendererOptions {
     /// on destroy. Default `true`.
     #[napi(js_name = "keyboard_enhancement")]
     pub keyboard_enhancement: Option<bool>,
+    /// When `false`, the renderer skips the scroll-region (DECSTBM) fast
+    /// path: a frame whose diff is exactly a vertical scroll of a full-width
+    /// region flushes as one terminal scroll command plus the newly exposed
+    /// rows instead of a cell-by-cell repaint. Only active on terminals the
+    /// interactive probe reports as scroll-region safe (never tmux/screen).
+    /// Default `true`.
+    #[napi(js_name = "scroll_optimization")]
+    pub scroll_optimization: Option<bool>,
     /// The virtual width in cells for `headless` mode (default 80). Ignored
     /// when `headless` is `false`.
     #[napi(js_name = "width")]
@@ -466,6 +474,13 @@ pub struct RendererCapabilities {
     /// reported by the interactive probe. `false` keeps focus-event
     /// reporting disabled.
     pub focus_events: bool,
+    /// Whether the terminal supports scroll-region (DECSTBM) painting, as
+    /// derived from the interactive probe: a self-identified terminal that
+    /// is not tmux or screen (whose DECSTBM quirks make scroll-region
+    /// painting unsafe) gets the scroll optimization. `false` for an
+    /// unknown or silent terminal, which keeps the full-screen redraw
+    /// fallback.
+    pub scroll_region: bool,
     /// Whether the interactive probe parsed any query reply. `false` when
     /// the probe was skipped (non-TTY or `TERM=dumb`) or every query went
     /// unanswered (timeout / empty reply); every probe field is then a

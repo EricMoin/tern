@@ -284,6 +284,7 @@ fn render_to_buffer_styled_errors_when_destroyed() {
         exit_on_ctrl_c: false,
         use_alt_screen: false,
         headless: false,
+        scroll_region: false,
         keyboard_enhancement: false,
         any_event_mouse: false,
         destroyed: true,
@@ -364,6 +365,7 @@ fn render_to_buffer_errors_when_destroyed() {
         exit_on_ctrl_c: false,
         use_alt_screen: false,
         headless: false,
+        scroll_region: false,
         keyboard_enhancement: false,
         any_event_mouse: false,
         destroyed: true,
@@ -459,4 +461,111 @@ fn set_cursor_hides_and_rejects_unknown_shapes() {
     renderer.render().expect("render after rejected shape");
     assert_eq!(probe.cursor_flush_calls.load(Ordering::Relaxed), 1);
     assert_eq!(probe.flush_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn scroll_frame_routes_to_flush_scroll_and_mutation_diffs_correctly() {
+    // The M2.1 scroll fast path end to end (roadmap diff-correctness
+    // requirement): a frame whose diff is exactly a vertical scroll of a
+    // full-width band flushes through `flush_scroll` with the detected
+    // `ScrollOp` and only the exposed band; a subsequent in-place mutation
+    // flushes the normal diff against the RETAINED frame — the full
+    // post-scroll buffer, not the exposed-band-only paint — so the diff is
+    // exactly the mutated cells.
+    let backend = CountingBackend::default();
+    let probe = backend.clone();
+    // A 3-line text leaf at the origin: rows 0..2, full viewport width.
+    let scene = scene_with_text("aaaaa\nbbbbb\nccccc", 5, 3);
+    let renderer = renderer_with_scene(backend, scene.clone());
+    // Enable the scroll fast path. The harness defaults it off (the
+    // constructor's probe reports conservative defaults under cargo test);
+    // the gate itself is covered by
+    // `scroll_optimization_decision_covers_all_combinations`.
+    renderer
+        .inner
+        .lock()
+        .expect("renderer inner poisoned")
+        .scroll_region = true;
+
+    // Render 1: no retained frame yet — full diff flush.
+    renderer.render().expect("first render");
+    assert_eq!(probe.flush_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.scroll_flush_calls.load(Ordering::Relaxed), 0);
+
+    // Render 2: the content scrolls up one row — every row of the band's
+    // overlap matches the previous frame one row away cell-for-cell, so the
+    // scroll is detected and the frame routes to flush_scroll (no diff
+    // flush), with the bottom (exposed) row as the only repaint.
+    {
+        let mut s = scene.lock().expect("scene poisoned");
+        let root = s.root_id();
+        let text = s.children(root).expect("root children")[0];
+        s.set_prop(text, "text", PropValue::Str("bbbbb\nccccc\nddddd".into()));
+    }
+    renderer.render().expect("scroll render");
+    assert_eq!(probe.flush_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.scroll_flush_calls.load(Ordering::Relaxed), 1);
+    let ops = probe.scroll_ops();
+    assert_eq!(ops, vec![ScrollOp {
+        top: 0,
+        bottom: 2,
+        rows: 1,
+        up: true,
+    }]);
+    // The scroll flush reported the exposed band's 5 cells.
+    assert_eq!(renderer.last_flush_bytes(), 5);
+
+    // Render 3: an in-place mutation in the middle row — not a scroll (the
+    // changed-row band is one row tall) — so the normal diff flush runs,
+    // computed against the retained full post-scroll frame: exactly the 5
+    // mutated cells, nothing from the exposed band the scroll painted.
+    {
+        let mut s = scene.lock().expect("scene poisoned");
+        let root = s.root_id();
+        let text = s.children(root).expect("root children")[0];
+        s.set_prop(text, "text", PropValue::Str("bbbbb\nXXXXX\nddddd".into()));
+    }
+    renderer.render().expect("mutation render");
+    assert_eq!(probe.scroll_flush_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.flush_calls.load(Ordering::Relaxed), 2);
+    let updates = probe
+        .last_flush_updates()
+        .expect("mutation diff captured");
+    assert_eq!(updates.len(), 5, "only the mutated row diffs");
+    assert!(updates.iter().all(|u| u.y == 1), "updates: {updates:?}");
+}
+
+#[test]
+fn scroll_optimization_decision_covers_all_combinations() {
+    // The full option × headless × probe truth table behind the
+    // constructor's probe-gated scroll fast path (mirroring the kitty
+    // keyboard decision): the path is enabled only when the caller opted in,
+    // the renderer is not headless, and the probe reports scroll-region
+    // support. A conservative probe (no reply, non-TTY, or TERM=dumb), a
+    // tmux/screen identity, an explicit opt-out, or a headless renderer must
+    // never take the scroll path.
+    let scroll_region = tern_terminal::TerminalCapabilities {
+        scroll_region: true,
+        ..tern_terminal::TerminalCapabilities::default()
+    };
+    let legacy = tern_terminal::TerminalCapabilities::default();
+    let cases = [
+        // (option, headless, probe, expect scroll enabled)
+        (false, false, &legacy, false),
+        (false, false, &scroll_region, false),
+        (false, true, &legacy, false),
+        (false, true, &scroll_region, false),
+        (true, false, &legacy, false),
+        (true, false, &scroll_region, true),
+        (true, true, &legacy, false),
+        (true, true, &scroll_region, false),
+    ];
+    for (option, headless, caps, expect) in cases {
+        assert_eq!(
+            should_scroll_optimize(option, headless, caps),
+            expect,
+            "option={option} headless={headless} scroll_region={}",
+            caps.scroll_region
+        );
+    }
 }

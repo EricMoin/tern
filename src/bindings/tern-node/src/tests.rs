@@ -189,6 +189,7 @@ fn headless_renderer() -> TuiRenderer {
         title: None,
         headless: Some(true),
         keyboard_enhancement: None,
+        scroll_optimization: None,
         width: None,
         height: None,
     })
@@ -210,6 +211,17 @@ struct CountingBackend {
     size_calls: Arc<AtomicUsize>,
     flush_calls: Arc<AtomicUsize>,
     cursor_flush_calls: Arc<AtomicUsize>,
+    /// How many times `flush_scroll` was called: proves a scroll frame routes
+    /// through the scroll-region fast path.
+    scroll_flush_calls: Arc<AtomicUsize>,
+    /// The [`ScrollOp`]s most recently passed to `flush_scroll` (one entry
+    /// per call), so tests can assert the exact region/direction/rows the
+    /// renderer detected.
+    scroll_ops: Arc<Mutex<Vec<ScrollOp>>>,
+    /// The updates most recently passed to `flush_diff` (overwritten per
+    /// call), so tests can assert the diff a post-scroll mutation frame
+    /// computed against the retained frame.
+    last_flush_updates: Arc<Mutex<Vec<CellUpdate>>>,
     clipboard: Arc<Mutex<Option<String>>>,
     /// The [`Cursor`] most recently passed to `flush_diff_with_cursor` (the
     /// cursor-aware flush), or `None` before one. Lets tests assert that
@@ -231,6 +243,22 @@ impl CountingBackend {
         self.size_calls.load(Ordering::Relaxed)
             + self.flush_calls.load(Ordering::Relaxed)
             + self.cursor_flush_calls.load(Ordering::Relaxed)
+            + self.scroll_flush_calls.load(Ordering::Relaxed)
+    }
+
+    /// The [`ScrollOp`]s passed to `flush_scroll`, in call order.
+    fn scroll_ops(&self) -> Vec<ScrollOp> {
+        self.scroll_ops.lock().expect("scroll ops poisoned").clone()
+    }
+
+    /// The updates most recently passed to `flush_diff`, or `None` before
+    /// one.
+    fn last_flush_updates(&self) -> Option<Vec<CellUpdate>> {
+        self.last_flush_updates
+            .lock()
+            .expect("last flush updates poisoned")
+            .clone()
+            .into()
     }
 
     /// The text most recently passed to `set_clipboard`, or `None`.
@@ -294,6 +322,7 @@ impl RenderBackend for CountingBackend {
         _cursor_pos: (u16, u16),
     ) -> io::Result<usize> {
         self.flush_calls.fetch_add(1, Ordering::Relaxed);
+        *self.last_flush_updates.lock().expect("flush updates poisoned") = updates.to_vec();
         // Report a nominal byte count per flushed cell so the renderer's
         // `last_flush_bytes` counter is exercised; the tests only assert
         // on the call counters, never on this value.
@@ -307,6 +336,22 @@ impl RenderBackend for CountingBackend {
     ) -> io::Result<usize> {
         self.cursor_flush_calls.fetch_add(1, Ordering::Relaxed);
         *self.flushed_cursor.lock().expect("flushed cursor poisoned") = Some(cursor);
+        Ok(updates.len())
+    }
+
+    fn flush_scroll(
+        &mut self,
+        op: &ScrollOp,
+        updates: &[CellUpdate],
+        _cursor_pos: (u16, u16),
+    ) -> io::Result<usize> {
+        self.scroll_flush_calls.fetch_add(1, Ordering::Relaxed);
+        self.scroll_ops
+            .lock()
+            .expect("scroll ops poisoned")
+            .push(*op);
+        // Report the exposed-band size so `last_flush_bytes` reflects the
+        // scroll flush like `flush_diff` does for a diff flush.
         Ok(updates.len())
     }
 
@@ -396,6 +441,11 @@ fn renderer_with_scene(backend: CountingBackend, scene: Arc<Mutex<Scene>>) -> Tu
         exit_on_ctrl_c: false,
         use_alt_screen: false,
         headless: false,
+        // Off by default in the harness: tests that exercise the scroll
+        // fast path enable it explicitly (see the scroll routing test), so
+        // every other counting-backend test keeps the legacy diff flush
+        // exactly as before.
+        scroll_region: false,
         keyboard_enhancement: false,
         any_event_mouse: false,
         destroyed: false,
