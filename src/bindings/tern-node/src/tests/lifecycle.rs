@@ -300,3 +300,196 @@ fn size_errors_on_a_destroyed_renderer() {
     let err = renderer.size().expect_err("destroyed renderer must error");
     assert!(err.to_string().contains("destroyed"), "{err}");
 }
+
+#[test]
+fn keyboard_enhancement_push_decision_covers_all_combinations() {
+    // The full option × headless × probe truth table behind the
+    // constructor's probe-gated kitty keyboard push: the flags are pushed
+    // only when the caller opted in, the renderer is not headless, and the
+    // probe reports kitty keyboard support. A conservative probe (no reply,
+    // non-TTY, or TERM=dumb) or an explicit opt-out must never push, and a
+    // headless renderer never pushes — `destroy` pops exactly what was
+    // pushed.
+    let kitty = tern_terminal::TerminalCapabilities {
+        kitty_keyboard: true,
+        ..tern_terminal::TerminalCapabilities::default()
+    };
+    let legacy = tern_terminal::TerminalCapabilities::default();
+    let cases = [
+        // (option, headless, probe, expect pushed)
+        (false, false, &legacy, false),
+        (false, false, &kitty, false),
+        (false, true, &legacy, false),
+        (false, true, &kitty, false),
+        (true, false, &legacy, false),
+        (true, false, &kitty, true),
+        (true, true, &legacy, false),
+        (true, true, &kitty, false),
+    ];
+    for (option, headless, caps, expect) in cases {
+        assert_eq!(
+            should_push_keyboard_enhancement(option, headless, caps),
+            expect,
+            "option={option} headless={headless} kitty_keyboard={}",
+            caps.kitty_keyboard
+        );
+    }
+}
+
+#[test]
+fn interactive_terminal_error_covers_all_term_dumb_stdout_tty_combinations() {
+    // The full (term_dumb, stdout_tty) truth table behind the constructor's
+    // interactive-terminal guard (roadmap M1.5): only a real terminal — not
+    // TERM=dumb, stdout a TTY — constructs; every other combination errors
+    // with the documented message. The decision is pure (no process env or
+    // stdio access), so the test is deterministic under `cargo test`; the
+    // ambient constructor-level check is covered by the PTY smoke case
+    // instead of a nondeterministic TTY/env-dependent Rust test.
+    let expected = "tern requires an interactive terminal (TERM=dumb or non-TTY)";
+    let cases = [
+        // (term_dumb, stdout_tty, expect error message)
+        (true, false, Some(expected)),
+        (true, true, Some(expected)),
+        (false, false, Some(expected)),
+        (false, true, None),
+    ];
+    for (term_dumb, stdout_tty, expect) in cases {
+        assert_eq!(
+            interactive_terminal_error(term_dumb, stdout_tty),
+            expect,
+            "term_dumb={term_dumb} stdout_tty={stdout_tty}"
+        );
+    }
+}
+
+#[test]
+fn set_any_event_mouse_reaches_backend_and_destroy_tears_down_in_order() {
+    // `set_any_event_mouse(true)` must reach the backend (the mock counts
+    // the enable call), record the any-event state, and `destroy` must then
+    // emit the any-event teardown (`?1003l`) BEFORE the general
+    // event-listening disable — the terminal closes its capture modes in
+    // enable order.
+    let backend = CountingBackend::default();
+    let probe = backend.clone();
+    let (renderer, _scene) = counting_renderer(backend);
+
+    renderer
+        .set_any_event_mouse(true)
+        .expect("enable reaches the backend");
+    assert_eq!(
+        probe.any_event_enable_calls.load(Ordering::Relaxed),
+        1,
+        "set_any_event_mouse(true) must call the backend's enable"
+    );
+
+    renderer.destroy().expect("destroy succeeds");
+    assert_eq!(
+        probe.teardown_log(),
+        ["disable_any_event_mouse", "disable_event_listening"],
+        "destroy must close any-event before the general disable"
+    );
+}
+
+#[test]
+fn disabling_any_event_mouse_suppresses_the_destroy_time_teardown() {
+    // `set_any_event_mouse(false)` clears the recorded state through the
+    // backend's own disable, so `destroy` must not emit a redundant second
+    // any-event teardown — the log holds exactly one `disable_any_event_mouse`,
+    // still before the general disable.
+    let backend = CountingBackend::default();
+    let probe = backend.clone();
+    let (renderer, _scene) = counting_renderer(backend);
+
+    renderer.set_any_event_mouse(true).expect("enable");
+    renderer.set_any_event_mouse(false).expect("disable");
+    renderer.destroy().expect("destroy succeeds");
+    assert_eq!(
+        probe.teardown_log(),
+        ["disable_any_event_mouse", "disable_event_listening"],
+        "the explicit disable replaces the destroy-time teardown, order kept"
+    );
+}
+
+#[test]
+fn set_any_event_mouse_errors_on_a_destroyed_renderer() {
+    // Like every state toggle, `set_any_event_mouse` guards on the
+    // destroyed flag: a torn-down renderer cannot touch the backend.
+    let (renderer, _scene) = counting_renderer(CountingBackend::default());
+    renderer.destroy().expect("destroy succeeds");
+    let err = renderer
+        .set_any_event_mouse(true)
+        .expect_err("destroyed renderer must error");
+    assert!(err.to_string().contains("destroyed"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_then_resume_terminal_round_trips_the_backend_and_forces_repaint() {
+    // The SIGTSTP suspend / SIGCONT resume terminal transitions: `restore`
+    // closes the capture modes in enable order, and `resume` re-enters them
+    // in startup order, re-enabling exactly what was pushed, then
+    // invalidates the render fast path (size cache + retained frame +
+    // painted epoch) so the next render repaints the whole screen.
+    let backend = CountingBackend::default();
+    let probe = backend.clone();
+    let (renderer, _scene) = counting_renderer(backend);
+    {
+        let mut inner = renderer.inner.lock().expect("renderer inner poisoned");
+        inner.keyboard_enhancement = true;
+        inner.use_alt_screen = true;
+        inner.any_event_mouse = true;
+        // A painted frame + a valid size cache: the resume must clear both.
+        inner.last = Some(Buffer::new(80, 24));
+        inner.last_painted_epoch = 7;
+        inner.cached_size = Some((80, 24));
+
+        inner.restore_terminal();
+        inner.resume_terminal();
+
+        // The resume invalidates the fast-path inputs so the next render
+        // repaints (a full-buffer diff, not the no-op fast path).
+        assert_eq!(inner.cached_size, None, "resume invalidates the size cache");
+        assert!(inner.last.is_none(), "resume drops the retained frame");
+        assert_eq!(
+            inner.last_painted_epoch, 0,
+            "resume clears the painted epoch"
+        );
+    }
+    // The logged calls: restore closes any-event + general listening, then
+    // resume re-enters raw mode, alt screen, listening, and the kitty
+    // enhancement — the terminal returns to its startup state in order.
+    assert_eq!(
+        probe.teardown_log(),
+        [
+            "disable_any_event_mouse",
+            "disable_event_listening",
+            "enter_raw_mode",
+            "enter_alt_screen",
+            "enable_event_listening",
+            "enter_keyboard_enhancement",
+        ],
+        "suspend closes the capture modes before resume re-enters them"
+    );
+    // Any-event mouse was on before the suspend: resume re-enables it.
+    assert_eq!(
+        probe.any_event_enable_calls.load(Ordering::Relaxed),
+        1,
+        "resume re-enables any-event mouse when it was on"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_terminal_is_a_noop_when_the_renderer_is_destroyed() {
+    // A suspend that races a destroy must not touch the terminal (the
+    // teardown already restored it): the backend sees no restore calls.
+    let backend = CountingBackend::default();
+    let probe = backend.clone();
+    let (renderer, _scene) = counting_renderer(backend);
+    {
+        let mut inner = renderer.inner.lock().expect("renderer inner poisoned");
+        inner.destroyed = true;
+        inner.restore_terminal();
+    }
+    assert_eq!(probe.teardown_log(), Vec::<&str>::new(), "no restore calls");
+}

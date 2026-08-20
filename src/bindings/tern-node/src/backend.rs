@@ -9,6 +9,20 @@ use super::*;
 pub(crate) trait RenderBackend: Send + Sync {
     /// The terminal size as `(columns, rows)`.
     fn size(&self) -> io::Result<(u16, u16)>;
+    /// Enter raw mode: disable line buffering and echo. The re-entry half of
+    /// [`exit_raw_mode`](RenderBackend::exit_raw_mode), used by the SIGCONT
+    /// resume path to return the terminal to render state after a
+    /// suspend/continue cycle.
+    fn enter_raw_mode(&self) -> io::Result<()>;
+    /// Switch to the alternate screen (the app's full-screen surface). The
+    /// re-entry half of [`exit_alt_screen`](RenderBackend::exit_alt_screen),
+    /// used by the SIGCONT resume path.
+    fn enter_alt_screen(&self) -> io::Result<()>;
+    /// Tell the terminal to report mouse, focus-change, and bracketed-paste
+    /// events. The re-entry half of
+    /// [`disable_event_listening`](RenderBackend::disable_event_listening),
+    /// used by the SIGCONT resume path.
+    fn enable_event_listening(&self) -> io::Result<()>;
     /// Flush a diff of cell updates to the terminal, recording the park
     /// position so an empty no-op frame can skip the flush entirely. Returns
     /// the number of bytes queued to the terminal (the frame's ANSI
@@ -30,6 +44,23 @@ pub(crate) trait RenderBackend: Send + Sync {
     fn set_clipboard(&self, text: &str) -> io::Result<()>;
     /// Stop mouse / focus-change / bracketed-paste event reporting.
     fn disable_event_listening(&self) -> io::Result<()>;
+    /// Opt into any-event mouse tracking (`?1003h`): the terminal reports
+    /// every mouse motion, not just presses and drags. Off by default —
+    /// `enable_event_listening` tracks press/release, drag, and scroll
+    /// only — so motion events flow only while a motion/drag listener is
+    /// registered. Pair with
+    /// [`disable_any_event_mouse`](RenderBackend::disable_any_event_mouse).
+    fn enable_any_event_mouse(&self) -> io::Result<()>;
+    /// Stop any-event mouse tracking (`?1003l`): the terminal stops
+    /// reporting motion without a button pressed. Drags still report via
+    /// the button-event tracking from `enable_event_listening`.
+    fn disable_any_event_mouse(&self) -> io::Result<()>;
+    /// Enable the kitty keyboard protocol (progressive enhancement): the
+    /// re-entry half of
+    /// [`exit_keyboard_enhancement`](RenderBackend::exit_keyboard_enhancement),
+    /// used by the SIGCONT resume path to re-push the enhancement flags that
+    /// were popped on suspend.
+    fn enter_keyboard_enhancement(&self) -> io::Result<()>;
     /// Disable the kitty keyboard protocol enhancement (pop one level).
     fn exit_keyboard_enhancement(&self) -> io::Result<()>;
     /// Leave the alternate screen.
@@ -41,6 +72,18 @@ pub(crate) trait RenderBackend: Send + Sync {
 impl RenderBackend for Backend {
     fn size(&self) -> io::Result<(u16, u16)> {
         Backend::size(self)
+    }
+
+    fn enter_raw_mode(&self) -> io::Result<()> {
+        Backend::enter_raw_mode(self)
+    }
+
+    fn enter_alt_screen(&self) -> io::Result<()> {
+        Backend::enter_alt_screen(self)
+    }
+
+    fn enable_event_listening(&self) -> io::Result<()> {
+        Backend::enable_event_listening(self)
     }
 
     fn flush_diff(&mut self, updates: &[CellUpdate], cursor_pos: (u16, u16)) -> io::Result<usize> {
@@ -65,6 +108,18 @@ impl RenderBackend for Backend {
 
     fn disable_event_listening(&self) -> io::Result<()> {
         Backend::disable_event_listening(self)
+    }
+
+    fn enable_any_event_mouse(&self) -> io::Result<()> {
+        Backend::enable_any_event_mouse(self)
+    }
+
+    fn disable_any_event_mouse(&self) -> io::Result<()> {
+        Backend::disable_any_event_mouse(self)
+    }
+
+    fn enter_keyboard_enhancement(&self) -> io::Result<()> {
+        Backend::enter_keyboard_enhancement(self)
     }
 
     fn exit_keyboard_enhancement(&self) -> io::Result<()> {
@@ -105,6 +160,18 @@ impl RenderBackend for HeadlessBackend {
         Ok(self.size)
     }
 
+    fn enter_raw_mode(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn enter_alt_screen(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn enable_event_listening(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     fn flush_diff(
         &mut self,
         _updates: &[CellUpdate],
@@ -134,6 +201,18 @@ impl RenderBackend for HeadlessBackend {
     }
 
     fn disable_event_listening(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn enable_any_event_mouse(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn disable_any_event_mouse(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn enter_keyboard_enhancement(&self) -> io::Result<()> {
         Ok(())
     }
 

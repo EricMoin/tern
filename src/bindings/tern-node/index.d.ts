@@ -125,7 +125,9 @@ export declare class TuiRenderer {
   /**
    * Enter raw mode + the alternate screen (unless `use_alt_screen` is
    * `false`), apply the window title, and enable mouse / focus-change /
-   * bracketed-paste event delivery, ready to render.
+   * bracketed-paste event delivery, ready to render. The kitty keyboard
+   * protocol enhancement is pushed only when opted in (default) and the
+   * interactive probe reports the terminal supports it.
    *
    * If any terminal transition fails the already-entered states are rolled
    * back before the error is returned, so a failed constructor never leaves
@@ -187,9 +189,13 @@ export declare class TuiRenderer {
   render_to_buffer_styled(width?: number | undefined | null, height?: number | undefined | null): Array<Array<StyleRunJs>>
   /**
    * Leave the alternate screen and raw mode and stop event listening,
-   * restoring the terminal. Also stops the push event loop (with the
-   * default `push-events` feature) so the loop thread exits. Safe to call
-   * more than once; a destroyed renderer cannot render or poll.
+   * restoring the terminal. Any-event mouse tracking is turned off
+   * (`?1003l`) before the general event-listening disable, so the
+   * terminal closes its capture modes in enable order. Also stops the
+   * push event loop (with the default `push-events` feature) so the
+   * loop thread exits, and stops the signal thread so the process's
+   * signal dispositions are restored. Safe to call more than once; a
+   * destroyed renderer cannot render or poll.
    */
   destroy(): void
   /**
@@ -198,8 +204,14 @@ export declare class TuiRenderer {
    */
   get destroyed(): boolean
   /**
-   * The terminal's color capabilities (`{ truecolor, colors }`), detected
-   * once by the backend (see `tern-terminal`'s `Backend::capabilities`).
+   * The terminal's capabilities: the color report detected once by the
+   * backend (`{ truecolor, colors }` — see `tern-terminal`'s
+   * `Backend::capabilities`) merged with the interactive probe report
+   * (`terminalIdentity`, `kittyKeyboard`, `kittyUnderline`, `osc52`,
+   * `bracketedPaste`, `focusEvents`, `probed` — see `tern-terminal`'s
+   * `probe::TerminalCapabilities`). The probe result is cached per
+   * process; a probe skipped for a non-TTY or `TERM=dumb` reports
+   * conservative defaults with `probed: false`.
    */
   get capabilities(): RendererCapabilities
   /**
@@ -240,6 +252,17 @@ export declare class TuiRenderer {
    * on a destroyed renderer.
    */
   set_clipboard(text: string): void
+  /**
+   * Enable or disable any-event mouse tracking (`?1003h` / `?1003l`):
+   * the terminal reports every mouse motion while enabled, not just
+   * presses and drags. Off by default — the constructor enables
+   * press/release, drag, and scroll tracking only — so motion events
+   * flow only while a motion/drag listener is registered. Records the
+   * state so [`destroy`](Self::destroy) turns the mode off (`?1003l`)
+   * before the general event-listening disable. Errors on a destroyed
+   * renderer.
+   */
+  set_any_event_mouse(enabled: boolean): void
   /**
    * Set the selection overlay to the inclusive rectangle spanned by
    * (`col1`, `row1`) and (`col2`, `row2`) in viewport cells. The endpoints
@@ -331,7 +354,7 @@ export interface ContentSize {
  * when it is added to a bound parent via `NodeHandle.add_child`. See
  * `set_props` for the style-key convention.
  */
-export declare function create_node(type: string, props?: Record<string, any> | undefined | null): NodeHandle
+export declare function create_node(node_type: string, props?: Record<string, any> | undefined | null): NodeHandle
 
 /**
  * Token-highlight `source` in `language` (a Markdown fence info string:
@@ -433,6 +456,26 @@ export interface KeyEvent {
 }
 
 /**
+ * A lifecycle event surfaced to JS when the renderer's owning process is
+ * suspended or resumed by a job-control signal (SIGTSTP / SIGCONT): `type`
+ * is `"lifecycle"` and `lifecycle.phase` is `"suspend"` or `"resume"`.
+ *
+ * `"suspend"` is pushed right before the process re-raises SIGTSTP to stop
+ * (the terminal has been restored to its pre-renderer state — the JS side
+ * can flush anything it must persist before the stop). `"resume"` is pushed
+ * after the process re-entered raw mode + the alternate screen and forced a
+ * full repaint (the size cache and retained frame were invalidated), so the
+ * app knows the screen is live again and must re-render.
+ */
+export interface LifecycleEvent {
+  /**
+   * `"suspend"` (terminal restored, process about to stop) or `"resume"`
+   * (terminal re-entered, full repaint pending).
+   */
+  phase: string
+}
+
+/**
  * A mouse event surfaced to JS as a plain object.
  *
  * `kind` encodes both the action and — where relevant — the button, so no
@@ -460,7 +503,15 @@ export interface MouseEventJs {
   shift: boolean
 }
 
-/** The terminal's color capabilities, detected by the backend. */
+/**
+ * The terminal's capabilities, surfaced by the `capabilities` getter: the
+ * color report detected once by the backend (see
+ * [`backend::capabilities`](crate::backend::capabilities)) merged with the
+ * interactive probe report (see
+ * [`tern_terminal::probe::TerminalCapabilities`]): terminal identity plus
+ * the kitty keyboard / underline, OSC 52, bracketed-paste, and focus-event
+ * protocol supports the terminal itself reported during the probe.
+ */
 export interface RendererCapabilities {
   /** Whether 24-bit (16M) RGB truecolor is supported. */
   truecolor: boolean
@@ -469,6 +520,53 @@ export interface RendererCapabilities {
    * a 256-color palette, 16 for basic ANSI, 0 when none.
    */
   colors: number
+  /**
+   * The terminal's self-reported identity from the interactive probe: the
+   * XTVERSION text when the terminal answers it (e.g. `kitty(0.36.0)`),
+   * else the XTGETTCAP `TN` capability value, else the raw DA2
+   * `Pp;Pv;Pc` identification code. `null` when no reply named the
+   * terminal (or the probe was skipped for a non-TTY / `TERM=dumb`).
+   */
+  terminalIdentity?: string
+  /**
+   * Whether the kitty keyboard protocol is supported, as reported by the
+   * interactive probe (`fullkbd`/`XK` XTGETTCAP). `false` for a terminal
+   * that did not answer the probe, so the backend keeps the legacy key
+   * reporting fallback.
+   */
+  kittyKeyboard: boolean
+  /**
+   * Whether kitty extended underline styles are supported
+   * (`Su`/`Setulc` XTGETTCAP: `CSI 4:N m` variants and colored
+   * underlines), as reported by the interactive probe. `false` for an
+   * unknown terminal, which takes the plain `CSI 4 m` fallback.
+   */
+  kittyUnderline: boolean
+  /**
+   * Whether OSC 52 clipboard writes are supported: the DA1 parameter `52`
+   * (the contour clipboard-extension marker), or an XTGETTCAP `Ms`
+   * reply, as reported by the interactive probe.
+   */
+  osc52: boolean
+  /**
+   * Whether bracketed paste mode is supported (XTGETTCAP `PS`/`BE`), as
+   * reported by the interactive probe. `false` filters paste events at
+   * the event layer.
+   */
+  bracketedPaste: boolean
+  /**
+   * Whether focus in/out events are supported (XTGETTCAP `XF`), as
+   * reported by the interactive probe. `false` keeps focus-event
+   * reporting disabled.
+   */
+  focusEvents: boolean
+  /**
+   * Whether the interactive probe parsed any query reply. `false` when
+   * the probe was skipped (non-TTY or `TERM=dumb`) or every query went
+   * unanswered (timeout / empty reply); every probe field is then a
+   * conservative default.
+   */
+  probed: boolean
 }
 
 /**
@@ -556,15 +654,17 @@ export interface StyleRunJs {
 
 /**
  * A terminal event surfaced to JS as a tagged-union plain object: `type`
- * discriminates (`"key"`, `"resize"`, `"focus"`, `"mouse"`, `"paste"`) and
- * exactly one of `key` / `width`+`height` / `focus_gained` / `mouse` /
- * `paste` is set. For `"focus"`, `focus_gained` is `true` on gained and
- * `false` on lost.
+ * discriminates (`"key"`, `"resize"`, `"focus"`, `"mouse"`, `"paste"`,
+ * `"lifecycle"`) and exactly one of `key` / `width`+`height` /
+ * `focus_gained` / `mouse` / `paste` / `lifecycle` is set. For `"focus"`,
+ * `focus_gained` is `true` on gained and `false` on lost. `"lifecycle"`
+ * events are pushed by the native signal thread (see
+ * [`LifecycleEvent`]) and carry no terminal event.
  */
 export interface TernEventJs {
   /**
-   * The event kind: `"key"`, `"resize"`, `"focus"`, `"mouse"`, or
-   * `"paste"`.
+   * The event kind: `"key"`, `"resize"`, `"focus"`, `"mouse"`, `"paste"`,
+   * or `"lifecycle"`.
    */
   type: string
   /** The key event, when `type` is `"key"`. */
@@ -582,6 +682,11 @@ export interface TernEventJs {
   mouse?: MouseEventJs
   /** The pasted text, when `type` is `"paste"`. */
   paste?: string
+  /**
+   * The lifecycle phase (`"suspend"` / `"resume"`), when `type` is
+   * `"lifecycle"` — pushed by the native signal thread, not the terminal.
+   */
+  lifecycle?: LifecycleEvent
 }
 
 /** Constructor options for [`TuiRenderer`]. */
