@@ -33,7 +33,7 @@ mod statusbar;
 mod textarea;
 
 pub use canvas::Canvas;
-pub use compositor::Compositor;
+pub use compositor::{Compositor, ScrollShift, detect_vertical_scroll, exposed_band_updates};
 pub use input::{Input, Key, KeyAction};
 pub use panels::{Panel, Panels};
 pub use renderable::{Box, Renderable, Text};

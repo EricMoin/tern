@@ -72,7 +72,7 @@
 use std::collections::{HashMap, HashSet};
 
 use tern_core::buffer::{Buffer, Region};
-use tern_core::cell::{clusters, strip_escapes, Cell};
+use tern_core::cell::{clusters, strip_escapes, Cell, CellUpdate};
 use tern_core::color::Color;
 use tern_core::cursor::Cursor;
 use tern_core::layout::LayoutEngine;
@@ -86,6 +86,12 @@ use crate::renderable::Renderable;
 mod paint;
 mod pass;
 mod region;
+/// Pure scroll-shift detection ([`scroll::detect_vertical_scroll`] /
+/// [`scroll::exposed_band_updates`] / [`scroll::ScrollShift`]), re-exported
+/// at the crate root for the flusher consumer (tern-node's renderer, the M2.1
+/// scroll-region fast path).
+mod scroll;
+pub use scroll::{ScrollShift, detect_vertical_scroll, exposed_band_updates};
 mod signature;
 mod text;
 
