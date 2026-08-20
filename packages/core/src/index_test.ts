@@ -2670,6 +2670,90 @@ Deno.test("the requestFrame cancel function prevents the scheduled frame", async
   });
 });
 
+// maxFps frame throttle (fake native addon — render-call counting + timing)
+
+Deno.test("with maxFps set, a 1000-call requestFrame burst still collapses into one native render", async () => {
+  await withFakeAddon(async () => {
+    const renderer = createRenderer({ maxFps: 1000 });
+    const fake = fakeRenderer();
+    // The burst coalesces exactly like the unthrottled schedule — the
+    // pending-frame flag dedupes the arming, so only the first call
+    // schedules the (throttled) timer. The 1ms cap's budget cannot delay
+    // this first frame: nothing has rendered yet, so `#lastNativeRenderAt`
+    // anchors the delay to 0 and the frame fires within the flush.
+    for (let i = 0; i < 1000; i++) renderer.requestFrame();
+    expectEqual(fake.renderCalls, 0, "render calls before flush");
+    await flush();
+    expectEqual(fake.renderCalls, 1, "render calls after flush");
+    renderer.destroy();
+  });
+});
+
+Deno.test("maxFps delays a coalesced frame scheduled inside the budget to the cap", async () => {
+  await withFakeAddon(async () => {
+    const renderer = createRenderer({ maxFps: 20 }); // 50 ms per frame
+    const fake = fakeRenderer();
+    // The first coalesced frame has nothing to space from (never rendered):
+    // it fires on the next macrotask, unthrottled.
+    const t0 = performance.now();
+    await new Promise<void>((resolve) => renderer.requestFrame(resolve));
+    const t1 = performance.now();
+    // A frame armed immediately after must wait out the remaining budget.
+    // JS timers never fire early, so the >= budget spacing is a lower-bound
+    // guarantee, not a timing guess.
+    await new Promise<void>((resolve) => renderer.requestFrame(resolve));
+    const t2 = performance.now();
+    expectEqual(fake.renderCalls, 2, "render calls");
+    if (t1 - t0 >= 50 - 10) {
+      throw new Error(`first frame was throttled: ${(t1 - t0).toFixed(1)}ms elapsed`);
+    }
+    if (t2 - t1 < 50 - 10) {
+      throw new Error(`second frame fired after ${(t2 - t1).toFixed(1)}ms, expected >= ~50ms`);
+    }
+    renderer.destroy();
+  });
+});
+
+Deno.test("an explicit render() bypasses the maxFps throttle and supersedes the pending frame", async () => {
+  await withFakeAddon(async () => {
+    const renderer = createRenderer({ maxFps: 20 });
+    const fake = fakeRenderer();
+    renderer.requestFrame();
+    // The explicit paint is synchronous — immediate, never waiting out the
+    // frame budget the coalesced schedule would have imposed.
+    renderer.render();
+    expectEqual(fake.renderCalls, 1, "render calls after render()");
+    // The superseded coalesced frame never fires.
+    await flush();
+    expectEqual(fake.renderCalls, 1, "render calls after flush");
+    renderer.destroy();
+  });
+});
+
+Deno.test("maxFps 0 leaves the coalesced schedule unthrottled", async () => {
+  await withFakeAddon(async () => {
+    const renderer = createRenderer({ maxFps: 0 });
+    const fake = fakeRenderer();
+    renderer.requestFrame();
+    renderer.requestFrame();
+    renderer.requestFrame();
+    await flush();
+    expectEqual(fake.renderCalls, 1, "render calls after flush");
+    renderer.destroy();
+  });
+});
+
+Deno.test("maxFps stays JS-side: never forwarded to the native renderer options", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer({ maxFps: 30 });
+    const options = lastRendererOptions as Record<string, unknown>;
+    if ("maxFps" in options || "max_fps" in options) {
+      throw new Error(`maxFps leaked into native options: ${JSON.stringify(options)}`);
+    }
+    renderer.destroy();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Roadmap elements: Input
 // ---------------------------------------------------------------------------
