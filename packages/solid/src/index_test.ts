@@ -13,6 +13,7 @@ import {
   DiffView,
   ScrollView,
   Select,
+  Menu,
   Table,
   Tabs,
   Progress,
@@ -22,7 +23,9 @@ import {
   openModal,
   closeModal,
   selectKey,
+  menuKey,
   subscribeInput,
+  subscribeMenuMouse,
   subscribeResize,
   createTerminalDimensions,
   subscribeFocus,
@@ -48,6 +51,7 @@ import {
   visibleTreeRows,
   expandTreeNode,
   disposeTreeFocus,
+  disposeMenuFocus,
   useFocus,
   FocusManager,
   focusManager,
@@ -67,6 +71,7 @@ import {
   type Span,
   type Node,
   type KeyEvent,
+  type MenuState,
   type Renderer,
   type Theme,
   type TreeNode,
@@ -103,6 +108,7 @@ import {
   wheelScroll,
   SELECTION_DOUBLE_CLICK_MS,
   setSelectionClockForTesting,
+  type MouseEventJs,
   type SelectionRange,
   type TernEventJs,
 } from "@tern-tui/core";
@@ -1095,6 +1101,7 @@ Deno.test("Input/Spinner/StatusBar/Panels factories materialize the core element
   }
   if (createElement("panels").type !== "panels") throw new Error("createElement(panels) mapping");
   if (createElement("diff").type !== "diff") throw new Error("createElement(diff) mapping");
+  if (createElement("menu").type !== "menu") throw new Error("createElement(menu) mapping");
 });
 
 Deno.test("Textarea factory materializes the core element with per-line leaves", () => {
@@ -1505,6 +1512,7 @@ function mockRenderer(): {
   resizeHandlers: Set<(event: { width: number; height: number }) => void>;
   focusHandlers: Set<(event: { focus_gained: boolean }) => void>;
   pasteHandlers: Set<(text: string) => void>;
+  mouseHandlers: Set<(event: MouseEventJs) => void>;
 } {
   const renderCalls: number[] = [];
   // The reported terminal size: `renderer.size` in the real renderer reads
@@ -1515,6 +1523,7 @@ function mockRenderer(): {
   const resizeHandlers = new Set<(event: { width: number; height: number }) => void>();
   const focusHandlers = new Set<(event: { focus_gained: boolean }) => void>();
   const pasteHandlers = new Set<(text: string) => void>();
+  const mouseHandlers = new Set<(event: MouseEventJs) => void>();
   const root = Box();
   const renderer = {
     root,
@@ -1540,13 +1549,21 @@ function mockRenderer(): {
       pasteHandlers.add(handler);
       return () => pasteHandlers.delete(handler);
     },
+    onMouse: (handler: (event: MouseEventJs) => void) => {
+      mouseHandlers.add(handler);
+      return () => mouseHandlers.delete(handler);
+    },
     destroy: () => {},
   } as unknown as Renderer;
-  return { renderer, root, renderCalls, size, keyHandlers, resizeHandlers, focusHandlers, pasteHandlers };
+  return { renderer, root, renderCalls, size, keyHandlers, resizeHandlers, focusHandlers, pasteHandlers, mouseHandlers };
 }
 
 function keyEvent(over: Partial<KeyEvent> = {}): KeyEvent {
   return { name: "char", char: "q", ctrl: false, alt: false, shift: false, ...over };
+}
+
+function mouseEvent(kind: string, column: number, row: number): MouseEventJs {
+  return { kind, column, row, ctrl: false, alt: false, shift: false };
 }
 
 Deno.test("subscribeInput routes keys through the FocusManager to a focused input", () => {
@@ -1889,6 +1906,190 @@ Deno.test("Select floating mode sets a z_index prop", () => {
     z_index: 5,
   });
   if (layered.props.z_index !== 5) throw new Error(`z_index = ${layered.props.z_index}`);
+});
+
+// Menu: factory parity + menuKey routing + mouse wiring
+// ---------------------------------------------------------------------------
+
+Deno.test("Menu factory materializes the core element with item rows and strips component props", () => {
+  const menu = Menu({
+    items: [
+      { label: "New" },
+      { label: "Open", children: [{ label: "File" }, { label: "Dir" }] },
+      { label: "Quit" },
+    ],
+    focusId: "s-menu",
+    onSelect: () => {},
+    onDismiss: () => {},
+  });
+  if (menu.type !== "menu") throw new Error(`type = ${menu.type}`);
+  // Component-consumed props must never reach the scene node.
+  for (const key of ["focusId", "focusManager", "onSelect", "onDismiss"]) {
+    if (key in menu.props) throw new Error(`menu component prop leaked: ${key}`);
+  }
+  // The item model is JS bookkeeping, never scene props.
+  if ("items" in menu.props) throw new Error("items must not reach the scene props");
+  // One text leaf per visible item (the submenu branch is collapsed).
+  if (menu.children.length !== 3) throw new Error(`rows = ${menu.children.length}`);
+  if (menu.children[0]?.props.text !== "New" || menu.children[1]?.props.text !== "Open") {
+    throw new Error(`rows = ${menu.children.map((c) => c.props.text).join(",")}`);
+  }
+  if (menu.children[2]?.props.text !== "Quit") {
+    throw new Error(`rows = ${menu.children.map((c) => c.props.text).join(",")}`);
+  }
+  // The highlighted (first) row is reversed; the others are not.
+  if (menu.children[0]?.props.reversed !== true) {
+    throw new Error("the highlighted row must be reversed");
+  }
+  if (menu.children[1]?.props.reversed === true || menu.children[2]?.props.reversed === true) {
+    throw new Error("only the highlighted row may be reversed");
+  }
+  // The factory's focusId registration is owned by the node; disposing it
+  // unregisters the id.
+  if (!focusManager.has("s-menu")) throw new Error("Menu(focusId) must register with the core manager");
+  disposeMenuFocus(menu);
+  if (focusManager.has("s-menu")) throw new Error("disposeMenuFocus must unregister the id");
+});
+
+Deno.test("menuKey routes through the FocusManager to a focused menu", () => {
+  const { renderer, keyHandlers } = mockRenderer();
+  const manager = new FocusManager();
+  const menu = Menu({
+    items: [
+      { label: "New", id: "new" },
+      { label: "Open", id: "open", children: [{ label: "File", id: "file" }] },
+      { label: "Quit", id: "quit" },
+    ],
+  });
+  const selects: Array<{ activated: string | null; open: boolean }> = [];
+  const dismisses: Array<{ open: boolean }> = [];
+  // Length read through a function: TS narrows a const-typed empty array's
+  // `length` to 0 (the pushes happen inside closures it cannot see).
+  const selectCount = () => selects.length;
+  const dismissCount = () => dismisses.length;
+  // Accessors: menuKey mutates the node in place, which TS's control flow
+  // cannot see — reading through functions defeats the stale narrowing.
+  const highlightOf = () => menu.props.highlighted as number;
+
+  // Register the menu node with the manager: routed keys drive it via the
+  // core `menuKey`, firing onSelect/onDismiss like React's `<Menu focusId>`.
+  const focusHandle = useFocus("s-menu", menu, (event) => {
+    const next = menuKey(menu, event);
+    if (next.activated !== null) {
+      selects.push(next);
+    } else if (event.name === "escape") {
+      dismisses.push(next);
+    }
+  }, manager);
+  const dispose = subscribeInput(renderer, () => {}, { focusManager: manager });
+
+  if (keyHandlers.size !== 1) throw new Error(`expected 1 key handler, got ${keyHandlers.size}`);
+  if (!manager.has("s-menu")) throw new Error("useFocus must register the id");
+
+  // Not focused: keys fall through to the tree handler (a no-op here).
+  for (const handler of keyHandlers) handler(keyEvent({ name: "down" }));
+  if (highlightOf() !== 0 || selectCount() !== 0) {
+    throw new Error("unfocused menu must not receive keys");
+  }
+
+  // Focused: down moves the highlight (clamped into the visible items).
+  if (!manager.focus("s-menu")) throw new Error("focus(s-menu) must succeed");
+  for (const handler of keyHandlers) handler(keyEvent({ name: "down" }));
+  if (highlightOf() !== 1) throw new Error(`highlight = ${highlightOf()}`);
+  if (menu.children[1]?.props.reversed !== true) {
+    throw new Error("the highlighted row must be reversed after down");
+  }
+
+  // Down onto the leaf row, then Enter activates it and fires onSelect with
+  // the item's key (a leaf activation also dismisses the menu).
+  for (const handler of keyHandlers) handler(keyEvent({ name: "down" }));
+  if (highlightOf() !== 2) throw new Error(`highlight = ${highlightOf()}`);
+  for (const handler of keyHandlers) handler(keyEvent({ name: "enter" }));
+  if (selectCount() !== 1 || selects[0]!.activated !== "quit") {
+    throw new Error(`onSelect = ${JSON.stringify(selects)}`);
+  }
+  if (selects[0]!.open !== false) throw new Error("a leaf activation must dismiss the menu");
+
+  // Escape fires onDismiss without a selection.
+  for (const handler of keyHandlers) handler(keyEvent({ name: "escape" }));
+  if (dismissCount() !== 1 || dismisses[0]!.open !== false) {
+    throw new Error(`onDismiss = ${JSON.stringify(dismisses)}`);
+  }
+  if (selectCount() !== 1) throw new Error("escape must not fire onSelect");
+
+  dispose();
+  if (keyHandlers.size >= 1) throw new Error("key handler must be detached on dispose");
+  focusHandle.dispose();
+  if (manager.has("s-menu")) throw new Error("menu must unregister on dispose");
+});
+
+Deno.test("subscribeMenuMouse maps hover/click onto menuHover/menuClick; a closed menu ignores them", () => {
+  const { renderer, mouseHandlers, renderCalls } = mockRenderer();
+  const menu = Menu({
+    items: [
+      { label: "New", id: "new" },
+      { label: "Open", id: "open", children: [{ label: "File", id: "file" }] },
+      { label: "Quit", id: "quit" },
+    ],
+    open: true,
+  });
+  const results: Array<MenuState> = [];
+  // Length read through a function: TS narrows a const-typed empty array's
+  // `length` to 0 (the pushes happen inside closures it cannot see).
+  const resultCount = () => results.length;
+  const dispose = subscribeMenuMouse(renderer, menu, (state) => results.push(state));
+  const highlightOf = () => menu.props.highlighted as number;
+  const emit = (kind: string, column: number, row: number): void => {
+    for (const handler of mouseHandlers) handler(mouseEvent(kind, column, row));
+  };
+
+  // A hover on row 2 moves the highlight there (menuHover) and reports it.
+  emit("moved", 0, 2);
+  if (highlightOf() !== 2) throw new Error(`hover highlight = ${highlightOf()}`);
+  if (resultCount() !== 1 || results[0]!.highlighted !== 2) {
+    throw new Error(`hover result = ${JSON.stringify(results[0])}`);
+  }
+
+  // Hovering a branch row moves the highlight back without opening it.
+  emit("moved", 0, 1);
+  if (highlightOf() !== 1) throw new Error(`branch hover = ${highlightOf()}`);
+
+  // A click on a branch opens its submenu — the inline rows grow to include
+  // the child (and no leaf activates).
+  emit("down_left", 0, 1);
+  if (resultCount() !== 3 || results[2]!.activated !== null) {
+    throw new Error(`branch click result = ${JSON.stringify(results[2])}`);
+  }
+  if (menu.children.length !== 4) throw new Error(`rows after branch click = ${menu.children.length}`);
+  if (menu.children[2]?.props.text !== "  File") {
+    throw new Error(`child row = ${menu.children[2]?.props.text}`);
+  }
+
+  // A click on the now-visible leaf activates it (the result's `activated`
+  // carries the item's key) and dismisses the menu.
+  const before = renderCalls.length;
+  emit("down_left", 0, 3);
+  if (resultCount() !== 4 || results[3]!.activated !== "quit") {
+    throw new Error(`leaf click result = ${JSON.stringify(results[3])}`);
+  }
+  if (results[3]!.open !== false) throw new Error("a leaf click must dismiss the menu");
+  if (renderCalls.length <= before) throw new Error("a click must repaint the scene");
+
+  // A closed menu ignores both hover and click: the highlight stays put and
+  // no result is reported.
+  const closedHighlight = () => menu.props.highlighted as number;
+  const closedResults = resultCount();
+  emit("moved", 0, 99);
+  emit("down_left", 0, 99);
+  if (closedHighlight() !== 3) throw new Error("a closed menu must ignore hover");
+  if (resultCount() !== closedResults) throw new Error("a closed menu must ignore clicks");
+
+  dispose();
+  const countBeforeDispose = resultCount();
+  emit("moved", 0, 1);
+  if (resultCount() !== countBeforeDispose) {
+    throw new Error("a disposed subscription must not dispatch");
+  }
 });
 
 // Modal: factory parity + focus save/restore through openModal/closeModal

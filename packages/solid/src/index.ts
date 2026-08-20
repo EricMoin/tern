@@ -36,7 +36,7 @@
  * updates actually reach the scene ops.
  *
  * The roadmap element factories (`Input`/`Textarea`/`Spinner`/`StatusBar`/
- * `Panels`/`DiffView`/`Select`/`ScrollView`/`Table`/`Tabs`/`Progress`/`Modal`/
+ * `Panels`/`DiffView`/`Select`/`Menu`/`ScrollView`/`Table`/`Tabs`/`Progress`/`Modal`/
  * `BarChart`/`Chart`/`Sparkline`)
  * materialize
  * the @tern-tui/core factories of the same name, matching what the `@tern-tui/react`
@@ -91,6 +91,7 @@ import {
   Chart as TernChart,
   DiffView as TernDiffView,
   Input as TernInput,
+  Menu as TernMenu,
   Modal as TernModal,
   Panels as TernPanels,
   Progress as TernProgress,
@@ -114,13 +115,15 @@ import {
   endSelection,
   focusAt,
   focusManager,
-  startPanelDrag,
-  startSelection,
-  type FocusManager,
+  menuClick,
+  menuHover,
+  menuKey,
   mergeTheme,
   pasteIntoTextarea,
   resolveTheme,
   setStreamAutoScroll,
+  startPanelDrag,
+  startSelection,
   syncStreamTail,
   tabsKey,
   tick,
@@ -132,8 +135,11 @@ import {
   type ChartProps,
   type FocusHandle,
   type FocusHandler,
+  type FocusManager,
   type InputProps,
   type KeyHandler,
+  type MenuProps as CoreMenuProps,
+  type MenuState,
   type ModalProps,
   type Node,
   type NodeProps,
@@ -177,6 +183,8 @@ export type {
   InputProps,
   KeyEvent,
   KeyHandler,
+  MenuItem,
+  MenuState,
   ModalProps,
   Node,
   NodeProps,
@@ -219,6 +227,7 @@ export type {
 // theme surface.
 export {
   activateTab,
+  closeMenu,
   closeModal,
   closeTab,
   collapsePanel,
@@ -237,8 +246,13 @@ export {
   focusPanel,
   isStreamFollowing,
   FocusManager,
+  MENU_Z_INDEX,
+  menuClick,
+  menuHover,
+  menuKey,
   mergeTheme,
   MODAL_Z_INDEX,
+  openMenu,
   openModal,
   pasteInto,
   pasteIntoTextarea,
@@ -376,6 +390,10 @@ const options: RendererOptions<Node> = {
         // `options` is the one required prop of the core factory; an empty
         // option list yields a valid, empty dropdown.
         return TernSelect({ options: [] });
+      case "menu":
+        // `items` is the one required prop of the core factory; an empty
+        // item model yields a valid, empty menu.
+        return TernMenu({ items: [] });
       case "scroll_view":
         return TernScrollView({});
       case "table":
@@ -410,7 +428,7 @@ const options: RendererOptions<Node> = {
         return TernSparkline({ data: [] });
       default:
         throw new Error(
-          `@tern-tui/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "textarea", "spinner", "status_bar", "panels", "diff", "select", "scroll_view", "table", "tree", "tabs", "progress", "modal", "bar_chart", "chart", or "sparkline")`,
+          `@tern-tui/solid: unknown element type "${tag}" (expected "box", "text", "streaming_text", "input", "textarea", "spinner", "status_bar", "panels", "diff", "select", "menu", "scroll_view", "table", "tree", "tabs", "progress", "modal", "bar_chart", "chart", or "sparkline")`,
         );
     }
   },
@@ -793,6 +811,93 @@ export function DiffView(props: DiffViewProps): Node {
  */
 export function Select(props: SelectProps): Node {
   return TernSelect(resolveTheme(getTheme(), { ...props, component: "select" }) as SelectProps);
+}
+
+/**
+ * Props for the solid `Menu` factory: the core menu props plus the
+ * focus/callback wiring, mirroring the `@tern-tui/react` `<Menu>` host
+ * component. `focusId` / `focusManager` / `onSelect` / `onDismiss` are
+ * consumed by the factory — they never reach the scene node; the remaining
+ * keys flow to the core `Menu` factory (the `items` model and the
+ * `highlighted` / `open_submenus` / `open` / `floating` / `z_index` /
+ * `submenu` state props).
+ */
+export interface MenuProps extends CoreMenuProps {
+  /**
+   * Register the menu with a `FocusManager` under this id so routed keys
+   * (via `subscribeInput`) drive it through the core `menuKey`. Omit to
+   * leave the menu inert to keys.
+   */
+  focusId?: string;
+  /** The `FocusManager` to register with (defaults to the core
+   *  `focusManager`). */
+  focusManager?: FocusManager;
+  /** Fired when a leaf item is activated (the Enter key or a mouse click on
+   *  it) — the state's `activated` carries the item's key. */
+  onSelect?: (state: MenuState) => void;
+  /** Fired when the Escape key routes to this menu (dismissal). */
+  onDismiss?: (state: MenuState) => void;
+}
+
+/** The focus handles of menu nodes registered by the {@link Menu} factory
+ * (keyed by node, like {@link tabsFocus}). The factory owns the registration;
+ * the caller disposes it with {@link disposeMenuFocus} when the node leaves
+ * the scene. */
+const menuFocus = new WeakMap<Node, FocusHandle>();
+
+/**
+ * Dispose a menu node's focus registration. The {@link Menu} factory
+ * registers the node with its `FocusManager` under `focusId` at creation; the
+ * registration is released here when the node is discarded. A node registered
+ * without a `focusId` (or already disposed) is a no-op.
+ */
+export function disposeMenuFocus(node: Node): void {
+  menuFocus.get(node)?.dispose();
+  menuFocus.delete(node);
+}
+
+/**
+ * Create a `menu` scene node: the core `Menu` factory materialized with
+ * `props` — a flex column of text leaves, one leaf per *visible* item of the
+ * hierarchical `items` model (an item is visible when every ancestor submenu
+ * is open), each an indentation prefix (2 cells per depth level) + the item
+ * label, the highlighted item reversed. The `menu` component preset is
+ * resolved onto the root box at element-creation time. Drive it with
+ * `menuKey` (the focused-element handler wired by `useFocus` +
+ * `subscribeInput`) or the mouse helper subscription
+ * {@link subscribeMenuMouse}; toggle visibility + focus with `openMenu` /
+ * `closeMenu`.
+ *
+ * When `focusId` is given, the menu registers with the `FocusManager` (the
+ * `focusManager` prop, defaulting to the core `focusManager`) — the
+ * Solid-flavored equivalent of the `@tern-tui/react` `<Menu focusId>`
+ * registration. Routed keys (via `subscribeInput`) drive it through the core
+ * `menuKey`: `up` / `down` move the highlight, `right` / `enter` open a
+ * submenu, `left` closes to the parent, `enter` on a leaf activates it —
+ * `onSelect` fires with the state (its `activated` carries the item's key) —
+ * and `escape` dismisses — `onDismiss` fires. Dispose the registration with
+ * {@link disposeMenuFocus} when the node leaves the scene.
+ */
+export function Menu(props: MenuProps): Node {
+  // The focus/callback keys are component-consumed (mirroring `Tabs`): they
+  // must never reach the core factory, or they would leak onto the scene node.
+  const { focusId, focusManager: manager, onSelect, onDismiss, ...nodeProps } = props;
+  const node = TernMenu(resolveTheme(getTheme(), { ...nodeProps, component: "menu" }) as CoreMenuProps);
+  if (focusId !== undefined) {
+    const handle = useFocus(focusId, node, (event) => {
+      const next = menuKey(node, event);
+      // Enter on a leaf activates it (the state's `activated` carries the
+      // item's key) and dismisses the menu; Enter on a branch opens the
+      // submenu (no callback). Escape dismisses without a selection.
+      if (next.activated !== null) {
+        onSelect?.(next);
+      } else if (event.name === "escape") {
+        onDismiss?.(next);
+      }
+    }, manager);
+    menuFocus.set(node, handle);
+  }
+  return node;
 }
 
 /**
@@ -1385,6 +1490,48 @@ export function subscribePanelDrag(
       handler?.(result);
     } else if (event.kind.startsWith("up_")) {
       handler?.(endPanelDrag(panels));
+    }
+  });
+}
+
+/**
+ * Subscribe a `menu` node to a renderer's mouse events, driving the core
+ * menu mouse helpers — the Solid-flavored equivalent of the mouse wiring
+ * inside the `@tern-tui/react` `<Menu>` host component (the menu counterpart
+ * of `subscribePanelDrag` / `subscribeSelection`; Solid has no React-style
+ * context, so the renderer is an explicit argument).
+ *
+ * A `moved` event moves the highlight to the hovered row via the core
+ * `menuHover` (repainting only when the highlight actually moved); a
+ * `down_left` press clicks through `menuClick` — a branch opens its submenu,
+ * a leaf activates it (the returned state's `activated` carries the item's
+ * key) and dismisses the menu — and repaints. Both only apply while the menu
+ * is open (`props.open === true`); non-mouse kinds and events on a closed
+ * menu fall through untouched (the menu's rows sit at the scene origin, the
+ * same convention the panel-drag helpers use — the event's `row` is the
+ * visible item index, clamped into range by the core helpers).
+ *
+ * The optional `handler` receives each applied helper's result (a
+ * `MenuState`); it is not called for events that did not apply.
+ *
+ * Returns a disposer that unsubscribes.
+ */
+export function subscribeMenuMouse(
+  renderer: Renderer,
+  menu: Node,
+  handler?: (state: MenuState) => void,
+): () => void {
+  return renderer.onMouse((event) => {
+    if (menu.props.open !== true) return;
+    if (event.kind === "moved") {
+      const before = typeof menu.props.highlighted === "number" ? menu.props.highlighted : 0;
+      const next = menuHover(menu, event.row);
+      if (next.highlighted !== before) renderer.render();
+      handler?.(next);
+    } else if (event.kind === "down_left") {
+      const next = menuClick(menu, event.row);
+      renderer.render();
+      handler?.(next);
     }
   });
 }
