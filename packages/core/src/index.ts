@@ -6847,6 +6847,17 @@ const HIGHLIGHT_LANGUAGES = new Set([
   "shell",
   "sh",
   "zsh",
+  "python",
+  "py",
+  "go",
+  "golang",
+  "toml",
+  "yaml",
+  "yml",
+  "c",
+  "cpp",
+  "c++",
+  "cxx",
 ]);
 
 /** Map one native highlight span onto a scene `Span`: the `fg` hex string and
@@ -7036,7 +7047,18 @@ type MarkdownBlock =
   | { kind: "list"; prefix: string; text: string }
   | { kind: "blockquote"; text: string }
   | { kind: "hr" }
-  | { kind: "code"; lines: string[]; lang: string };
+  | { kind: "code"; lines: string[]; lang: string }
+  | { kind: "table"; columns: MarkdownTableColumn[]; rows: (string | number)[][] };
+
+/** One column of a parsed pipe-table block: the header label and the cell
+ * alignment derived from the separator row. */
+interface MarkdownTableColumn {
+  /** The header cell's text (also the `Table` column's header label). */
+  header: string;
+  /** The cell content alignment (from the separator: `:--:` center, `--:`
+   * right, otherwise left). */
+  align: "left" | "right" | "center";
+}
 
 /** A heading marker: 1-6 `#` followed by whitespace. */
 const MARKDOWN_HEADING_RE = /^ {0,3}(#{1,6})[ \t]+(.*)$/;
@@ -7045,11 +7067,17 @@ const MARKDOWN_HEADING_RE = /^ {0,3}(#{1,6})[ \t]+(.*)$/;
 const MARKDOWN_ULIST_RE = /^ *([-*+])[ \t]+(.*)$/;
 /** An ordered list item: a number plus `.` / `)` after any leading indent. */
 const MARKDOWN_OLIST_RE = /^ *(\d+[.)])[ \t]+(.*)$/;
+/** A task-list marker inside a list item: `[ ]` / `[x]` / `[X]` followed by
+ * whitespace (the CommonMark task-list extension). */
+const MARKDOWN_TASK_RE = /^\[([ xX])\][ \t]+(.*)$/;
 /** A block quote line: `>` (with an optional following space). */
 const MARKDOWN_QUOTE_RE = /^ {0,3}>[ \t]?(.*)$/;
 /** A thematic break: 3+ of the same `-` / `*` / `_`, spaces allowed between
  * (checked before the list patterns — `- - -` is a rule, not an item). */
 const MARKDOWN_HR_RE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+/** A pipe-table separator row: `|`-separated runs of dashes (optionally
+ * colon-aligned, e.g. `|---|:--:|`), with at least one dash and one pipe. */
+const MARKDOWN_TABLE_SEP_RE = /^ *\|? *:?-+:? *(?:\| *:?-+:? *)*\|? *$/;
 /** A code fence opener: 3+ backticks or 3+ tildes, plus an ignored info
  * string (the language — consumed here and fed to `highlightCode`). */
 const MARKDOWN_FENCE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/;
@@ -7091,7 +7119,11 @@ function parseMarkdown(source: string): MarkdownBlock[] {
     }
     const heading = MARKDOWN_HEADING_RE.exec(line);
     if (heading !== null) {
-      blocks.push({ kind: "heading", level: heading[1]!.length, text: heading[2]! });
+      blocks.push({
+        kind: "heading",
+        level: heading[1]!.length,
+        text: heading[2]!,
+      });
       i += 1;
       continue;
     }
@@ -7109,19 +7141,76 @@ function parseMarkdown(source: string): MarkdownBlock[] {
     const ulist = MARKDOWN_ULIST_RE.exec(line);
     if (ulist !== null) {
       const indent = line.length - line.trimStart().length;
-      blocks.push({ kind: "list", prefix: "  ".repeat(Math.min(6, Math.floor(indent / 2))) + "• ", text: ulist[2]! });
+      const base = "  ".repeat(Math.min(6, Math.floor(indent / 2)));
+      const task = MARKDOWN_TASK_RE.exec(ulist[2]!);
+      if (task !== null) {
+        // A task-list item: the checkbox glyph replaces the bullet (the
+        // checked/unchecked glyphs mirror the `Checkbox` element).
+        blocks.push({
+          kind: "list",
+          prefix: base +
+            (task[1]! === " " ? CHECKBOX_UNCHECKED_GLYPH : CHECKBOX_CHECKED_GLYPH) +
+            " ",
+          text: task[2]!,
+        });
+      } else {
+        blocks.push({ kind: "list", prefix: base + "• ", text: ulist[2]! });
+      }
       i += 1;
       continue;
     }
     const olist = MARKDOWN_OLIST_RE.exec(line);
     if (olist !== null) {
       const indent = line.length - line.trimStart().length;
-      blocks.push({ kind: "list", prefix: "  ".repeat(Math.min(6, Math.floor(indent / 2))) + `${olist[1]!} `, text: olist[2]! });
+      const base = "  ".repeat(Math.min(6, Math.floor(indent / 2)));
+      const task = MARKDOWN_TASK_RE.exec(olist[2]!);
+      if (task !== null) {
+        // A task-list item inside an ordered list: `1. [x] item` keeps its
+        // marker and gains the checkbox glyph.
+        blocks.push({
+          kind: "list",
+          prefix: base + `${olist[1]!} ` +
+            (task[1]! === " " ? CHECKBOX_UNCHECKED_GLYPH : CHECKBOX_CHECKED_GLYPH) +
+            " ",
+          text: task[2]!,
+        });
+      } else {
+        blocks.push({
+          kind: "list",
+          prefix: base + `${olist[1]!} `,
+          text: olist[2]!,
+        });
+      }
       i += 1;
       continue;
     }
     if (line.trim() === "") {
       i += 1; // blank lines separate blocks — nothing to render
+      continue;
+    }
+    // A pipe table: a `|`-containing row followed by a separator row of
+    // dashes. The first line is the header row; the separator's `:---` /
+    // `:--:` / `---:` runs drive per-column alignment; the following pipe
+    // rows are the body. Lines without a pipe (or a separator next) fall
+    // through to the paragraph path.
+    if (line.includes("|") && MARKDOWN_TABLE_SEP_RE.test(lines[i + 1] ?? "")) {
+      const header = splitMarkdownRow(line);
+      const separator = splitMarkdownRow(lines[i + 1]!);
+      const columns: MarkdownTableColumn[] = header.map((cell, col) => ({
+        header: cell,
+        align: markdownTableAlign(separator[col] ?? ""),
+      }));
+      const rows: (string | number)[][] = [];
+      i += 2;
+      while (
+        i < lines.length &&
+        lines[i]!.includes("|") &&
+        lines[i]!.trim() !== ""
+      ) {
+        rows.push(splitMarkdownRow(lines[i]!));
+        i += 1;
+      }
+      blocks.push({ kind: "table", columns, rows });
       continue;
     }
     blocks.push({ kind: "paragraph", text: line });
@@ -7130,10 +7219,31 @@ function parseMarkdown(source: string): MarkdownBlock[] {
   return blocks;
 }
 
+/** Split one pipe-table row into its cells: the leading/trailing pipes are
+ * trimmed and the remaining cells split on `|` and trimmed. A literal pipe
+ * inside a cell is not supported (markdown's `\|` escape is out of scope for
+ * the best-effort parser). */
+function splitMarkdownRow(line: string): string[] {
+  const trimmed = line.trim();
+  const body = trimmed.startsWith("|") ? trimmed.slice(1) : trimmed;
+  const end = body.endsWith("|") ? body.slice(0, -1) : body;
+  return end.split("|").map((cell) => cell.trim());
+}
+
+/** The cell alignment a table separator column declares: `:--:` center,
+ * `--:` right, anything else left. */
+function markdownTableAlign(separator: string): "left" | "right" | "center" {
+  const s = separator.trim();
+  if (s.startsWith(":") && s.endsWith(":")) return "center";
+  if (s.endsWith(":")) return "right";
+  return "left";
+}
+
 /** Whether two inline span styles carry the same derived keys (the parser
- * only produces `bold` / `italic` / `fg` / `underline`). */
+ * only produces `bold` / `italic` / `fg` / `underline` / `hyperlink`). */
 function markdownSpanStyleEqual(a: NodeProps, b: NodeProps): boolean {
-  return a.bold === b.bold && a.italic === b.italic && a.fg === b.fg && a.underline === b.underline;
+  return a.bold === b.bold && a.italic === b.italic && a.fg === b.fg &&
+    a.underline === b.underline && a.hyperlink === b.hyperlink;
 }
 
 /**
@@ -7205,10 +7315,18 @@ function parseInline(text: string): MarkdownSpan[] {
         const paren = rest.indexOf(")", close + 2);
         if (paren !== -1) {
           flush();
-          // The link's label is parsed inline and stamped with the link
-          // style; the surrounding bold/italic carry into the link spans.
+          // The link's target URL rides the OSC 8 `hyperlink` style key (the
+          // engine's `href` — `node.props` reports the snake_case spelling),
+          // so a terminal with OSC 8 support paints the label clickable; the
+          // label itself is parsed inline and stamped with the link style.
+          const url = rest.slice(close + 2, paren);
           for (const span of parseInline(rest.slice(1, close))) {
-            const style: NodeProps = { ...span.style, underline: true, fg: MARKDOWN_LINK_FG };
+            const style: NodeProps = {
+              ...span.style,
+              underline: true,
+              fg: MARKDOWN_LINK_FG,
+              hyperlink: url,
+            };
             if (bold) style.bold = true;
             if (italic) style.italic = true;
             push({ text: span.text, style });
@@ -7232,7 +7350,11 @@ function parseInline(text: string): MarkdownSpan[] {
  * `base` is the block style (e.g. `dim` for a block quote); span styles
  * override it.
  */
-function markdownLineNode(text: string, base: NodeProps, width: number | null): Node {
+function markdownLineNode(
+  text: string,
+  base: NodeProps,
+  width: number | null,
+): Node {
   const spans = parseInline(text);
   if (spans.length === 1) {
     const span = spans[0]!;
@@ -7240,7 +7362,9 @@ function markdownLineNode(text: string, base: NodeProps, width: number | null): 
     if (width !== null) props.width = width;
     return Text(props);
   }
-  const leaves = spans.map((span) => Text({ ...base, text: span.text, ...span.style }));
+  const leaves = spans.map((span) =>
+    Text({ ...base, text: span.text, ...span.style })
+  );
   return Box({ flex_direction: "row" }, ...leaves);
 }
 
@@ -7276,7 +7400,32 @@ function buildMarkdownBlock(block: MarkdownBlock, width: number | null): Node {
     case "blockquote":
       return markdownLineNode(block.text, { dim: true }, width);
     case "hr":
-      return Text({ text: MARKDOWN_HR_CHAR.repeat(width ?? MARKDOWN_HR_WIDTH), dim: true });
+      return Text({
+        text: MARKDOWN_HR_CHAR.repeat(width ?? MARKDOWN_HR_WIDTH),
+        dim: true,
+      });
+    case "table": {
+      // A pipe table renders through the existing `Table` element (the
+      // roadmap's "表格用现有 Table 逻辑局部渲染"): one column per header
+      // cell — width the widest cell in the column (header or body) plus one
+      // padding cell — aligned per the separator row. The sticky header
+      // stays on (the default) and the whole row list is the viewport.
+      const widths = block.columns.map((column, col) =>
+        Math.max(
+          displayWidth(column.header),
+          ...block.rows.map((row) => displayWidth(String(row[col] ?? ""))),
+        ) + 1
+      );
+      return Table({
+        columns: block.columns.map((column, col) => ({
+          key: String(col),
+          header: column.header,
+          width: widths[col]!,
+          align: column.align,
+        })),
+        rows: block.rows,
+      });
+    }
     case "code": {
       // The fenced block: a box with the fence `bg`. With a recognized fence
       // language the whole code text is token-highlighted and composed as one
@@ -7308,7 +7457,11 @@ function buildMarkdownBlock(block: MarkdownBlock, width: number | null): Node {
             rows.push(markdownSpanRow(rowSpans));
             rowSpans = [];
           }
-          rowSpans.push(span.style === undefined ? { text: part } : { text: part, style: span.style });
+          rowSpans.push(
+            span.style === undefined
+              ? { text: part }
+              : { text: part, style: span.style },
+          );
         });
       }
       if (rowSpans.length > 0) rows.push(markdownSpanRow(rowSpans));
@@ -7333,10 +7486,13 @@ function buildMarkdownBlock(block: MarkdownBlock, width: number | null): Node {
  */
 export function MarkdownView(props: MarkdownViewProps): Node {
   const width =
-    typeof props.width === "number" && Number.isFinite(props.width) && props.width > 0
+    typeof props.width === "number" && Number.isFinite(props.width) &&
+      props.width > 0
       ? Math.floor(props.width)
       : null;
-  const blocks = parseMarkdown(props.source ?? "").map((block) => buildMarkdownBlock(block, width));
+  const blocks = parseMarkdown(props.source ?? "").map((block) =>
+    buildMarkdownBlock(block, width)
+  );
   const rootProps: NodeProps = { ...props, flex_direction: "column" };
   const plain = rootProps as Record<string, unknown>;
   delete plain.source;
@@ -7383,7 +7539,10 @@ const streamScrollStates = new WeakMap<Node, StreamScrollState>();
 export function setStreamAutoScroll(node: Node, enabled: boolean): void {
   const state = streamScrollStates.get(node);
   if (state === undefined) {
-    streamScrollStates.set(node, { following: enabled, autoScrollEnabled: enabled });
+    streamScrollStates.set(node, {
+      following: enabled,
+      autoScrollEnabled: enabled,
+    });
   } else {
     state.following = enabled;
     state.autoScrollEnabled = enabled;
