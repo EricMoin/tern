@@ -44,6 +44,33 @@ union (`"key"` / `"resize"` / `"focus"` / `"mouse"` / `"paste"`) on the
 - `onMouse(event)` — a `MouseEventJs` payload.
 - `onPaste(text)` — the pasted text string (crossterm bracketed paste).
 
+Mouse capture is **tiered** (M1.3): press/release, drag, and scroll tracking
+(`?1000h`/`?1002h`/`?1015h`/`?1006h`) are enabled by default; **any-event
+motion tracking (`?1003h`) is off by default** — the listener count on the
+core `onMouse` drives it: the first subscribe enables `?1003h` through the
+native `set_any_event_mouse`, the last unsubscribe disables it (`?1003l`),
+and a re-subscribe (1→1) never re-toggles. Byte-level asserted: the default
+enable sequence contains no `?1003h`, and `index_test.ts` asserts the count
+transitions (0→1 toggles once, 1→0 toggles off, 1→1 does not re-toggle).
+Teardown closes `?1003l` before the general event-listening disable.
+
+**Interactive capability probing** (M1.1) ships in the same layer:
+`renderer.capabilities` returns the color report (`truecolor`, `colors`)
+merged with the interactive probe result (`terminalIdentity`,
+`kittyKeyboard`, `kittyUnderline`, `osc52`, `bracketedPaste`,
+`focusEvents`, `probed`) — five queries (DA1/DA2/DA3/XTVERSION/XTGETTCAP)
+are sent once per process with a 300 ms budget (60 ms per query), and the
+result is cached. A non-TTY or `TERM=dumb` environment skips the probe and
+reports conservative defaults with `probed: false`. The probe gates what is
+enabled on the wire: the kitty keyboard enhancement push (M1.2) happens
+only when `kittyKeyboard` is reported, focus-change (`?1004h`) and
+bracketed paste (`?2004h`) only when the probe reports `focusEvents` /
+`bracketedPaste` (M1.5) — an unsupported terminal simply never enables the
+sequence. Signal-safe lifecycle (M1.4) rides the same event channel:
+`onLifecycle({ phase })` receives `"suspend"` (terminal restored, about to
+stop) and `"resume"` (raw mode + alt screen re-entered, screen invalidated
+— the app must re-render).
+
 Key and paste routing go through the core `FocusManager`: elements register
 with `useFocus(id, node, onKey, manager?, onPaste?)` and the manager
 dispatches each key to the focused element's handler (`routeKey`) and each
@@ -92,6 +119,7 @@ Input/Textarea design notes in this document).
 | [Selection](#selection) | ✅ Shipped | — |
 | [Theme system](#theme-system--soft-wrap) | ✅ Shipped | — |
 | [Soft wrap (`wrap` prop)](#theme-system--soft-wrap) | ✅ Shipped | — |
+| [Terminal capabilities](#event-model) | ✅ Shipped | — (interactive probe M1.1 + tiered mouse M1.3 + signal lifecycle M1.4) |
 
 ---
 

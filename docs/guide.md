@@ -625,6 +625,17 @@ buffers input untouched. The app loop exits when the renderer is destroyed
 `exitOnCtrlC: true`; with `exitOnCtrlC`, the Ctrl+C press is still delivered
 so the loop observes it and sees `renderer.destroyed`).
 
+Focus and paste delivery are **probe-gated**: `onFocus` and `onPaste` work
+only on terminals the interactive capability probe reports support focus
+events / bracketed paste. On a terminal that does not — or where the probe
+was skipped or stayed conservative (`TERM=dumb`, a non-TTY, or a terminal
+that swallowed the probe queries) — those sequences are never enabled and
+the events simply never arrive: the app degrades to the existing paths (no
+focus-aware redraw, and pastes fall back to plain key-by-key input).
+Relatedly, `createRenderer` now errors with
+`"tern requires an interactive terminal (TERM=dumb or non-TTY)"` when
+constructed non-headless on such a terminal, before any terminal I/O.
+
 ### Key routing and focus
 
 Elements that edit on keys register with a `FocusManager`:
