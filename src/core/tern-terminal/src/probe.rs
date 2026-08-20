@@ -92,6 +92,13 @@ pub struct TerminalCapabilities {
     /// Whether focus in/out events are supported (XTGETTCAP `XF`). When
     /// `false`, focus-event reporting stays disabled.
     pub focus_events: bool,
+    /// Whether the terminal supports scroll-region (DECSTBM) painting: a
+    /// self-identified terminal that is not tmux or screen (whose DECSTBM
+    /// quirks make scroll-region painting unsafe — the M2 roadmap risk
+    /// gated by the probe) gets the scroll optimization; unknown and silent
+    /// terminals stay conservative. Derived from [`probed`] and
+    /// [`terminal_identity`], not probed over the wire.
+    pub scroll_region: bool,
 }
 
 /// The five queries the probe sends, in stream order: DA1, DA2, DA3,
@@ -308,6 +315,16 @@ pub fn probe_capabilities<R: Read + Send + 'static, W: Write>(
         }
     }
     drain_replies(&mut buffer, &mut caps, &mut seen);
+    // Scroll-region (DECSTBM) painting is safe only for a terminal that
+    // self-identifies as neither tmux nor screen: both multiplexers have
+    // DECSTBM quirks (the M2 roadmap risk the probe gates), and an unknown
+    // or silent terminal stays on the conservative full-redraw path.
+    // Derived after the final drain so every parsed identity counts.
+    caps.scroll_region = caps.probed
+        && caps.terminal_identity.as_ref().is_some_and(|id| {
+            let l = id.to_lowercase();
+            !l.contains("tmux") && !l.contains("screen")
+        });
     // Signal the reader thread to exit and give it one poll interval to
     // observe the flag: when this function returns, no thread is blocked on
     // stdin anymore, so the application's next input byte cannot be stolen.
@@ -865,6 +882,53 @@ mod tests {
         let (caps, _) = probe_with(&[]);
         assert_eq!(caps, TerminalCapabilities::default());
         assert!(!caps.probed);
+    }
+
+    #[test]
+    fn probed_kitty_identity_enables_scroll_region() {
+        // The full kitty reply set self-identifies (XTVERSION) and is not
+        // tmux or screen: the scroll-region optimization is safe.
+        let (caps, _) = probe_with(&kitty_replies());
+        assert!(caps.probed);
+        assert!(caps.scroll_region, "kitty identity: {caps:?}");
+    }
+
+    #[test]
+    fn tmux_identity_disables_scroll_region() {
+        // tmux's DECSTBM quirks make scroll-region painting unsafe (the M2
+        // roadmap risk the probe gates).
+        let (caps, _) = probe_with(&[b"\x1bP>|tmux 3.4\x1b\\"]);
+        assert!(caps.probed);
+        assert_eq!(caps.terminal_identity.as_deref(), Some("tmux 3.4"));
+        assert!(!caps.scroll_region);
+    }
+
+    #[test]
+    fn screen_identity_disables_scroll_region() {
+        // screen shares tmux's DECSTBM quirks; the same conservative gate.
+        let (caps, _) = probe_with(&[b"\x1bP>|screen 4.09.00\x1b\\"]);
+        assert!(caps.probed);
+        assert_eq!(caps.terminal_identity.as_deref(), Some("screen 4.09.00"));
+        assert!(!caps.scroll_region);
+    }
+
+    #[test]
+    fn unidentifiable_reply_leaves_scroll_region_false() {
+        // A DA1-only answer probes the terminal but names no identity: no
+        // scroll optimization without a self-identified terminal.
+        let (caps, _) = probe_with(&[b"\x1b[?62;52c"]);
+        assert!(caps.probed);
+        assert_eq!(caps.terminal_identity, None);
+        assert!(!caps.scroll_region);
+    }
+
+    #[test]
+    fn silent_terminal_leaves_scroll_region_false() {
+        // The silent terminal times out: not probed, conservative defaults,
+        // no scroll optimization.
+        let caps = probe_capabilities(SilentReader, Vec::new(), Duration::from_millis(10));
+        assert!(!caps.probed);
+        assert!(!caps.scroll_region);
     }
 
     #[test]
