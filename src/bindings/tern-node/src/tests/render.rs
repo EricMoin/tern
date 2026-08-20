@@ -285,9 +285,14 @@ fn render_to_buffer_styled_errors_when_destroyed() {
         use_alt_screen: false,
         headless: false,
         keyboard_enhancement: false,
+        any_event_mouse: false,
         destroyed: true,
         #[cfg(feature = "push-events")]
         event_loop: None,
+        #[cfg(unix)]
+        signals: None,
+        #[cfg(all(unix, feature = "push-events"))]
+        signal_tsfn: None,
     };
     let renderer = TuiRenderer {
         inner: Arc::new(Mutex::new(inner)),
@@ -360,9 +365,14 @@ fn render_to_buffer_errors_when_destroyed() {
         use_alt_screen: false,
         headless: false,
         keyboard_enhancement: false,
+        any_event_mouse: false,
         destroyed: true,
         #[cfg(feature = "push-events")]
         event_loop: None,
+        #[cfg(unix)]
+        signals: None,
+        #[cfg(all(unix, feature = "push-events"))]
+        signal_tsfn: None,
     };
     let renderer = TuiRenderer {
         inner: Arc::new(Mutex::new(inner)),

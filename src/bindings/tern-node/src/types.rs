@@ -247,15 +247,35 @@ pub(crate) fn mouse_button_str(button: MouseButton) -> &'static str {
     }
 }
 
+/// A lifecycle event surfaced to JS when the renderer's owning process is
+/// suspended or resumed by a job-control signal (SIGTSTP / SIGCONT): `type`
+/// is `"lifecycle"` and `lifecycle.phase` is `"suspend"` or `"resume"`.
+///
+/// `"suspend"` is pushed right before the process re-raises SIGTSTP to stop
+/// (the terminal has been restored to its pre-renderer state — the JS side
+/// can flush anything it must persist before the stop). `"resume"` is pushed
+/// after the process re-entered raw mode + the alternate screen and forced a
+/// full repaint (the size cache and retained frame were invalidated), so the
+/// app knows the screen is live again and must re-render.
+#[napi(object)]
+#[derive(Debug)]
+pub struct LifecycleEvent {
+    /// `"suspend"` (terminal restored, process about to stop) or `"resume"`
+    /// (terminal re-entered, full repaint pending).
+    pub phase: String,
+}
+
 /// A terminal event surfaced to JS as a tagged-union plain object: `type`
-/// discriminates (`"key"`, `"resize"`, `"focus"`, `"mouse"`, `"paste"`) and
-/// exactly one of `key` / `width`+`height` / `focus_gained` / `mouse` /
-/// `paste` is set. For `"focus"`, `focus_gained` is `true` on gained and
-/// `false` on lost.
+/// discriminates (`"key"`, `"resize"`, `"focus"`, `"mouse"`, `"paste"`,
+/// `"lifecycle"`) and exactly one of `key` / `width`+`height` /
+/// `focus_gained` / `mouse` / `paste` / `lifecycle` is set. For `"focus"`,
+/// `focus_gained` is `true` on gained and `false` on lost. `"lifecycle"`
+/// events are pushed by the native signal thread (see
+/// [`LifecycleEvent`]) and carry no terminal event.
 #[napi(object)]
 pub struct TernEventJs {
-    /// The event kind: `"key"`, `"resize"`, `"focus"`, `"mouse"`, or
-    /// `"paste"`.
+    /// The event kind: `"key"`, `"resize"`, `"focus"`, `"mouse"`, `"paste"`,
+    /// or `"lifecycle"`.
     #[napi(js_name = "type")]
     pub r#type: String,
     /// The key event, when `type` is `"key"`.
@@ -272,10 +292,30 @@ pub struct TernEventJs {
     pub mouse: Option<MouseEventJs>,
     /// The pasted text, when `type` is `"paste"`.
     pub paste: Option<String>,
+    /// The lifecycle phase (`"suspend"` / `"resume"`), when `type` is
+    /// `"lifecycle"` — pushed by the native signal thread, not the terminal.
+    pub lifecycle: Option<LifecycleEvent>,
 }
 
 #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
 impl TernEventJs {
+    /// A lifecycle event pushed by the native signal thread (not the
+    /// terminal): `phase` is `"suspend"` or `"resume"`.
+    pub(crate) fn lifecycle(phase: &str) -> Self {
+        Self {
+            r#type: "lifecycle".to_string(),
+            key: None,
+            width: None,
+            height: None,
+            focus_gained: None,
+            mouse: None,
+            paste: None,
+            lifecycle: Some(LifecycleEvent {
+                phase: phase.to_string(),
+            }),
+        }
+    }
+
     pub(crate) fn from_tern(ev: TernEvent) -> Self {
         match ev {
             TernEvent::Key(key) => Self {
@@ -286,6 +326,7 @@ impl TernEventJs {
                 focus_gained: None,
                 mouse: None,
                 paste: None,
+                lifecycle: None,
             },
             TernEvent::Resize { w, h } => Self {
                 r#type: "resize".to_string(),
@@ -295,6 +336,7 @@ impl TernEventJs {
                 focus_gained: None,
                 mouse: None,
                 paste: None,
+                lifecycle: None,
             },
             TernEvent::FocusGained => Self {
                 r#type: "focus".to_string(),
@@ -304,6 +346,7 @@ impl TernEventJs {
                 focus_gained: Some(true),
                 mouse: None,
                 paste: None,
+                lifecycle: None,
             },
             TernEvent::FocusLost => Self {
                 r#type: "focus".to_string(),
@@ -313,6 +356,7 @@ impl TernEventJs {
                 focus_gained: Some(false),
                 mouse: None,
                 paste: None,
+                lifecycle: None,
             },
             TernEvent::Mouse(mouse) => Self {
                 r#type: "mouse".to_string(),
@@ -322,6 +366,7 @@ impl TernEventJs {
                 focus_gained: None,
                 mouse: Some(MouseEventJs::from_tern(mouse)),
                 paste: None,
+                lifecycle: None,
             },
             TernEvent::Paste(text) => Self {
                 r#type: "paste".to_string(),
@@ -331,6 +376,7 @@ impl TernEventJs {
                 focus_gained: None,
                 mouse: None,
                 paste: Some(text),
+                lifecycle: None,
             },
         }
     }
@@ -378,7 +424,13 @@ pub struct TuiRendererOptions {
     pub height: Option<u32>,
 }
 
-/// The terminal's color capabilities, detected by the backend.
+/// The terminal's capabilities, surfaced by the `capabilities` getter: the
+/// color report detected once by the backend (see
+/// [`backend::capabilities`](crate::backend::capabilities)) merged with the
+/// interactive probe report (see
+/// [`tern_terminal::probe::TerminalCapabilities`]): terminal identity plus
+/// the kitty keyboard / underline, OSC 52, bracketed-paste, and focus-event
+/// protocol supports the terminal itself reported during the probe.
 #[napi(object)]
 pub struct RendererCapabilities {
     /// Whether 24-bit (16M) RGB truecolor is supported.
@@ -386,4 +438,37 @@ pub struct RendererCapabilities {
     /// The terminal's color palette size: 16_777_216 for truecolor, 256 for
     /// a 256-color palette, 16 for basic ANSI, 0 when none.
     pub colors: u32,
+    /// The terminal's self-reported identity from the interactive probe: the
+    /// XTVERSION text when the terminal answers it (e.g. `kitty(0.36.0)`),
+    /// else the XTGETTCAP `TN` capability value, else the raw DA2
+    /// `Pp;Pv;Pc` identification code. `null` when no reply named the
+    /// terminal (or the probe was skipped for a non-TTY / `TERM=dumb`).
+    pub terminal_identity: Option<String>,
+    /// Whether the kitty keyboard protocol is supported, as reported by the
+    /// interactive probe (`fullkbd`/`XK` XTGETTCAP). `false` for a terminal
+    /// that did not answer the probe, so the backend keeps the legacy key
+    /// reporting fallback.
+    pub kitty_keyboard: bool,
+    /// Whether kitty extended underline styles are supported
+    /// (`Su`/`Setulc` XTGETTCAP: `CSI 4:N m` variants and colored
+    /// underlines), as reported by the interactive probe. `false` for an
+    /// unknown terminal, which takes the plain `CSI 4 m` fallback.
+    pub kitty_underline: bool,
+    /// Whether OSC 52 clipboard writes are supported: the DA1 parameter `52`
+    /// (the contour clipboard-extension marker), or an XTGETTCAP `Ms`
+    /// reply, as reported by the interactive probe.
+    pub osc52: bool,
+    /// Whether bracketed paste mode is supported (XTGETTCAP `PS`/`BE`), as
+    /// reported by the interactive probe. `false` filters paste events at
+    /// the event layer.
+    pub bracketed_paste: bool,
+    /// Whether focus in/out events are supported (XTGETTCAP `XF`), as
+    /// reported by the interactive probe. `false` keeps focus-event
+    /// reporting disabled.
+    pub focus_events: bool,
+    /// Whether the interactive probe parsed any query reply. `false` when
+    /// the probe was skipped (non-TTY or `TERM=dumb`) or every query went
+    /// unanswered (timeout / empty reply); every probe field is then a
+    /// conservative default.
+    pub probed: bool,
 }

@@ -9,10 +9,10 @@ use napi_derive::napi;
 /// `set_props` for the style-key convention.
 #[napi(js_name = "create_node")]
 pub fn create_node(
-    r#type: String,
+    node_type: String,
     props: Option<HashMap<String, serde_json::Value>>,
 ) -> Result<NodeHandle> {
-    let kind = match r#type.as_str() {
+    let kind = match node_type.as_str() {
         "box" => NodeKind::Box,
         "text" => NodeKind::Text,
         "streaming_text" => NodeKind::StreamingText,

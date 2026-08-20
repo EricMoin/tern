@@ -102,6 +102,8 @@ mod backend;
 mod convert;
 mod node;
 mod renderer;
+#[cfg(unix)]
+mod signals;
 mod types;
 
 // Re-export the napi surface (and crate-internal helpers) at the crate
@@ -110,6 +112,8 @@ pub(crate) use backend::*;
 pub use convert::*;
 pub use node::*;
 pub use renderer::*;
+#[cfg(unix)]
+pub(crate) use signals::*;
 pub use types::*;
 
 #[cfg(test)]

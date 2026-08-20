@@ -22,6 +22,11 @@ push-events = []
 poll-fallback = []
 
 [dependencies]
+# `crossterm`'s `tty::IsTty` — the interactive-terminal guard in
+# `TuiRenderer::new` (roadmap M1.5) tests whether stdout is a TTY before any
+# terminal I/O. Already in the workspace lock via tern-terminal (same 0.29),
+# so this adds no lock churn.
+crossterm = "0.29"
 # `dyn-symbols` (a napi-rs default, restored here) resolves N-API symbols
 # through a runtime function table with link-time stubs, so the crate's unit
 # tests — which exercise the napi Error path — link and run without a Node
@@ -33,6 +38,17 @@ tern-core = { path = "../../core/tern-core" }
 tern-components = { path = "../../core/tern-components" }
 tern-highlight = { path = "../../core/tern-highlight" }
 tern-terminal = { path = "../../core/tern-terminal" }
+
+[target.'cfg(unix)'.dependencies]
+# Signal-safe terminal lifecycle (roadmap M1.4): SIGINT/SIGTERM/SIGHUP clean
+# exit, SIGTSTP suspend/resume with terminal restore and re-entry. 0.3.x is
+# already in the workspace lock (pulled in by crossterm's mio integration),
+# so this resolves to the same 0.3.18 without a lock change.
+signal-hook = "0.3"
+# Restoring the kernel-level default dispositions (SIG_DFL) on destroy and
+# suspend: signal-hook's unregister leaves the signal ignored rather than
+# returning the default action, so the raw sigaction reset is required.
+libc = "0.2"
 
 [build-dependencies]
 napi-build = "2"

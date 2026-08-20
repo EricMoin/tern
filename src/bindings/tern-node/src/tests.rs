@@ -216,6 +216,13 @@ struct CountingBackend {
     /// `set_cursor` routes the render through the cursor-aware flush with the
     /// right cursor.
     flushed_cursor: Arc<Mutex<Option<Cursor>>>,
+    /// How many times `enable_any_event_mouse` was called: proves
+    /// `set_any_event_mouse(true)` reaches the backend.
+    any_event_enable_calls: Arc<AtomicUsize>,
+    /// Ordered log of teardown calls (`"disable_any_event_mouse"` /
+    /// `"disable_event_listening"`), so tests can assert the any-event
+    /// disable lands before the general event-listening disable.
+    teardown_log: Arc<Mutex<Vec<&'static str>>>,
 }
 
 impl CountingBackend {
@@ -239,12 +246,46 @@ impl CountingBackend {
             .expect("flushed cursor poisoned")
             .clone()
     }
+
+    /// The ordered teardown log: `"disable_any_event_mouse"` must precede
+    /// `"disable_event_listening"` when a renderer with any-event mouse
+    /// enabled is destroyed.
+    fn teardown_log(&self) -> Vec<&'static str> {
+        self.teardown_log
+            .lock()
+            .expect("teardown log poisoned")
+            .clone()
+    }
 }
 
 impl RenderBackend for CountingBackend {
     fn size(&self) -> io::Result<(u16, u16)> {
         self.size_calls.fetch_add(1, Ordering::Relaxed);
         Ok((80, 24))
+    }
+
+    fn enter_raw_mode(&self) -> io::Result<()> {
+        self.teardown_log
+            .lock()
+            .expect("teardown log poisoned")
+            .push("enter_raw_mode");
+        Ok(())
+    }
+
+    fn enter_alt_screen(&self) -> io::Result<()> {
+        self.teardown_log
+            .lock()
+            .expect("teardown log poisoned")
+            .push("enter_alt_screen");
+        Ok(())
+    }
+
+    fn enable_event_listening(&self) -> io::Result<()> {
+        self.teardown_log
+            .lock()
+            .expect("teardown log poisoned")
+            .push("enable_event_listening");
+        Ok(())
     }
 
     fn flush_diff(
@@ -279,6 +320,31 @@ impl RenderBackend for CountingBackend {
     }
 
     fn disable_event_listening(&self) -> io::Result<()> {
+        self.teardown_log
+            .lock()
+            .expect("teardown log poisoned")
+            .push("disable_event_listening");
+        Ok(())
+    }
+
+    fn enable_any_event_mouse(&self) -> io::Result<()> {
+        self.any_event_enable_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn disable_any_event_mouse(&self) -> io::Result<()> {
+        self.teardown_log
+            .lock()
+            .expect("teardown log poisoned")
+            .push("disable_any_event_mouse");
+        Ok(())
+    }
+
+    fn enter_keyboard_enhancement(&self) -> io::Result<()> {
+        self.teardown_log
+            .lock()
+            .expect("teardown log poisoned")
+            .push("enter_keyboard_enhancement");
         Ok(())
     }
 
@@ -331,9 +397,14 @@ fn renderer_with_scene(backend: CountingBackend, scene: Arc<Mutex<Scene>>) -> Tu
         use_alt_screen: false,
         headless: false,
         keyboard_enhancement: false,
+        any_event_mouse: false,
         destroyed: false,
         #[cfg(feature = "push-events")]
         event_loop: None,
+        #[cfg(unix)]
+        signals: None,
+        #[cfg(all(unix, feature = "push-events"))]
+        signal_tsfn: None,
     };
     TuiRenderer {
         inner: Arc::new(Mutex::new(inner)),

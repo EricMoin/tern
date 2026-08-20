@@ -2,7 +2,9 @@
 //! event-stream plumbing.
 
 use super::*;
+use crossterm::tty::IsTty;
 use napi_derive::napi;
+use tern_terminal::probe::TerminalCapabilities;
 
 /// The terminal-facing renderer: owns raw mode + alternate screen, pushes
 /// input to the JS thread via a threadsafe event stream (or polls it with the
@@ -84,19 +86,165 @@ pub(crate) struct RendererInner {
     /// Whether the kitty keyboard protocol enhancement was pushed — `destroy`
     /// pops it so the terminal returns to its previous state.
     pub(crate) keyboard_enhancement: bool,
+    /// Whether any-event mouse tracking (`?1003h`) is enabled — `destroy`
+    /// turns it off (`?1003l`) before the general event-listening teardown,
+    /// so the terminal closes its capture modes in enable order.
+    pub(crate) any_event_mouse: bool,
     pub(crate) destroyed: bool,
     /// The background push event loop (`push-events` feature): stopped when
     /// the renderer is destroyed so the loop thread exits and releases the
     /// threadsafe function.
     #[cfg(feature = "push-events")]
     pub(crate) event_loop: Option<EventLoopHandle>,
+    /// The unix signal-lifecycle handles (the `tern-signals` thread + its
+    /// registrations): SIGINT/SIGTERM/SIGHUP clean exit, SIGTSTP suspend,
+    /// SIGCONT resume. `None` for a headless renderer (it never touches a
+    /// terminal, so no signals are taken over) and on non-unix builds.
+    #[cfg(unix)]
+    pub(crate) signals: Option<SignalHandles>,
+    /// The push-channel tsfn, handed over by `start_event_stream` so the
+    /// signal thread can deliver SIGTSTP/SIGCONT lifecycle events to JS.
+    /// `None` before the stream starts (and always under `poll-fallback`).
+    #[cfg(all(unix, feature = "push-events"))]
+    pub(crate) signal_tsfn: Option<Arc<ThreadsafeFunction<TernEventJs>>>,
+}
+
+impl RendererInner {
+    /// Restore the terminal to its pre-renderer state: pop the kitty
+    /// keyboard enhancement if it was pushed, disable any-event mouse and
+    /// the general event listening, leave the alternate screen, and exit
+    /// raw mode — the same teardown tail as [`teardown`](Self::teardown).
+    ///
+    /// Deliberately NOT the full teardown: no event-loop stop and no
+    /// destroyed marking. The SIGTSTP suspend path uses it — the event loop
+    /// stays running (the stopped process pauses it; SIGCONT resumes it) and
+    /// the renderer stays alive, so the SIGCONT resume can re-enter the
+    /// terminal under the same renderer.
+    pub(crate) fn restore_terminal(&mut self) {
+        if self.destroyed || self.headless {
+            return;
+        }
+        if self.keyboard_enhancement {
+            let _ = self.backend.exit_keyboard_enhancement();
+        }
+        if self.any_event_mouse {
+            let _ = self.backend.disable_any_event_mouse();
+        }
+        let _ = self.backend.disable_event_listening();
+        if self.use_alt_screen {
+            let _ = self.backend.exit_alt_screen();
+        }
+        let _ = self.backend.exit_raw_mode();
+    }
+
+    /// Re-enter the terminal after a suspend/continue cycle: raw mode, the
+    /// alternate screen, event listening, the kitty keyboard enhancement
+    /// (re-pushed only if it was pushed), and any-event mouse (re-enabled
+    /// only if it was on), then invalidate the cached size and drop the
+    /// retained frame so the next render repaints everything.
+    ///
+    /// The terminal shows the pre-TUI (primary) screen while the process was
+    /// suspended; re-entering the alternate screen does not restore the
+    /// previous frame, so a full repaint is mandatory — clearing
+    /// `cached_size` (defeating the no-op fast path) plus `last` /
+    /// `last_painted_epoch` (forcing a full-buffer diff) makes the next
+    /// `render()` paint every cell. Errors are ignored, best-effort like the
+    /// teardown: a terminal closed while suspended just leaves a broken
+    /// renderer, which the next render reports.
+    pub(crate) fn resume_terminal(&mut self) {
+        if self.headless {
+            return;
+        }
+        let _ = self.backend.enter_raw_mode();
+        if self.use_alt_screen {
+            let _ = self.backend.enter_alt_screen();
+        }
+        let _ = self.backend.enable_event_listening();
+        if self.keyboard_enhancement {
+            let _ = self.backend.enter_keyboard_enhancement();
+        }
+        if self.any_event_mouse {
+            let _ = self.backend.enable_any_event_mouse();
+        }
+        // The screen is stale and the terminal size may have changed while
+        // suspended: force the next render off the no-op fast path and into
+        // a full repaint.
+        self.cached_size = None;
+        self.last = None;
+        self.last_painted_epoch = 0;
+    }
+
+    /// The idempotent full teardown every restore path funnels through:
+    /// stop the push event loop, restore the terminal, mark the renderer
+    /// destroyed. A destroyed renderer is a no-op. Used by
+    /// [`TuiRenderer::destroy`], the Ctrl+C teardown paths, and the signal
+    /// exit handlers.
+    pub(crate) fn teardown(&mut self) {
+        if self.destroyed {
+            return;
+        }
+        #[cfg(feature = "push-events")]
+        if let Some(event_loop) = &self.event_loop {
+            event_loop.stop();
+        }
+        self.restore_terminal();
+        self.destroyed = true;
+    }
+}
+
+/// Whether the kitty keyboard protocol enhancement flags should be pushed
+/// to the terminal.
+///
+/// The pure decision behind the constructor's keyboard-enhancement gate:
+/// the flags are pushed only when the caller opted in (`option`), the
+/// renderer is not `headless` (a headless renderer never touches a
+/// terminal), and the interactive probe reports the terminal supports the
+/// kitty keyboard protocol (`caps.kitty_keyboard`). A terminal that cannot
+/// answer the probe — or a probe skipped for a non-TTY — reports
+/// conservative defaults, so this stays `false` for unknown terminals:
+/// the legacy fallback (an unsupported terminal silently ignoring the
+/// push) never runs, because the push itself is gated.
+pub(crate) fn should_push_keyboard_enhancement(
+    option: bool,
+    headless: bool,
+    caps: &TerminalCapabilities,
+) -> bool {
+    option && !headless && caps.kitty_keyboard
+}
+
+/// Whether a non-headless renderer must refuse to construct on this
+/// terminal: `Some(message)` when construction must error, `None` when the
+/// terminal is interactive.
+///
+/// The pure decision behind the constructor's interactive-terminal guard:
+/// a non-headless renderer drives a real terminal — raw mode, the alternate
+/// screen, and event delivery all write to stdout — so it needs one.
+/// `TERM=dumb` marks a terminal that deliberately disables escape-sequence
+/// interpretation (and the interactive probe skips it, leaving every
+/// capability-driven feature on conservative defaults), and a non-TTY
+/// stdout means there is no terminal at all. The check runs BEFORE any
+/// terminal I/O in the constructor, so a failed construction never leaves a
+/// pipe or file descriptor in raw mode.
+///
+/// `pub(crate)` and parameterized so the full truth table is unit-testable
+/// without touching process env or stdio (mirroring
+/// [`should_push_keyboard_enhancement`]); the ambient constructor-level
+/// check is covered by the PTY smoke case.
+pub(crate) fn interactive_terminal_error(term_dumb: bool, stdout_tty: bool) -> Option<&'static str> {
+    if term_dumb || !stdout_tty {
+        Some("tern requires an interactive terminal (TERM=dumb or non-TTY)")
+    } else {
+        None
+    }
 }
 
 #[napi]
 impl TuiRenderer {
     /// Enter raw mode + the alternate screen (unless `use_alt_screen` is
     /// `false`), apply the window title, and enable mouse / focus-change /
-    /// bracketed-paste event delivery, ready to render.
+    /// bracketed-paste event delivery, ready to render. The kitty keyboard
+    /// protocol enhancement is pushed only when opted in (default) and the
+    /// interactive probe reports the terminal supports it.
     ///
     /// If any terminal transition fails the already-entered states are rolled
     /// back before the error is returned, so a failed constructor never leaves
@@ -106,7 +254,12 @@ impl TuiRenderer {
         let use_alt_screen = options.use_alt_screen.unwrap_or(true);
         let title = options.title.clone();
         let headless = options.headless.unwrap_or(false);
-        let keyboard_enhancement = options.keyboard_enhancement.unwrap_or(true) && !headless;
+        // The caller's opt-in for the kitty keyboard protocol (default on).
+        // Whether the enhancement flags are actually pushed additionally
+        // requires a non-headless renderer and the interactive probe
+        // reporting kitty keyboard support — see
+        // `should_push_keyboard_enhancement`.
+        let keyboard_enhancement = options.keyboard_enhancement.unwrap_or(true);
         // A headless renderer never touches a terminal: no raw mode, no
         // alternate screen, no event listening, no title. Its in-memory
         // backend reports the configured virtual size (default 80x24) and
@@ -114,15 +267,31 @@ impl TuiRenderer {
         // TTY. `use_alt_screen` is forced off so `destroy` skips the
         // alternate-screen teardown to match (the no-op backend would swallow
         // it either way).
-        let (backend, use_alt_screen) = if headless {
+        let (backend, use_alt_screen, keyboard_enhancement_pushed) = if headless {
             (
                 Box::new(HeadlessBackend::new(
                     options.width.unwrap_or(80),
                     options.height.unwrap_or(24),
                 )) as Box<dyn RenderBackend>,
                 false,
+                // A headless renderer never touches a terminal: nothing is
+                // pushed, so `destroy` pops nothing.
+                false,
             )
         } else {
+            // A non-headless renderer needs an interactive terminal: refuse
+            // to construct on TERM=dumb or a non-TTY stdout BEFORE any
+            // terminal I/O (raw mode on a pipe would succeed — crossterm
+            // does not check — but the renderer would then paint into a
+            // non-terminal and never receive events). The decision is pure
+            // and unit-tested via `interactive_terminal_error`; the ambient
+            // check here runs only in the non-headless branch, so headless
+            // construction is completely unaffected.
+            let term_dumb = std::env::var("TERM").is_ok_and(|term| term == "dumb");
+            let stdout_tty = std::io::stdout().is_tty();
+            if let Some(message) = interactive_terminal_error(term_dumb, stdout_tty) {
+                return Err(Error::from_reason(message));
+            }
             let backend = Backend::new();
             backend
                 .enter_raw_mode()
@@ -134,9 +303,16 @@ impl TuiRenderer {
                 }
                 return Err(Error::from_reason(format!("enter alternate screen: {e}")));
             }
-            if keyboard_enhancement {
-                // Best-effort: terminals without the kitty keyboard protocol
-                // ignore the sequence; a failed write here must not fail the
+            // The kitty keyboard protocol enhancement flags reach the
+            // terminal only when the interactive probe (cached by
+            // tern-terminal) reports the terminal supports the protocol.
+            // A terminal without it previously swallowed the sequence
+            // silently; the probe now gates the push itself, so `destroy`
+            // pops exactly what was pushed.
+            let keyboard_enhancement_pushed =
+                should_push_keyboard_enhancement(keyboard_enhancement, headless, tern_terminal::probe());
+            if keyboard_enhancement_pushed {
+                // Best-effort: a failed write here must not fail the
                 // constructor (the renderer works identically without it —
                 // only the Shift-modified key reporting degrades).
                 let _ = backend.enter_keyboard_enhancement();
@@ -144,33 +320,61 @@ impl TuiRenderer {
             (
                 Box::new(Backend::new()) as Box<dyn RenderBackend>,
                 use_alt_screen,
+                keyboard_enhancement_pushed,
             )
         };
-        Ok(Self {
-            inner: Arc::new(Mutex::new(RendererInner {
-                backend,
-                compositor: Compositor::new(),
-                scene: shared_scene().clone(),
-                last: None,
-                last_painted_epoch: 0,
-                last_viewport: NO_VIEWPORT,
-                last_painted_viewport: NO_VIEWPORT,
-                selection: None,
-                last_painted_selection: None,
-                cursor: None,
-                last_painted_cursor: None,
-                cached_size: None,
-                last_flush_bytes: 0,
-                #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
-        exit_on_ctrl_c: options.exit_on_ctrl_c.unwrap_or(false),
-                use_alt_screen,
-                headless,
-                keyboard_enhancement,
-                destroyed: false,
-                #[cfg(feature = "push-events")]
-                event_loop: None,
-            })),
-        })
+        let inner = Arc::new(Mutex::new(RendererInner {
+            backend,
+            compositor: Compositor::new(),
+            scene: shared_scene().clone(),
+            last: None,
+            last_painted_epoch: 0,
+            last_viewport: NO_VIEWPORT,
+            last_painted_viewport: NO_VIEWPORT,
+            selection: None,
+            last_painted_selection: None,
+            cursor: None,
+            last_painted_cursor: None,
+            cached_size: None,
+            last_flush_bytes: 0,
+            #[cfg(any(feature = "push-events", feature = "poll-fallback"))]
+            exit_on_ctrl_c: options.exit_on_ctrl_c.unwrap_or(false),
+            use_alt_screen,
+            headless,
+            keyboard_enhancement: keyboard_enhancement_pushed,
+            any_event_mouse: false,
+            destroyed: false,
+            #[cfg(feature = "push-events")]
+            event_loop: None,
+            #[cfg(unix)]
+            signals: None,
+            #[cfg(all(unix, feature = "push-events"))]
+            signal_tsfn: None,
+        }));
+        // Take over the process's signals for every non-headless renderer:
+        // SIGINT/SIGTERM/SIGHUP tear the terminal down and exit with the
+        // conventional code, SIGTSTP/SIGCONT suspend and resume it. A
+        // headless renderer never touches a terminal, so it leaves the
+        // process's signal dispositions alone.
+        #[cfg(unix)]
+        if !headless {
+            match register_signals(inner.clone()) {
+                Ok(handles) => {
+                    inner.lock().expect("renderer inner poisoned").signals = Some(handles);
+                }
+                Err(e) => {
+                    // Roll the already-entered terminal states back through
+                    // the shared teardown (mirroring the startup-failure
+                    // path above), so a failed constructor never leaves the
+                    // terminal in raw mode with no one to restore it.
+                    let mut guard = inner.lock().expect("renderer inner poisoned");
+                    guard.teardown();
+                    drop(guard);
+                    return Err(Error::from_reason(format!("register signals: {e}")));
+                }
+            }
+        }
+        Ok(Self { inner })
     }
 
     /// A handle to the scene root, to attach content under.
@@ -395,33 +599,27 @@ impl TuiRenderer {
     }
 
     /// Leave the alternate screen and raw mode and stop event listening,
-    /// restoring the terminal. Also stops the push event loop (with the
-    /// default `push-events` feature) so the loop thread exits. Safe to call
-    /// more than once; a destroyed renderer cannot render or poll.
+    /// restoring the terminal. Any-event mouse tracking is turned off
+    /// (`?1003l`) before the general event-listening disable, so the
+    /// terminal closes its capture modes in enable order. Also stops the
+    /// push event loop (with the default `push-events` feature) so the
+    /// loop thread exits, and stops the signal thread so the process's
+    /// signal dispositions are restored. Safe to call more than once; a
+    /// destroyed renderer cannot render or poll.
     #[napi(js_name = "destroy")]
     pub fn destroy(&self) -> Result<()> {
         let mut inner = self.inner.lock().expect("renderer inner poisoned");
-        if inner.destroyed {
-            return Ok(());
+        // Take the signal handles OUT of the lock before stopping the
+        // thread: the signal thread may be waiting on this very lock, and
+        // joining it while we hold the lock would deadlock.
+        #[cfg(unix)]
+        let signals = inner.signals.take();
+        inner.teardown();
+        drop(inner);
+        #[cfg(unix)]
+        if let Some(mut signals) = signals {
+            signals.stop();
         }
-        #[cfg(feature = "push-events")]
-        if let Some(event_loop) = &inner.event_loop {
-            event_loop.stop();
-        }
-        // A headless renderer never entered raw mode, the alternate screen,
-        // event listening, or a title — there is nothing to tear down (its
-        // in-memory backend would no-op these anyway).
-        if !inner.headless {
-            if inner.keyboard_enhancement {
-                let _ = inner.backend.exit_keyboard_enhancement();
-            }
-            let _ = inner.backend.disable_event_listening();
-            if inner.use_alt_screen {
-                let _ = inner.backend.exit_alt_screen();
-            }
-            let _ = inner.backend.exit_raw_mode();
-        }
-        inner.destroyed = true;
         Ok(())
     }
 
@@ -435,14 +633,28 @@ impl TuiRenderer {
             .destroyed
     }
 
-    /// The terminal's color capabilities (`{ truecolor, colors }`), detected
-    /// once by the backend (see `tern-terminal`'s `Backend::capabilities`).
+    /// The terminal's capabilities: the color report detected once by the
+    /// backend (`{ truecolor, colors }` — see `tern-terminal`'s
+    /// `Backend::capabilities`) merged with the interactive probe report
+    /// (`terminalIdentity`, `kittyKeyboard`, `kittyUnderline`, `osc52`,
+    /// `bracketedPaste`, `focusEvents`, `probed` — see `tern-terminal`'s
+    /// `probe::TerminalCapabilities`). The probe result is cached per
+    /// process; a probe skipped for a non-TTY or `TERM=dumb` reports
+    /// conservative defaults with `probed: false`.
     #[napi(getter, js_name = "capabilities")]
     pub fn capabilities(&self) -> RendererCapabilities {
         let caps = tern_terminal::backend::capabilities();
+        let probe = tern_terminal::probe();
         RendererCapabilities {
             truecolor: caps.truecolor,
             colors: caps.colors,
+            terminal_identity: probe.terminal_identity.clone(),
+            kitty_keyboard: probe.kitty_keyboard,
+            kitty_underline: probe.kitty_underline,
+            osc52: probe.osc52,
+            bracketed_paste: probe.bracketed_paste,
+            focus_events: probe.focus_events,
+            probed: probe.probed,
         }
     }
 
@@ -532,6 +744,35 @@ impl TuiRenderer {
             .backend
             .set_clipboard(&text)
             .map_err(|e| Error::from_reason(format!("set clipboard: {e}")))
+    }
+
+    /// Enable or disable any-event mouse tracking (`?1003h` / `?1003l`):
+    /// the terminal reports every mouse motion while enabled, not just
+    /// presses and drags. Off by default — the constructor enables
+    /// press/release, drag, and scroll tracking only — so motion events
+    /// flow only while a motion/drag listener is registered. Records the
+    /// state so [`destroy`](Self::destroy) turns the mode off (`?1003l`)
+    /// before the general event-listening disable. Errors on a destroyed
+    /// renderer.
+    #[napi(js_name = "set_any_event_mouse")]
+    pub fn set_any_event_mouse(&self, enabled: bool) -> Result<()> {
+        let mut inner = self.inner.lock().expect("renderer inner poisoned");
+        if inner.destroyed {
+            return Err(Error::from_reason("renderer is destroyed"));
+        }
+        if enabled {
+            inner
+                .backend
+                .enable_any_event_mouse()
+                .map_err(|e| Error::from_reason(format!("enable any-event mouse: {e}")))?;
+        } else {
+            inner
+                .backend
+                .disable_any_event_mouse()
+                .map_err(|e| Error::from_reason(format!("disable any-event mouse: {e}")))?;
+        }
+        inner.any_event_mouse = enabled;
+        Ok(())
     }
 
     /// Set the selection overlay to the inclusive rectangle spanned by
@@ -740,14 +981,12 @@ impl TuiRenderer {
                 push_event_batch(std::slice::from_ref(&event), exit_on_ctrl_c, &mut push);
             if teardown {
                 // Ctrl+C with exit_on_ctrl_c: restore the terminal and mark
-                // the renderer destroyed, exactly like the pull path did.
+                // the renderer destroyed through the shared idempotent
+                // teardown, exactly like `destroy` (stopping the loop is a
+                // no-op here — the loop is stopping itself via the stop
+                // flag below).
                 if let Ok(mut inner) = inner_for_loop.lock() {
-                    let _ = inner.backend.disable_event_listening();
-                    if inner.use_alt_screen {
-                        let _ = inner.backend.exit_alt_screen();
-                    }
-                    let _ = inner.backend.exit_raw_mode();
-                    inner.destroyed = true;
+                    inner.teardown();
                 }
                 loop_stop.store(true, Ordering::Relaxed);
             }
@@ -755,6 +994,12 @@ impl TuiRenderer {
         .map_err(|e| Error::from_reason(format!("spawn event loop: {e}")))?;
         let mut inner = self.inner.lock().expect("renderer inner poisoned");
         inner.event_loop = Some(handle);
+        // Hand the push-channel tsfn to the signal thread: SIGTSTP/SIGCONT
+        // lifecycle events reach JS through it.
+        #[cfg(all(unix, feature = "push-events"))]
+        {
+            inner.signal_tsfn = Some(tsfn);
+        }
         Ok(())
     }
 }
@@ -791,12 +1036,7 @@ impl TuiRenderer {
         for ev in events {
             let ctrl_c = is_ctrl_c(&ev);
             if inner.exit_on_ctrl_c && ctrl_c {
-                let _ = inner.backend.disable_event_listening();
-                if inner.use_alt_screen {
-                    let _ = inner.backend.exit_alt_screen();
-                }
-                let _ = inner.backend.exit_raw_mode();
-                inner.destroyed = true;
+                inner.teardown();
                 return Ok(out);
             }
             // A resize event invalidates the cached terminal size so the next
