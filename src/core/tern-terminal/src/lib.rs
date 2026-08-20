@@ -19,14 +19,20 @@
 //! This crate owns the terminal I/O; tern-core performs none. It depends on
 //! `crossterm` for terminal control and on `tern-core` for the cell-update
 //! types it flushes.
+//!
+//! * [`mod@probe`] — interactive terminal capability probing: queries DA1/DA2/
+//!   DA3, XTVERSION, and XTGETTCAP and parses the replies into a
+//!   [`TerminalCapabilities`] report (cached by [`probe`](probe::probe)).
 
 #![forbid(unsafe_code)]
 
 pub mod backend;
 pub mod event;
+pub mod probe;
 
 pub use backend::{flush_cursor_to, flush_diff_to, flush_diff_with_cursor_to, Backend};
 pub use event::{
     normalize, poll_events, run_event_loop, spawn_event_loop, EventLoopHandle, KeyKind, KeyName,
     MouseButton, MouseEventKind, TernEvent, TernKey, TernMouse,
 };
+pub use probe::{probe, probe_capabilities, TerminalCapabilities};
