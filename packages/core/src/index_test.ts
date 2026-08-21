@@ -110,6 +110,7 @@ import {
   STREAM_AFFORDANCE_CHAR,
   StreamingText,
   styledFramesEqual,
+  syncSemantics,
   syncStreamTail,
   TAB_ACTIVE_MARKER,
   TAB_CLOSE_CHAR,
@@ -145,11 +146,13 @@ import {
 } from "./index.ts";
 import type {
   HelpPanelProps,
+  InputProps,
   KeyCombo,
   MenuItem,
   NodeProps,
   ProgressProps,
   SelectOption,
+  SemanticsNodeJs,
   StyleRunJs,
   TableColumn,
   TableState,
@@ -168,6 +171,7 @@ import type {
   MouseEventJs,
   NodeHandle,
   Renderer,
+  SceneSemanticsJs,
   SelectionRange,
   Span,
   TernEventJs,
@@ -267,6 +271,13 @@ class FakeNodeHandle {
     this.props[key] = value;
   }
   append_span(_text: string, _style?: unknown): void {}
+  /** The semantics writes recorded via `set_semantics`, in call order (the
+   * M4.1 surface — the fake stands in for the native store writes). */
+  readonly semanticsWrites: unknown[] = [];
+  set_semantics(node: unknown): void {
+    this.semanticsWrites.push(node);
+  }
+  clear_semantics(): void {}
   remove(): boolean {
     return true;
   }
@@ -376,6 +387,12 @@ class FakeTuiRenderer {
   }
   set_clipboard(text: string): void {
     lastClipboard = text;
+  }
+  /** The flat semantics dump (the M4.1 surface). The fake's store is the
+   * per-handle `semanticsWrites` records; the renderer-level dump mirrors
+   * the native read-back, which never throws. */
+  semantics(): SceneSemanticsJs[] {
+    return [];
   }
   /** The `set_any_event_mouse` calls recorded by the fake, in call order
    * (the 1003 any-event toggle the `onMouse` listener count drives). */
@@ -7423,6 +7440,237 @@ Deno.test("closeMenu falls back to a blur when nothing was focused before the op
     inside.dispose();
     manager.blur();
   }
+});
+
+// ---------------------------------------------------------------------------
+// M4.1 semantics wiring (syncSemantics / Node.setSemantics)
+// ---------------------------------------------------------------------------
+
+/** Attach `node` under a fresh fake renderer and return its fake native
+ * handle — whose `semanticsWrites` record every native `set_semantics` call
+ * (the fake stand-in for the M4.1 store writes). */
+function attachToFake(node: Node): FakeNodeHandle {
+  const renderer = createRenderer({ headless: true });
+  renderer.root.addChild(node);
+  return node.handle as unknown as FakeNodeHandle;
+}
+
+/** The semantics writes recorded on a fake handle as plain descriptors. */
+function writesOf(handle: FakeNodeHandle): SemanticsNodeJs[] {
+  return handle.semanticsWrites as SemanticsNodeJs[];
+}
+
+Deno.test("semantics: a checkbox flushes a checkbox descriptor on attach and checkboxKey re-syncs the checked state", () => {
+  withFakeAddon(() => {
+    const checkbox = Checkbox({ label: "Dark mode", checked: true });
+    const handle = attachToFake(checkbox);
+    // The factory-derived descriptor flushed on attach: role checkbox, the
+    // label from `checkboxLabels` bookkeeping, checked state, enabled.
+    const writes = writesOf(handle);
+    if (writes.length !== 1) throw new Error(`writes = ${writes.length}`);
+    const first = writes[0]!;
+    if (first.role !== "checkbox") throw new Error(`role = ${first.role}`);
+    if (first.label !== "Dark mode") {
+      throw new Error(`label = ${JSON.stringify(first.label)}`);
+    }
+    if (first.state.join(",") !== "checked") {
+      throw new Error(`state = ${first.state.join(",")}`);
+    }
+    if (first.enabled !== true || first.selected !== false) {
+      throw new Error(`enabled/selected = ${first.enabled}/${first.selected}`);
+    }
+    // checkboxKey flips the state and rebuilds, re-syncing the descriptor:
+    // the second write carries the unchecked state.
+    checkboxKey(checkbox, { name: "enter", ...keyBase });
+    const second = writesOf(handle)[1];
+    if (second === undefined || second.state.join(",") !== "") {
+      throw new Error(`after toggle = ${JSON.stringify(second)}`);
+    }
+  });
+});
+
+Deno.test("semantics: a toggle maps its on state to checked and a disabled control reports enabled: false", () => {
+  withFakeAddon(() => {
+    const toggle = Toggle({ label: "Notifications", on: true, disabled: true });
+    const writes = writesOf(attachToFake(toggle));
+    const first = writes[0];
+    if (first === undefined || first.role !== "switch") {
+      throw new Error(`role = ${first?.role}`);
+    }
+    if (first.label !== "Notifications") {
+      throw new Error(`label = ${JSON.stringify(first.label)}`);
+    }
+    // The two-state `on` value surfaces as the native `checked` flag.
+    if (first.state.join(",") !== "checked") {
+      throw new Error(`state = ${first.state.join(",")}`);
+    }
+    if (first.enabled !== false) {
+      throw new Error(`enabled = ${first.enabled}`);
+    }
+  });
+});
+
+Deno.test("semantics: a radio group carries a radiogroup descriptor and each option row a per-row radio descriptor", () => {
+  withFakeAddon(() => {
+    const radio = Radio({
+      options: [
+        { value: "a", label: "A" },
+        { value: "b", label: "B", selected: true },
+        { value: "c", label: "C" },
+      ],
+    });
+    const handle = attachToFake(radio);
+    const writes = writesOf(handle);
+    const root = writes[0];
+    if (root === undefined || root.role !== "radiogroup") {
+      throw new Error(`root role = ${root?.role}`);
+    }
+    if (root.state.join(",") !== "focused") {
+      throw new Error(`root state = ${root.state.join(",")}`);
+    }
+    if (root.selected !== true) {
+      throw new Error(`root selected = ${root.selected}`);
+    }
+    // The option rows are separate radio members: the focused row (index 0)
+    // carries focused, the selected row (index 1) carries checked + selected,
+    // the others plain radio rows.
+    const rows = radio.children.map((child) =>
+      writesOf(child.handle as unknown as FakeNodeHandle)[0]
+    );
+    if (rows.length !== 3) throw new Error(`rows = ${rows.length}`);
+    if (rows[0]?.role !== "radio" || rows[0].state.join(",") !== "focused") {
+      throw new Error(`row0 = ${JSON.stringify(rows[0])}`);
+    }
+    if (rows[1]?.role !== "radio" || rows[1].state.join(",") !== "checked") {
+      throw new Error(`row1 = ${JSON.stringify(rows[1])}`);
+    }
+    if (rows[1].label !== "B" || rows[1].selected !== true) {
+      throw new Error(`row1 label/selected = ${JSON.stringify(rows[1])}`);
+    }
+    if (rows[2]?.state.length !== 0) {
+      throw new Error(`row2 = ${JSON.stringify(rows[2])}`);
+    }
+  });
+});
+
+Deno.test("semantics: a select flushes a listbox descriptor with expanded and selected state; selectKey re-syncs", () => {
+  withFakeAddon(() => {
+    const select = Select({
+      options: selectOptions,
+      value: "banana",
+    });
+    const handle = attachToFake(select);
+    const writes = writesOf(handle);
+    const first = writes[0];
+    if (first === undefined || first.role !== "listbox") {
+      throw new Error(`role = ${first?.role}`);
+    }
+    if (first.state.join(",") !== "expanded,focused") {
+      throw new Error(`state = ${first.state.join(",")}`);
+    }
+    if (first.selected !== true) {
+      throw new Error(`selected = ${first.selected}`);
+    }
+    // Enter confirms the highlighted option and dismisses: the re-synced
+    // descriptor drops the expanded state.
+    selectKey(select, { name: "enter", ...keyBase });
+    const after = writesOf(handle)[1];
+    if (after === undefined || after.state.includes("expanded")) {
+      throw new Error(`after enter = ${JSON.stringify(after)}`);
+    }
+  });
+});
+
+Deno.test("semantics: input/textarea flush a textbox descriptor with the props label; plain nodes record nothing", () => {
+  withFakeAddon(() => {
+    const input = Input({ value: "ab", caret: 1, label: "Name" } as InputProps);
+    const inputWrites = writesOf(attachToFake(input));
+    if (
+      inputWrites[0]?.role !== "textbox" ||
+      inputWrites[0].label !== "Name"
+    ) {
+      throw new Error(`input = ${JSON.stringify(inputWrites[0])}`);
+    }
+    const textarea = Textarea({ lines: ["ab", "cd"], row: 1, col: 2 });
+    const areaWrites = writesOf(attachToFake(textarea));
+    if (
+      areaWrites[0]?.role !== "textbox" ||
+      areaWrites[0].state.length !== 0
+    ) {
+      throw new Error(`textarea = ${JSON.stringify(areaWrites[0])}`);
+    }
+    // Plain text/box nodes have no derivation: attach records no writes.
+    const plainHandle = attachToFake(Text({ text: "x" }));
+    if (plainHandle.semanticsWrites.length !== 0) {
+      throw new Error("plain nodes must record no semantics");
+    }
+    // syncSemantics is a safe no-op on them too.
+    syncSemantics(Box());
+  });
+});
+
+Deno.test("semantics: a menu flushes a menu descriptor that gains expanded on open and loses it on close", () => {
+  withFakeAddon(() => {
+    const menu = Menu({ items: menuFixture() });
+    const handle = attachToFake(menu);
+    const writes = writesOf(handle);
+    const first = writes[0];
+    if (first === undefined || first.role !== "menu") {
+      throw new Error(`role = ${first?.role}`);
+    }
+    if (first.state.length !== 0) {
+      throw new Error(`closed state = ${first.state.join(",")}`);
+    }
+    openMenu(menu);
+    const opened = writesOf(handle).at(-1);
+    if (opened === undefined || opened.state.join(",") !== "expanded") {
+      throw new Error(`open state = ${JSON.stringify(opened)}`);
+    }
+    closeMenu(menu);
+    const closed = writesOf(handle).at(-1);
+    if (closed === undefined || closed.state.length !== 0) {
+      throw new Error(`close state = ${JSON.stringify(closed)}`);
+    }
+  });
+});
+
+Deno.test("semantics: clearSemantics before attach drops the pending descriptor", () => {
+  withFakeAddon(() => {
+    const checkbox = Checkbox({ label: "Dark mode" });
+    checkbox.clearSemantics();
+    const handle = attachToFake(checkbox);
+    if (handle.semanticsWrites.length !== 0) {
+      throw new Error("cleared semantics must not flush");
+    }
+  });
+});
+
+Deno.test("renderer: the semantics option forwards to the native constructor; semantics() and setSemanticsEnabled are wired", () => {
+  withFakeAddon(() => {
+    const renderer = createRenderer({ headless: true, semantics: true });
+    const nativeOptions = lastRendererOptions as { semantics?: unknown } | null;
+    if (nativeOptions?.semantics !== true) {
+      throw new Error(
+        `native semantics = ${JSON.stringify(nativeOptions?.semantics)}`,
+      );
+    }
+    if (renderer.semantics().length !== 0) {
+      throw new Error("fake dump must be empty");
+    }
+    // The JS-side mirror flag: no throw, no native surface required.
+    renderer.setSemanticsEnabled(false);
+    renderer.setSemanticsEnabled(true);
+  });
+  // Without the option, the native constructor sees no semantics key.
+  withFakeAddon(() => {
+    createRenderer({ headless: true });
+    const nativeOptions = lastRendererOptions as { semantics?: unknown } | null;
+    if (nativeOptions?.semantics !== undefined) {
+      throw new Error(
+        `default semantics = ${JSON.stringify(nativeOptions?.semantics)}`,
+      );
+    }
+  });
 });
 
 Deno.test("menuKey up/down move the highlight clamped at the ends; unknown keys are no-ops", () => {

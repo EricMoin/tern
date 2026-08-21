@@ -104,6 +104,8 @@
 
 export { loadAddon, setAddonForTesting } from "./addon.ts";
 export type { TernAddon } from "./addon.ts";
+export { syncSemantics } from "./semantics.ts";
+export type { SemanticsDescriptor } from "./semantics.ts";
 export type {
   ContentSize,
   HighlightSpanJs,
@@ -113,6 +115,8 @@ export type {
   NodeHandle,
   RendererCapabilities,
   RendererSize,
+  SceneSemanticsJs,
+  SemanticsNodeJs,
   StyleRunJs,
   TernEventJs,
   TuiRenderer,
@@ -182,6 +186,7 @@ import type {
   MouseEventJs,
   NodeHandle as NativeNodeHandle,
   RendererCapabilities,
+  SceneSemanticsJs,
   StyleRunJs,
   TernEventJs,
   TuiRenderer as NativeTuiRenderer,
@@ -189,6 +194,8 @@ import type {
 } from "@tern-tui/node";
 import { loadAddon } from "./addon.ts";
 import type { NativeIncrementalHighlighter, TernAddon } from "./addon.ts";
+import { syncSemantics } from "./semantics.ts";
+import type { SemanticsDescriptor } from "./semantics.ts";
 
 /**
  * The scene node kinds. `box`/`text`/`streaming_text` are materialized by the
@@ -468,6 +475,18 @@ export interface CreateRendererOptions {
    */
   scrollOptimization?: boolean;
   /**
+   * When `true`, the renderer enables the accessibility-semantics store
+   * (default `false`): while off, native semantics writes are rejected and
+   * the JS wiring's best-effort pushes are dropped — so the store and the
+   * painted cells are untouched. The store is pure bookkeeping — a parallel
+   * map of node metadata that never changes painted content — read back
+   * through {@link Renderer.semantics}. Maps to the native `semantics`.
+   * Toggling later through {@link Renderer.setSemanticsEnabled} only records
+   * the JS-side mirror: the native store is fixed at construction (there is
+   * no native runtime toggle).
+   */
+  semantics?: boolean;
+  /**
    * The terminal window title, applied when the renderer is constructed.
    * Maps to the native `title`.
    */
@@ -569,6 +588,7 @@ export class Node {
   #parent: Node | null;
   #attached: boolean;
   #spans: Span[];
+  #semantics: SemanticsDescriptor | null;
 
   /** @internal — use `Text` / `Box` (or `Node.wrapRoot`) to create nodes. */
   private constructor(type: NodeType, props: NodeProps, children: Node[]) {
@@ -579,6 +599,7 @@ export class Node {
     this.#parent = null;
     this.#attached = false;
     this.#spans = [];
+    this.#semantics = null;
   }
 
   /** @internal — build a detached node object. */
@@ -798,6 +819,42 @@ export class Node {
   }
 
   /**
+   * Set this node's accessibility semantics (the M4.1 wiring): the ARIA
+   * `role` name, optional accessible `label`, active `state` flags, and the
+   * `enabled` / `selected` booleans — the write shape the native
+   * `set_semantics` accepts.
+   *
+   * On a detached node the descriptor is recorded and flushed to the native
+   * handle when the node is attached to the scene (the same deferred-record
+   * + attach-flush pattern as {@link appendSpan}). On an attached node it is
+   * pushed to the native handle immediately.
+   *
+   * Semantics is a best-effort progressive enhancement: when the renderer
+   * was constructed without the `semantics` option (the default), the native
+   * store is off and the write is dropped — never an error — so wiring
+   * semantics never changes painted cell output (the store is a parallel
+   * bookkeeping map the compositor never reads).
+   */
+  setSemantics(descriptor: SemanticsDescriptor): void {
+    this.#semantics = descriptor;
+    if (this.#attached && this.#handle !== null) {
+      Node.#writeSemantics(this.#handle, descriptor);
+    }
+  }
+
+  /**
+   * Remove this node's accessibility semantics. On a detached node the
+   * pending descriptor is dropped; on an attached node the native entry is
+   * cleared (clearing a node with no entry is a native no-op).
+   */
+  clearSemantics(): void {
+    this.#semantics = null;
+    if (this.#attached && this.#handle !== null) {
+      this.#handle.clear_semantics();
+    }
+  }
+
+  /**
    * Detach this node (and its whole subtree) from its parent and the scene.
    *
    * The node is spliced out of its parent's `children` list and its
@@ -855,6 +912,7 @@ export class Node {
     this.#attached = true;
     const handle = this.#ensureHandle();
     this.#flushSpans(handle);
+    this.#flushSemantics(handle);
     for (const child of this.#children) {
       child.#parent = this;
       handle.add_child(child.#ensureHandle());
@@ -872,6 +930,45 @@ export class Node {
       handle.append_span(span.text, span.style);
     }
     this.#spans = [];
+  }
+
+  /**
+   * Replay the semantics descriptor recorded while detached onto the
+   * now-attached handle — the `#spans` deferred-record counterpart for
+   * accessibility semantics. Called from `#attach` only, after the handle is
+   * bound into the scene (`add_child`), since the native `set_semantics`
+   * errors on a not-yet-bound handle. A node without a recorded descriptor
+   * performs no native call.
+   */
+  #flushSemantics(handle: NativeNodeHandle): void {
+    if (this.#semantics !== null) {
+      Node.#writeSemantics(handle, this.#semantics);
+    }
+  }
+
+  /**
+   * Push a semantics descriptor to a bound native handle, tolerating a
+   * disabled semantics store (the M4.1 opt-in, off by default): when the
+   * store is off the native write is rejected, and semantics is best-effort —
+   * the write is dropped (nothing can record it), never an error, so wiring
+   * semantics cannot break an app that did not opt in. Every other native
+   * error (a detached / unknown node) propagates.
+   */
+  static #writeSemantics(
+    handle: NativeNodeHandle,
+    descriptor: SemanticsDescriptor,
+  ): void {
+    try {
+      handle.set_semantics(descriptor);
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        err.message.startsWith("semantics store is disabled")
+      ) {
+        return;
+      }
+      throw err;
+    }
   }
 
   /**
@@ -1314,7 +1411,9 @@ export function Input(props: InputProps = {}): Node {
   const value = props.value ?? "";
   const caret = props.caret ?? 0;
   const leaf = Text(inputTextProps(value, caret, props.placeholder));
-  return Node.create("input", props, [leaf]);
+  const node = Node.create("input", props, [leaf]);
+  syncSemantics(node);
+  return node;
 }
 
 /**
@@ -1835,6 +1934,7 @@ export function Textarea(props: TextareaProps = {}): Node {
   const node = Node.create("textarea", props, []);
   textareaVertical.set(node, { preferredCol: 0, sticky: false });
   rebuildTextarea(node);
+  syncSemantics(node);
   return node;
 }
 
@@ -3147,8 +3247,9 @@ interface NormalizedSelectOption {
 }
 
 /** The label-normalized option list of a select node (JS bookkeeping — never
- * scene props, mirroring `Panels`' `panelBodies`). */
-const selectOptions = new WeakMap<Node, NormalizedSelectOption[]>();
+ * scene props, mirroring `Panels`' `panelBodies`). Exported for the
+ * semantics wiring (`syncSemantics`); @internal. */
+export const selectOptions = new WeakMap<Node, NormalizedSelectOption[]>();
 
 /** The options visible under a filter: those whose label starts with the
  * query (case-insensitive prefix match). An empty query shows everything. */
@@ -3212,6 +3313,7 @@ function rebuildSelect(select: Node): void {
   if (multi) {
     select.addChild(Text({ text: `${selected.size} selected` }));
   }
+  syncSemantics(select);
 }
 
 /**
@@ -3257,6 +3359,7 @@ export function Select(props: SelectProps): Node {
   const select = Node.create("select", rootProps, []);
   selectOptions.set(select, options);
   rebuildSelect(select);
+  syncSemantics(select);
   return select;
 }
 
@@ -3481,16 +3584,19 @@ export interface RadioProps extends NodeProps {
 }
 
 /** The label of a checkbox node (JS bookkeeping — never scene props,
- * mirroring `Select`'s `selectOptions`). */
-const checkboxLabels = new WeakMap<Node, string>();
+ * mirroring `Select`'s `selectOptions`). Exported for the semantics wiring
+ * (`syncSemantics`); @internal. */
+export const checkboxLabels = new WeakMap<Node, string>();
 
 /** The label of a toggle node (JS bookkeeping — never scene props, mirroring
- * `Select`'s `selectOptions`). */
-const toggleLabels = new WeakMap<Node, string>();
+ * `Select`'s `selectOptions`). Exported for the semantics wiring
+ * (`syncSemantics`); @internal. */
+export const toggleLabels = new WeakMap<Node, string>();
 
 /** The label-normalized option list of a radio node (JS bookkeeping — never
- * scene props, mirroring `Select`'s `selectOptions`). */
-const radioOptions = new WeakMap<Node, NormalizedSelectOption[]>();
+ * scene props, mirroring `Select`'s `selectOptions`). Exported for the
+ * semantics wiring (`syncSemantics`); @internal. */
+export const radioOptions = new WeakMap<Node, NormalizedSelectOption[]>();
 
 /**
  * Rebuild a checkbox node's children from its current props (the source of
@@ -3517,6 +3623,7 @@ function rebuildCheckbox(checkbox: Node): void {
     leaf.reversed = true;
   }
   checkbox.addChild(Text(leaf));
+  syncSemantics(checkbox);
 }
 
 /**
@@ -3541,6 +3648,7 @@ function rebuildToggle(toggle: Node): void {
     leaf.reversed = true;
   }
   toggle.addChild(Text(leaf));
+  syncSemantics(toggle);
 }
 
 /**
@@ -3569,8 +3677,23 @@ function rebuildRadio(radio: Node): void {
       leaf.bg = CHECK_PRIMARY_BG;
       leaf.reversed = true;
     }
-    radio.addChild(Text(leaf));
+    // Each option row is its own radio member: capture the leaf handle and
+    // record its per-row semantics (the M4.1 wiring — the selected row is
+    // `checked` per ARIA's role="radio" model, the focused row `focused`).
+    const row = Text(leaf);
+    const rowState: string[] = [];
+    if (index === selected) rowState.push("checked");
+    if (index === focused) rowState.push("focused");
+    row.setSemantics({
+      role: "radio",
+      label: option.label,
+      state: rowState,
+      enabled: true,
+      selected: index === selected,
+    });
+    radio.addChild(row);
   });
+  syncSemantics(radio);
 }
 
 /**
@@ -3592,6 +3715,7 @@ export function Checkbox(props: CheckboxProps): Node {
   const checkbox = Node.create("checkbox", rootProps, []);
   checkboxLabels.set(checkbox, props.label);
   rebuildCheckbox(checkbox);
+  syncSemantics(checkbox);
   return checkbox;
 }
 
@@ -3614,6 +3738,7 @@ export function Toggle(props: ToggleProps): Node {
   const toggle = Node.create("toggle", rootProps, []);
   toggleLabels.set(toggle, props.label);
   rebuildToggle(toggle);
+  syncSemantics(toggle);
   return toggle;
 }
 
@@ -3645,6 +3770,7 @@ export function Radio(props: RadioProps): Node {
   const radio = Node.create("radio", rootProps, []);
   radioOptions.set(radio, options);
   rebuildRadio(radio);
+  syncSemantics(radio);
   return radio;
 }
 
@@ -3955,6 +4081,7 @@ function rebuildMenu(menu: Node): void {
         Text({ text: menuRowText(row), reversed: row.index === highlight }),
       );
     }
+    syncSemantics(menu);
     return;
   }
 
@@ -3992,6 +4119,7 @@ function rebuildMenu(menu: Node): void {
     }
     menu.addChild(layer);
   }
+  syncSemantics(menu);
 }
 
 /**
@@ -4042,6 +4170,7 @@ export function Menu(props: MenuProps): Node {
   menuSubmenuModes.set(menu, props.submenu === "flyout" ? "flyout" : "inline");
   menuFocusRecords.set(menu, { previousFocusId: null });
   rebuildMenu(menu);
+  syncSemantics(menu);
   return menu;
 }
 
@@ -4244,6 +4373,7 @@ export function openMenu(
   if (record === undefined || menu.props.open === true) return;
   record.previousFocusId = manager.activeId;
   menu.setProps({ ...menu.props, open: true, hidden: false, display: "flex" });
+  syncSemantics(menu);
   manager.focusFirst();
 }
 
@@ -4262,6 +4392,7 @@ export function closeMenu(
   if (record === undefined || menu.props.open !== true) return;
   const previous = record.previousFocusId;
   menu.setProps({ ...menu.props, open: false, hidden: true, display: "none" });
+  syncSemantics(menu);
   record.previousFocusId = null;
   if (previous === null || !manager.focus(previous)) {
     manager.blur();
@@ -8915,6 +9046,10 @@ export class Renderer {
    * budget spaces the next coalesced frame from. `0` means "never
    * rendered", so the first scheduled frame is always immediate. */
   #lastNativeRenderAt = 0;
+  /** Whether the accessibility-semantics store is enabled — the JS mirror
+   * of the native store gate (see `CreateRendererOptions.semantics`), kept
+   * in sync with the constructor option and {@link setSemanticsEnabled}. */
+  #semanticsEnabled = false;
 
   /** The scene root. Attach content under it with `Node.addChild`. */
   readonly root: Node;
@@ -8922,6 +9057,7 @@ export class Renderer {
   /** @internal — use `createRenderer`. */
   constructor(options: CreateRendererOptions = {}) {
     this.#maxFps = options.maxFps ?? 0;
+    this.#semanticsEnabled = options.semantics ?? false;
     const addon = loadAddon();
     const nativeOptions: TuiRendererOptions = {
       exit_on_ctrl_c: options.exitOnCtrlC ?? false,
@@ -8936,6 +9072,9 @@ export class Renderer {
     }
     if (options.scrollOptimization !== undefined) {
       nativeOptions.scroll_optimization = options.scrollOptimization;
+    }
+    if (options.semantics !== undefined) {
+      nativeOptions.semantics = options.semantics;
     }
     if (options.size !== undefined) {
       nativeOptions.width = options.size.width;
@@ -9031,6 +9170,40 @@ export class Renderer {
    */
   clearSelection(): void {
     this.#native.clear_selection();
+  }
+
+  /**
+   * Flatten the scene's accessibility-semantics store into a flat vector —
+   * one {@link SceneSemanticsJs} entry per node with a semantics entry, in
+   * scene pre-order (the ids mirror the scene tree and `parent` links each
+   * entry back into it, `null` for the root), so a consumer can reconstruct
+   * the accessibility tree from the flat dump. Nodes whose semantics were
+   * cleared are omitted.
+   *
+   * Pure read for tests, debugging, and a11y bridges: it never touches
+   * layout or painted content (the store is a parallel bookkeeping map —
+   * see the core `semantics` module), and it is not gated by the store's
+   * enable flag (entries written while enabled stay readable after
+   * disabling). State flags are sorted for a stable dump. Throws on a
+   * destroyed renderer.
+   */
+  semantics(): SceneSemanticsJs[] {
+    return this.#native.semantics();
+  }
+
+  /**
+   * Record whether the accessibility-semantics store is enabled — the
+   * JS-side mirror of the native store gate (see
+   * {@link CreateRendererOptions}). The native store itself is fixed at
+   * construction (there is no native runtime toggle), so this updates the
+   * JS bookkeeping only: it is the effective enabled state a consumer or
+   * a11y bridge can query and coordinate against, and it stays in sync with
+   * the `semantics` constructor option. The JS semantics wiring is
+   * best-effort regardless: when the native store is off, writes are
+   * dropped, never errors.
+   */
+  setSemanticsEnabled(enabled: boolean): void {
+    this.#semanticsEnabled = enabled;
   }
 
   /**
