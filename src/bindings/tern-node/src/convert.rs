@@ -472,3 +472,43 @@ pub(crate) fn key_name_str(name: KeyName) -> String {
     }
     .to_string()
 }
+
+/// Convert a JS semantics node into the core [`SemanticsNode`]: parse the
+/// ARIA `role` name and the `state` flag strings, erroring on unknown
+/// values (a silent fallback would drop the caller's intent). Duplicate
+/// state flags collapse into the set.
+pub(crate) fn semantics_node_from_js(node: SemanticsNodeJs) -> Result<SemanticsNode> {
+    let role = node
+        .role
+        .parse::<SemanticsRole>()
+        .map_err(|_| Error::from_reason(format!("unknown semantics role: {}", node.role)))?;
+    let mut state = HashSet::new();
+    for flag in node.state {
+        let parsed = match flag.as_str() {
+            "checked" => SemanticsState::Checked,
+            "focused" => SemanticsState::Focused,
+            "expanded" => SemanticsState::Expanded,
+            "collapsed" => SemanticsState::Collapsed,
+            _ => return Err(Error::from_reason(format!("unknown semantics state: {flag}"))),
+        };
+        state.insert(parsed);
+    }
+    Ok(SemanticsNode {
+        role,
+        label: node.label,
+        state,
+        enabled: node.enabled,
+        selected: node.selected,
+    })
+}
+
+/// The JS-facing name of a semantics state flag — the inverse of the
+/// parse in [`semantics_node_from_js`].
+pub(crate) fn semantics_state_str(state: SemanticsState) -> &'static str {
+    match state {
+        SemanticsState::Checked => "checked",
+        SemanticsState::Focused => "focused",
+        SemanticsState::Expanded => "expanded",
+        SemanticsState::Collapsed => "collapsed",
+    }
+}

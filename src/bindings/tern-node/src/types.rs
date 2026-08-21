@@ -135,6 +135,60 @@ pub struct StyleRunJs {
     pub strikethrough: Option<bool>,
 }
 
+/// The accessibility semantics of one scene node, mirroring the core
+/// [`SemanticsNode`](tern_core::SemanticsNode): `role` as its ARIA role
+/// string, the optional accessible `label`, the active boolean `state`
+/// flags, and the `enabled` / `selected` booleans. This is the write shape
+/// accepted by [`NodeHandle::set_semantics`].
+#[napi(object)]
+#[derive(Debug)]
+pub struct SemanticsNodeJs {
+    /// The ARIA role name: `button`, `checkbox`, `radio`, `radiogroup`,
+    /// `switch`, `menu`, `menuitem`, `listbox`, `textbox`, `link`, or
+    /// `group`.
+    pub role: String,
+    /// The node's accessible name (what a screen reader announces), or
+    /// `null` when the node carries no label.
+    pub label: Option<String>,
+    /// The boolean semantics states currently active on the node:
+    /// `checked`, `focused`, `expanded`, `collapsed`. Unknown flags error
+    /// (they would silently drop otherwise).
+    pub state: Vec<String>,
+    /// Whether the control is interactive: `false` for a disabled /
+    /// read-only control.
+    pub enabled: bool,
+    /// Whether the node is currently selected (a row in a listbox, an
+    /// option in a menu).
+    pub selected: bool,
+}
+
+/// One entry of a [`TuiRenderer::semantics`] flat dump: the semantics of a
+/// scene node plus its `id` and `parent` — the ids mirror the scene tree
+/// (`parent` links the entry back into it, `null` for the root), so a
+/// consumer can reconstruct the accessibility tree from the flat vector.
+///
+/// Output-only (`object_from_js = false`): it is returned to JS, never
+/// accepted as an argument — which also lets the scene `id` / `parent` be
+/// native `u64`s rather than JS-safe `i64`s.
+#[napi(object, object_from_js = false)]
+#[derive(Debug)]
+pub struct SceneSemanticsJs {
+    /// The scene node id (mirrors the scene tree).
+    pub id: u64,
+    /// The parent scene node id, or `null` for the scene root.
+    pub parent: Option<u64>,
+    /// The ARIA role name.
+    pub role: String,
+    /// The node's accessible name, or `null`.
+    pub label: Option<String>,
+    /// The active semantics state flags, sorted for a stable dump.
+    pub state: Vec<String>,
+    /// Whether the control is interactive.
+    pub enabled: bool,
+    /// Whether the node is currently selected.
+    pub selected: bool,
+}
+
 /// A key event surfaced to JS as a plain object: `{ name, char, ctrl, alt,
 /// shift, kind, super, meta, hyper }`. `char` is the printable character for
 /// `"char"`-named keys (single-character string), `undefined` for named
@@ -422,6 +476,14 @@ pub struct TuiRendererOptions {
     /// Default `true`.
     #[napi(js_name = "scroll_optimization")]
     pub scroll_optimization: Option<bool>,
+    /// Enable the accessibility-semantics store (default `false`): while
+    /// off, [`NodeHandle::set_semantics`] writes are rejected. The store is
+    /// pure bookkeeping — a parallel map of node metadata that never
+    /// changes painted content — read back through
+    /// [`TuiRenderer::semantics`]. Disabling later only gates future
+    /// writes; existing entries stay readable.
+    #[napi(js_name = "semantics")]
+    pub semantics: Option<bool>,
     /// The virtual width in cells for `headless` mode (default 80). Ignored
     /// when `headless` is `false`.
     #[napi(js_name = "width")]

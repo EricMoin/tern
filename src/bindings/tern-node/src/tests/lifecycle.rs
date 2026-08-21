@@ -72,6 +72,7 @@ fn headless_renderer_custom_size_is_reported_and_painted() {
         headless: Some(true),
         keyboard_enhancement: None,
         scroll_optimization: None,
+        semantics: None,
         width: Some(120),
         height: Some(30),
     })
