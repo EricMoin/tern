@@ -73,23 +73,39 @@ Releases are gated end-to-end by the workflows in `.github/workflows/`.
 
 The native addon follows the napi-rs convention: the root package
 (`tern-node`) declares per-platform packages in `optionalDependencies`
-(`tern-node-linux-x64-gnu`, `tern-node-linux-arm64-gnu`,
-`tern-node-darwin-x64`, `tern-node-darwin-arm64`, `tern-node-win32-x64-msvc`),
-and the generated `index.js` loader picks the package matching the running
-system. The build matrix in `ci.yml` (`napi-build` job) builds one target
-per row and uploads the `.node` binary:
+(`@tern-tui/node-linux-x64-gnu`, `@tern-tui/node-linux-arm64-gnu`,
+`@tern-tui/node-linux-x64-musl`, `@tern-tui/node-linux-arm64-musl`,
+`@tern-tui/node-freebsd-x64`, `@tern-tui/node-linux-riscv64-gnu`,
+`@tern-tui/node-android-arm64`, `@tern-tui/node-darwin-x64`,
+`@tern-tui/node-darwin-arm64`, `@tern-tui/node-win32-x64-msvc`,
+`@tern-tui/node-win32-arm64-msvc`), and the generated `index.js` loader picks
+the package matching the running system. The build matrix in `ci.yml`
+(`napi-build` job) builds one target per row and uploads the `.node` binary:
 
-| Target (Rust triple)        | Runner          | Build command |
-| --------------------------- | --------------- | ------------- |
-| `x86_64-unknown-linux-gnu`  | ubuntu-latest   | `npm run build` |
-| `aarch64-unknown-linux-gnu` | ubuntu-latest   | `npm run build -- --target aarch64-unknown-linux-gnu --use-napi-cross` |
-| `x86_64-apple-darwin`       | macos-latest    | `npm run build -- --target x86_64-apple-darwin` |
-| `aarch64-apple-darwin`      | macos-latest    | `npm run build` |
-| `x86_64-pc-windows-msvc`    | windows-latest  | `npm run build` |
+| Target (Rust triple)          | Runner            | Build command | Runtime verification |
+| ----------------------------- | ----------------- | ------------- | -------------------- |
+| `x86_64-unknown-linux-gnu`    | ubuntu-latest     | `npm run build` | native load-check + smoke |
+| `aarch64-unknown-linux-gnu`   | ubuntu-24.04-arm  | `npm run build` | native load-check + smoke |
+| `x86_64-unknown-linux-musl`   | ubuntu-latest     | `npx napi build --platform --release --target x86_64-unknown-linux-musl --cross-compile && node fix-dts.mjs` | load-check + smoke in `node:alpine` container |
+| `aarch64-unknown-linux-musl`  | ubuntu-24.04-arm  | `npx napi build --platform --release --target aarch64-unknown-linux-musl --cross-compile && node fix-dts.mjs` | load-check + smoke in `node:alpine` container |
+| `x86_64-unknown-freebsd`      | ubuntu-latest     | `npx napi build --platform --release --target x86_64-unknown-freebsd --cross-compile && node fix-dts.mjs` | smoke in FreeBSD 15 VM (`freebsd-runtime` job) |
+| `riscv64gc-unknown-linux-gnu` | ubuntu-latest     | `sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu && CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc npx napi build --platform --release --target riscv64gc-unknown-linux-gnu && node fix-dts.mjs` | build-only (verify on-device) |
+| `aarch64-linux-android`       | ubuntu-latest     | `npx napi build --platform --release --target aarch64-linux-android && node fix-dts.mjs` | build-only (verify on-device) |
+| `x86_64-apple-darwin`         | macos-latest      | `npx napi build --platform --release --target x86_64-apple-darwin && node fix-dts.mjs` | build-only |
+| `aarch64-apple-darwin`        | macos-latest      | `npm run build` | native load-check + smoke |
+| `x86_64-pc-windows-msvc`      | windows-latest    | `npm run build` | native load-check + smoke |
+| `aarch64-pc-windows-msvc`     | windows-11-arm    | `npm run build` | native load-check + smoke |
 
-Cross-compiled rows (binary arch ≠ runner arch) skip the native load-check;
-the three native rows run `node load-check.mjs` against the freshly built
-addon. The target list lives in `napi.targets` in
+Since M4.3 every feasible row gets a runtime load-check plus a full renderer
+smoke (`runtime-smoke.mjs`) in a runtime matching the binary: natively where
+the runner arch matches the target (linux-gnu x64/arm64, darwin arm64, and
+win32-x64/arm64 — the arm64 rows run on the `ubuntu-24.04-arm` and
+`windows-11-arm` hosted runners), inside a `node:alpine` container for the
+musl rows (a glibc runner cannot load a musl binary), and inside a FreeBSD 15
+VM via `cross-platform-actions/action` for FreeBSD x64 (the separate
+`freebsd-runtime` job). macOS x64, riscv64, and Android stay build-only —
+no hosted runtime for those targets; verify on a matching device or runner.
+The target list lives in `napi.targets` in
 `src/bindings/tern-node/package.json` — keep the matrix and that list in
 sync.
 
