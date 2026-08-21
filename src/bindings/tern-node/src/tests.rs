@@ -9,6 +9,7 @@ mod events;
 mod lifecycle;
 mod selection;
 mod highlight;
+mod semantics;
 
 /// A root handle materialized over a fresh scene, for handle tests.
 fn root_handle(scene: &Arc<Mutex<Scene>>) -> NodeHandle {
@@ -190,6 +191,7 @@ fn headless_renderer() -> TuiRenderer {
         headless: Some(true),
         keyboard_enhancement: None,
         scroll_optimization: None,
+        semantics: None,
         width: None,
         height: None,
     })

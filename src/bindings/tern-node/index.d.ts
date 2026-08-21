@@ -103,6 +103,24 @@ export declare class NodeHandle {
    */
   append_span(text: string, style?: Record<string, any> | undefined | null): void
   /**
+   * Set the accessibility semantics of this node: the ARIA `role` name,
+   * optional `label`, active `state` flags, and the `enabled` /
+   * `selected` booleans.
+   *
+   * The renderer's `semantics` constructor option (default off) must
+   * have enabled the store, or the write errors. Errors when the node is
+   * detached from the scene, mirroring
+   * [`append_span`](Self::append_span), or when the role / state strings
+   * are unknown.
+   */
+  set_semantics(node: SemanticsNodeJs): void
+  /**
+   * Remove this node's accessibility semantics. Clearing a node with no
+   * entry is a no-op. Errors when the node is detached from the scene,
+   * mirroring [`append_span`](Self::append_span).
+   */
+  clear_semantics(): void
+  /**
    * The laid-out content size of this node: `{ width, height }` in cells.
    *
    * For `text` / `streaming_text` nodes this is the wrapped content size
@@ -190,6 +208,22 @@ export declare class TuiRenderer {
    * testing and golden comparisons.
    */
   render_to_buffer_styled(width?: number | undefined | null, height?: number | undefined | null): Array<Array<StyleRunJs>>
+  /**
+   * Flatten the scene's accessibility-semantics store into a flat vector
+   * — one [`SceneSemanticsJs`] entry per node with a semantics entry, in
+   * scene pre-order (the ids mirror the scene tree and `parent` links
+   * each entry back into it, `null` for the root), so a consumer can
+   * reconstruct the accessibility tree from the flat dump. Nodes whose
+   * semantics were cleared are omitted.
+   *
+   * Pure read for tests, debugging, and a11y bridges: it never touches
+   * layout or painted content (the store is a parallel bookkeeping map
+   * — see the core `semantics` module), and it is not gated by the
+   * store's enable flag (entries written while enabled stay readable
+   * after disabling). State flags are sorted for a stable dump. Errors
+   * on a destroyed renderer.
+   */
+  semantics(): Array<SceneSemanticsJs>
   /**
    * Leave the alternate screen and raw mode and stop event listening,
    * restoring the terminal. Any-event mouse tracking is turned off
@@ -595,6 +629,33 @@ export interface RendererSize {
 }
 
 /**
+ * One entry of a [`TuiRenderer::semantics`] flat dump: the semantics of a
+ * scene node plus its `id` and `parent` — the ids mirror the scene tree
+ * (`parent` links the entry back into it, `null` for the root), so a
+ * consumer can reconstruct the accessibility tree from the flat vector.
+ *
+ * Output-only (`object_from_js = false`): it is returned to JS, never
+ * accepted as an argument — which also lets the scene `id` / `parent` be
+ * native `u64`s rather than JS-safe `i64`s.
+ */
+export interface SceneSemanticsJs {
+  /** The scene node id (mirrors the scene tree). */
+  id: bigint
+  /** The parent scene node id, or `null` for the scene root. */
+  parent?: bigint
+  /** The ARIA role name. */
+  role: string
+  /** The node's accessible name, or `null`. */
+  label?: string
+  /** The active semantics state flags, sorted for a stable dump. */
+  state: Array<string>
+  /** Whether the control is interactive. */
+  enabled: boolean
+  /** Whether the node is currently selected. */
+  selected: boolean
+}
+
+/**
  * An inclusive cell range, in viewport coordinates: the rectangle spanned
  * by (`col1`, `row1`) and (`col2`, `row2`). Either endpoint may be the
  * top-left; consumers normalize with `min`/`max`.
@@ -608,6 +669,43 @@ export interface SelectionRange {
   col2: number
   /** The row of the other endpoint (inclusive). */
   row2: number
+}
+
+/**
+ * The accessibility semantics of one scene node, mirroring the core
+ * [`SemanticsNode`](tern_core::SemanticsNode): `role` as its ARIA role
+ * string, the optional accessible `label`, the active boolean `state`
+ * flags, and the `enabled` / `selected` booleans. This is the write shape
+ * accepted by [`NodeHandle::set_semantics`].
+ */
+export interface SemanticsNodeJs {
+  /**
+   * The ARIA role name: `button`, `checkbox`, `radio`, `radiogroup`,
+   * `switch`, `menu`, `menuitem`, `listbox`, `textbox`, `link`, or
+   * `group`.
+   */
+  role: string
+  /**
+   * The node's accessible name (what a screen reader announces), or
+   * `null` when the node carries no label.
+   */
+  label?: string
+  /**
+   * The boolean semantics states currently active on the node:
+   * `checked`, `focused`, `expanded`, `collapsed`. Unknown flags error
+   * (they would silently drop otherwise).
+   */
+  state: Array<string>
+  /**
+   * Whether the control is interactive: `false` for a disabled /
+   * read-only control.
+   */
+  enabled: boolean
+  /**
+   * Whether the node is currently selected (a row in a listbox, an
+   * option in a menu).
+   */
+  selected: boolean
 }
 
 /**
@@ -748,6 +846,15 @@ export interface TuiRendererOptions {
    * Default `true`.
    */
   scroll_optimization?: boolean
+  /**
+   * Enable the accessibility-semantics store (default `false`): while
+   * off, [`NodeHandle::set_semantics`] writes are rejected. The store is
+   * pure bookkeeping — a parallel map of node metadata that never
+   * changes painted content — read back through
+   * [`TuiRenderer::semantics`]. Disabling later only gates future
+   * writes; existing entries stay readable.
+   */
+  semantics?: boolean
   /**
    * The virtual width in cells for `headless` mode (default 80). Ignored
    * when `headless` is `false`.

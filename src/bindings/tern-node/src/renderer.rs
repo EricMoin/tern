@@ -389,6 +389,23 @@ impl TuiRenderer {
             #[cfg(all(unix, feature = "push-events"))]
             signal_tsfn: None,
         }));
+        // The accessibility-semantics store gate (M4.1): writes through
+        // `NodeHandle::set_semantics` are rejected while the store is off
+        // (the default). Opting in flips the shared scene's flag so writes
+        // land; the store is a pure-bookkeeping parallel map that never
+        // changes painted content (see the core `semantics` module). The
+        // scene is shared module-globally (see the crate docs), so this
+        // enables the shared store — consistent with the single-renderer
+        // ownership model.
+        if options.semantics.unwrap_or(false) {
+            inner
+                .lock()
+                .expect("renderer inner poisoned")
+                .scene
+                .lock()
+                .expect("scene poisoned")
+                .set_semantics_enabled(true);
+        }
         // Take over the process's signals for every non-headless renderer:
         // SIGINT/SIGTERM/SIGHUP tear the terminal down and exit with the
         // conventional code, SIGTSTP/SIGCONT suspend and resume it. A
@@ -683,6 +700,62 @@ impl TuiRenderer {
             paint_scene_runs_with_selection(&scene_guard, viewport, selection)
         };
         Ok(rows)
+    }
+
+    /// Flatten the scene's accessibility-semantics store into a flat vector
+    /// — one [`SceneSemanticsJs`] entry per node with a semantics entry, in
+    /// scene pre-order (the ids mirror the scene tree and `parent` links
+    /// each entry back into it, `null` for the root), so a consumer can
+    /// reconstruct the accessibility tree from the flat dump. Nodes whose
+    /// semantics were cleared are omitted.
+    ///
+    /// Pure read for tests, debugging, and a11y bridges: it never touches
+    /// layout or painted content (the store is a parallel bookkeeping map
+    /// — see the core `semantics` module), and it is not gated by the
+    /// store's enable flag (entries written while enabled stay readable
+    /// after disabling). State flags are sorted for a stable dump. Errors
+    /// on a destroyed renderer.
+    #[napi(js_name = "semantics")]
+    pub fn semantics(&self) -> Result<Vec<SceneSemanticsJs>> {
+        let inner = self.inner.lock().expect("renderer inner poisoned");
+        if inner.destroyed {
+            return Err(Error::from_reason("renderer is destroyed"));
+        }
+        let scene = inner.scene.clone();
+        let scene_guard = scene.lock().expect("scene poisoned");
+        // Walk the scene tree pre-order, emitting the semantics of every
+        // populated node; pushing children in reverse makes the pop order
+        // the tree order.
+        let mut dump = Vec::new();
+        let mut stack = vec![scene_guard.root_id()];
+        while let Some(id) = stack.pop() {
+            if let Some(node) = scene_guard.semantics(id) {
+                let mut state: Vec<String> = node
+                    .state
+                    .iter()
+                    .map(|s| semantics_state_str(*s).to_string())
+                    .collect();
+                state.sort();
+                dump.push(SceneSemanticsJs {
+                    id: id.0,
+                    parent: scene_guard
+                        .node(id)
+                        .and_then(|n| n.parent)
+                        .map(|p| p.0),
+                    role: node.role.as_str().to_string(),
+                    label: node.label.clone(),
+                    state,
+                    enabled: node.enabled,
+                    selected: node.selected,
+                });
+            }
+            if let Some(children) = scene_guard.children(id) {
+                for child in children.iter().rev() {
+                    stack.push(*child);
+                }
+            }
+        }
+        Ok(dump)
     }
 
     /// Leave the alternate screen and raw mode and stop event listening,

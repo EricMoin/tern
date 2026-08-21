@@ -255,6 +255,48 @@ impl NodeHandle {
         Ok(())
     }
 
+    /// Set the accessibility semantics of this node: the ARIA `role` name,
+    /// optional `label`, active `state` flags, and the `enabled` /
+    /// `selected` booleans.
+    ///
+    /// The renderer's `semantics` constructor option (default off) must
+    /// have enabled the store, or the write errors. Errors when the node is
+    /// detached from the scene, mirroring
+    /// [`append_span`](Self::append_span), or when the role / state strings
+    /// are unknown.
+    #[napi(js_name = "set_semantics")]
+    pub fn set_semantics(&self, node: SemanticsNodeJs) -> Result<()> {
+        let node = semantics_node_from_js(node)?;
+        let inner = self.inner.lock().expect("node inner poisoned");
+        let Some(id) = inner.id else {
+            return Err(Error::from_reason("node is not attached to a scene"));
+        };
+        let mut scene = inner.scene.lock().expect("scene poisoned");
+        if !scene.semantics_enabled() {
+            return Err(Error::from_reason(
+                "semantics store is disabled (construct the renderer with `semantics: true`)",
+            ));
+        }
+        if !scene.set_semantics(id, node) {
+            return Err(Error::from_reason("node not found in scene"));
+        }
+        Ok(())
+    }
+
+    /// Remove this node's accessibility semantics. Clearing a node with no
+    /// entry is a no-op. Errors when the node is detached from the scene,
+    /// mirroring [`append_span`](Self::append_span).
+    #[napi(js_name = "clear_semantics")]
+    pub fn clear_semantics(&self) -> Result<()> {
+        let inner = self.inner.lock().expect("node inner poisoned");
+        let Some(id) = inner.id else {
+            return Err(Error::from_reason("node is not attached to a scene"));
+        };
+        let mut scene = inner.scene.lock().expect("scene poisoned");
+        scene.clear_semantics(id);
+        Ok(())
+    }
+
     /// The laid-out content size of this node: `{ width, height }` in cells.
     ///
     /// For `text` / `streaming_text` nodes this is the wrapped content size

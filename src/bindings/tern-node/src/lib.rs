@@ -47,7 +47,7 @@
 //! `poll_events(timeout_ms)` returns event batches on demand (the pre-Phase-3
 //! pull path, for hosts that cannot host a napi JS thread).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 #[cfg(feature = "push-events")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,6 +65,7 @@ use tern_core::buffer::{diff, Buffer};
 use tern_core::cell::CellUpdate;
 use tern_core::rect::Rect;
 use tern_core::scene::{NodeId, NodeKind, PropMap, PropValue, Scene, Span};
+use tern_core::semantics::{SemanticsNode, SemanticsRole, SemanticsState};
 use tern_core::style::{BorderStyle, Modifiers, Style, UnderlineStyle};
 use tern_core::{Color, Cursor, Size};
 use tern_terminal::backend::{Backend, ScrollOp};
