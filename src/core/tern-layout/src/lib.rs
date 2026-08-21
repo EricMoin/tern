@@ -516,7 +516,7 @@ fn build_node(
 /// filling the viewport when it declares no own size. Shared by
 /// [`build_node`] and the incremental reconciler so the cached style always
 /// matches what was built.
-fn scene_node_style(scene: &Scene, node: &SceneNode, viewport: Size, is_root: bool) -> TaffyStyle {
+fn scene_node_style(_scene: &Scene, node: &SceneNode, viewport: Size, is_root: bool) -> TaffyStyle {
     let mut style = props_to_style(&node.props);
 
     // A `wrap: false` text/streaming leaf is a single intrinsic-width line —
