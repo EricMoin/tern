@@ -223,6 +223,81 @@ fn semantics_writes_never_change_painted_snapshot_rows() {
 }
 
 #[test]
+fn set_a11y_annotations_never_changes_painted_snapshot_rows() {
+    // The M4.2 contract, mirroring the M4.1 paint-invariance proof: an
+    // a11y-annotation write is a pure terminal-side OSC emission, so it
+    // must not alter what `render_to_buffer` paints — the rows stay
+    // byte-identical before and after.
+    let scene = scene_with_text("hello", 5, 1);
+    let renderer = renderer_with_scene(CountingBackend::default(), scene.clone());
+    let before = renderer
+        .render_to_buffer(Some(5), Some(1))
+        .expect("snapshot before");
+    assert_eq!(before, vec!["hello".to_string()]);
+
+    renderer
+        .set_a11y_annotations(vec![A11yAnnotationJs {
+            role: "textbox".to_string(),
+            label: Some("Search".to_string()),
+            state: Vec::new(),
+        }])
+        .expect("a11y annotation write succeeds");
+    let after = renderer
+        .render_to_buffer(Some(5), Some(1))
+        .expect("snapshot after");
+    assert_eq!(
+        after, before,
+        "an a11y-annotation write must not change painted rows"
+    );
+}
+
+#[test]
+fn set_a11y_annotations_forwards_role_label_state_summaries() {
+    // The renderer forwards each entry as one core `A11yAnnotation` whose
+    // summary is `[role][: label][, state...]`, in entry order, with the
+    // state order kept as given — the byte-level OSC emission is covered
+    // by tern-terminal's `flush_a11y_annotations_to` tests, this mock
+    // proves the renderer builds the summaries.
+    let backend = CountingBackend::default();
+    let probe = backend.clone();
+    let scene = scene_with_text("hello", 5, 1);
+    let renderer = renderer_with_scene(backend, scene.clone());
+    renderer
+        .set_a11y_annotations(vec![
+            A11yAnnotationJs {
+                role: "button".to_string(),
+                label: None,
+                state: Vec::new(),
+            },
+            A11yAnnotationJs {
+                role: "textbox".to_string(),
+                label: Some("Search".to_string()),
+                state: vec!["focused".to_string()],
+            },
+            A11yAnnotationJs {
+                role: "checkbox".to_string(),
+                label: Some("mute".to_string()),
+                state: vec!["checked".to_string(), "focused".to_string()],
+            },
+        ])
+        .expect("a11y annotations forward");
+    let recorded = probe.a11y_annotations().expect("entries recorded");
+    let summaries: Vec<String> = recorded
+        .iter()
+        .map(|annotation| annotation.summary().to_string())
+        .collect();
+    assert_eq!(
+        summaries,
+        vec![
+            "button".to_string(),
+            "textbox: Search, focused".to_string(),
+            "checkbox: mute, checked, focused".to_string(),
+        ],
+        "summaries follow the role/label/state shape in entry order"
+    );
+}
+
+#[test]
 fn semantics_write_repaint_produces_an_empty_diff() {
     // A semantics write bumps the scene epoch (forcing a repaint) but the
     // painted frame is identical, so the repaint flushes zero cell updates —
@@ -285,6 +360,7 @@ fn semantics_constructor_option_enables_the_store() {
         keyboard_enhancement: None,
         scroll_optimization: None,
         semantics: Some(true),
+        a11y_annotations: None,
         width: None,
         height: None,
     })

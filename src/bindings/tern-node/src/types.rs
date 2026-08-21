@@ -189,6 +189,31 @@ pub struct SceneSemanticsJs {
     pub selected: bool,
 }
 
+/// One entry of a [`TuiRenderer::set_a11y_annotations`] call: the
+/// summary-relevant subset of the [`SceneSemanticsJs`] dump — the role,
+/// the accessible name, and the active state flags — that becomes one
+/// iTerm2 hidden annotation's text (see the core
+/// `tern_terminal::backend::A11yAnnotation`).
+///
+/// Input-only (the default `from_js` mode): accepted from JS, never
+/// returned — which is what lets the `u64`-typed output dump
+/// [`SceneSemanticsJs`] stay `object_from_js = false` (napi-rs generates
+/// `FromNapiValue` only for from-js objects, and it implements none for
+/// `u64`). Structurally assignable from the `semantics()` dump on the JS
+/// side.
+#[napi(object)]
+#[derive(Debug)]
+pub struct A11yAnnotationJs {
+    /// The ARIA role name.
+    pub role: String,
+    /// The node's accessible name, or `null`.
+    pub label: Option<String>,
+    /// The active semantics state flags, in the order given (the
+    /// [`TuiRenderer::semantics`] dump sorts them, so the JS side passes
+    /// them sorted).
+    pub state: Vec<String>,
+}
+
 /// A key event surfaced to JS as a plain object: `{ name, char, ctrl, alt,
 /// shift, kind, super, meta, hyper }`. `char` is the printable character for
 /// `"char"`-named keys (single-character string), `undefined` for named
@@ -484,6 +509,15 @@ pub struct TuiRendererOptions {
     /// writes; existing entries stay readable.
     #[napi(js_name = "semantics")]
     pub semantics: Option<bool>,
+    /// Enable iTerm2 hidden accessibility annotations (OSC 1337
+    /// `AddHiddenAnnotation`) for the scene's semantics store (default
+    /// `false`): while on, [`TuiRenderer::set_a11y_annotations`] emits one
+    /// hidden annotation per entry for VoiceOver. Annotations are only
+    /// emitted when the interactive probe reports the terminal
+    /// self-identifies as iTerm2 — the only terminal that understands the
+    /// sequence — and elsewhere the write is a strict no-op.
+    #[napi(js_name = "a11y_annotations")]
+    pub a11y_annotations: Option<bool>,
     /// The virtual width in cells for `headless` mode (default 80). Ignored
     /// when `headless` is `false`.
     #[napi(js_name = "width")]

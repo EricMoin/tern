@@ -1,6 +1,7 @@
 //! Render backend abstraction and buffer serialization helpers.
 
 use super::*;
+use tern_terminal::backend::A11yAnnotation;
 
 /// The backend surface [`TuiRenderer`] talks to, split out so unit tests can
 /// inject a counting mock and prove the no-op render fast path performs zero
@@ -53,6 +54,13 @@ pub(crate) trait RenderBackend: Send + Sync {
     fn set_title(&self, title: &str) -> io::Result<()>;
     /// Copy `text` to the system clipboard (OSC 52).
     fn set_clipboard(&self, text: &str) -> io::Result<()>;
+    /// Write iTerm2 hidden accessibility annotations (`OSC 1337
+    /// AddHiddenAnnotation`) for `entries` — one hidden annotation per
+    /// entry, so VoiceOver can read the scene's semantics store in
+    /// iTerm2's accessibility mode. A strict no-op (zero bytes) unless the
+    /// renderer opted in and the interactive probe reports the terminal
+    /// self-identifies as iTerm2.
+    fn set_a11y_annotations(&self, entries: &[A11yAnnotation]) -> io::Result<()>;
     /// Stop mouse / focus-change / bracketed-paste event reporting.
     fn disable_event_listening(&self) -> io::Result<()>;
     /// Opt into any-event mouse tracking (`?1003h`): the terminal reports
@@ -124,6 +132,10 @@ impl RenderBackend for Backend {
 
     fn set_clipboard(&self, text: &str) -> io::Result<()> {
         Backend::set_clipboard(self, text)
+    }
+
+    fn set_a11y_annotations(&self, entries: &[A11yAnnotation]) -> io::Result<()> {
+        Backend::set_a11y_annotations(self, entries)
     }
 
     fn disable_event_listening(&self) -> io::Result<()> {
@@ -228,6 +240,12 @@ impl RenderBackend for HeadlessBackend {
     }
 
     fn set_clipboard(&self, _text: &str) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn set_a11y_annotations(&self, _entries: &[A11yAnnotation]) -> io::Result<()> {
+        // Headless backends never write terminal bytes: annotations are a
+        // terminal I/O surface, so the write is a no-op here.
         Ok(())
     }
 
