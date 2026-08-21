@@ -37,6 +37,13 @@
  * - `render(element, renderer)` / `createRoot(renderer)` mount a tree onto a
  *   core renderer's scene root; every commit paints the scene via
  *   `renderer.render()`.
+ * - The core runtime theme engine is re-exported as `setTheme(overrides)` /
+ *   `getTheme()` (M4.5): an imperative `setTheme` switch re-resolves the
+ *   mounted scene in place — the host components carry their `role` /
+ *   `component` hints onto the element props, the reconciler records them on
+ *   the core nodes, and the core engine walks, diffs and repaints — with NO
+ *   React re-render. `ThemeProvider` / `useTheme` keep their framework-driven
+ *   re-render path, which takes precedence when used.
  * - `useApp()` exposes the app handle (renderer, scene root, exit/unmount);
  *   `useInput(handler)` subscribes to keyboard input for the tree, routing
  *   each key to the focused element's handler first (via the core
@@ -131,9 +138,10 @@ import {
   type Theme,
   type ThemeComponent,
   type ThemeOverrides,
+  type ThemeResolvableProps,
   type ThemeRole,
 } from "@tern-tui/core";
-import { useApp } from "./reconciler.ts";
+import { THEME_HINT_CARRIER, useApp } from "./reconciler.ts";
 
 export const name = "@tern-tui/react";
 export const version = "0.2.0";
@@ -236,6 +244,42 @@ export function useTheme(): Theme {
   return useContext(ThemeContext);
 }
 
+/**
+ * Attach the M4.5 runtime theme hint onto resolved host props. The core
+ * `resolveTheme` stamps a module-private Symbol carrying `{ role,
+ * component, stamped }` onto its output — the record the core runtime theme
+ * engine (`setTheme`, M4.5 subtask 1) needs to re-resolve a node in place.
+ * That Symbol cannot ride a React element (`createElement` copies config
+ * with `for...in`, string keys only), so it is carried under the string
+ * carrier key instead; `toNodeProps` re-materializes it before the core
+ * factory call (see `./reconciler.ts`). When `resolveTheme` consumed no
+ * hints, there is no Symbol and the props pass through unchanged — a node
+ * created without `role` / `component` is never recorded, so a later
+ * `setTheme` switch leaves it alone.
+ */
+function withThemeHint(resolved: NodeProps): NodeProps {
+  const symbols = Object.getOwnPropertySymbols(resolved);
+  if (symbols.length === 0) return resolved;
+  const symbol = symbols[0]!;
+  const payload = (resolved as unknown as Record<symbol, unknown>)[symbol];
+  const out = { ...resolved } as Record<string, unknown>;
+  out[THEME_HINT_CARRIER] = { symbol, payload };
+  return out as NodeProps;
+}
+
+/**
+ * The host components' resolution funnel: resolves `theme` onto `props`
+ * exactly like the core `resolveTheme` (explicit props win, `component`
+ * preset then `role` palette fill the remaining `fg` / `bg` /
+ * `border_style`), and additionally attaches the runtime theme hint onto the
+ * element props (see {@link withThemeHint}) so the core `setTheme` engine can
+ * re-resolve the created node in place — a framework-driven re-render
+ * (`ThemeProvider` theme change) still takes precedence when used.
+ */
+function resolveHostTheme(theme: Theme, props: ThemeResolvableProps): NodeProps {
+  return withThemeHint(resolveTheme(theme, props));
+}
+
 // ---------------------------------------------------------------------------
 // Host components
 // ---------------------------------------------------------------------------
@@ -256,7 +300,7 @@ const HOST_STREAMING_TEXT: string = "streaming_text";
  */
 export function Box(props: BoxProps): ReactElement<BoxProps> {
   const theme = useTheme();
-  return createElement(HOST_BOX, resolveTheme(theme, props) as BoxProps);
+  return createElement(HOST_BOX, resolveHostTheme(theme, props) as BoxProps);
 }
 
 /**
@@ -267,7 +311,7 @@ export function Box(props: BoxProps): ReactElement<BoxProps> {
  */
 export function Text(props: TextProps): ReactElement<TextProps> {
   const theme = useTheme();
-  return createElement(HOST_TEXT, resolveTheme(theme, props) as TextProps);
+  return createElement(HOST_TEXT, resolveHostTheme(theme, props) as TextProps);
 }
 
 /**
@@ -344,7 +388,7 @@ export function StreamingText(props: StreamingTextProps): ReactElement<Streaming
   }, [props.autoScroll]);
 
   return createElement(HOST_STREAMING_TEXT, {
-    ...(resolveTheme(theme, props) as StreamingTextProps),
+    ...(resolveHostTheme(theme, props) as StreamingTextProps),
     ref: nodeRef,
   });
 }
@@ -613,7 +657,7 @@ export function Input(props: InputProps): ReactElement<InputProps> {
   }, [props.focusId, manager]);
 
   return createElement(HOST_INPUT, {
-    ...(resolveTheme(theme, { ...props, component: "input" }) as InputProps),
+    ...(resolveHostTheme(theme, { ...props, component: "input" }) as InputProps),
     ref: nodeRef,
   });
 }
@@ -704,7 +748,7 @@ export function Textarea(props: TextareaProps): ReactElement<TextareaProps> {
   }, [props.focusId, manager]);
 
   return createElement(HOST_TEXTAREA, {
-    ...(resolveTheme(theme, { ...props, component: "textarea" }) as TextareaProps),
+    ...(resolveHostTheme(theme, { ...props, component: "textarea" }) as TextareaProps),
     ref: nodeRef,
   });
 }
@@ -748,7 +792,7 @@ export function Spinner(props: SpinnerProps): ReactElement<SpinnerProps> {
   }, [renderer, interval]);
 
   return createElement(HOST_SPINNER, {
-    ...(resolveTheme(theme, { ...props, component: "spinner" }) as SpinnerProps),
+    ...(resolveHostTheme(theme, { ...props, component: "spinner" }) as SpinnerProps),
     ref: nodeRef,
   });
 }
@@ -763,7 +807,7 @@ export function StatusBar(props: StatusBarProps): ReactElement<StatusBarProps> {
   const theme = useTheme();
   return createElement(
     HOST_STATUS_BAR,
-    resolveTheme(theme, { ...props, component: "status_bar" }) as StatusBarProps,
+    resolveHostTheme(theme, { ...props, component: "status_bar" }) as StatusBarProps,
   );
 }
 
@@ -777,7 +821,7 @@ export function Panels(props: PanelsProps): ReactElement<PanelsProps> {
   const theme = useTheme();
   return createElement(
     HOST_PANELS,
-    resolveTheme(theme, { ...props, component: "panels" }) as PanelsProps,
+    resolveHostTheme(theme, { ...props, component: "panels" }) as PanelsProps,
   );
 }
 
@@ -794,7 +838,7 @@ export function DiffView(props: DiffViewProps): ReactElement<DiffViewProps> {
   const theme = useTheme();
   return createElement(
     HOST_DIFF,
-    resolveTheme(theme, { ...props, component: "diff" }) as DiffViewProps,
+    resolveHostTheme(theme, { ...props, component: "diff" }) as DiffViewProps,
   );
 }
 
@@ -844,7 +888,7 @@ export function Select(props: SelectProps): ReactElement<SelectProps> {
   }, [props.focusId, manager]);
 
   return createElement(HOST_SELECT, {
-    ...(resolveTheme(theme, { ...props, component: "select" }) as SelectProps),
+    ...(resolveHostTheme(theme, { ...props, component: "select" }) as SelectProps),
     ref: nodeRef,
   });
 }
@@ -917,7 +961,7 @@ export function Menu(props: MenuProps): ReactElement<MenuProps> {
   }, [renderer]);
 
   return createElement(HOST_MENU, {
-    ...(resolveTheme(theme, { ...props, component: "menu" }) as MenuProps),
+    ...(resolveHostTheme(theme, { ...props, component: "menu" }) as MenuProps),
     ref: nodeRef,
   });
 }
@@ -962,7 +1006,7 @@ export function ScrollView(props: ScrollViewProps): ReactElement<ScrollViewProps
   const theme = useTheme();
   return createElement(
     HOST_SCROLL_VIEW,
-    resolveTheme(theme, { ...props, component: "scroll_view" }) as ScrollViewProps,
+    resolveHostTheme(theme, { ...props, component: "scroll_view" }) as ScrollViewProps,
   );
 }
 
@@ -1002,7 +1046,7 @@ export function Table(props: TableProps): ReactElement<TableProps> {
   const theme = useTheme();
   return createElement(
     HOST_TABLE,
-    resolveTheme(theme, { ...props, component: "table" }) as TableProps,
+    resolveHostTheme(theme, { ...props, component: "table" }) as TableProps,
   );
 }
 
@@ -1078,7 +1122,7 @@ export function Tree(props: TreeProps): ReactElement<TreeProps> {
   }, [props.focusId, manager]);
 
   return createElement(HOST_TREE, {
-    ...(resolveTheme(theme, props) as TreeProps),
+    ...(resolveHostTheme(theme, props) as TreeProps),
     ref: nodeRef,
   });
 }
@@ -1114,7 +1158,7 @@ export interface ModalProps extends TernNodeProps {
  */
 export function Modal(props: ModalProps): ReactElement<ModalProps> {
   const theme = useTheme();
-  return createElement(HOST_MODAL, resolveTheme(theme, props) as ModalProps);
+  return createElement(HOST_MODAL, resolveHostTheme(theme, props) as ModalProps);
 }
 
 /**
@@ -1192,7 +1236,7 @@ export function Tabs(props: TabsProps): ReactElement<TabsProps> {
   }, [props.focusId, manager]);
 
   return createElement(HOST_TABS, {
-    ...(resolveTheme(theme, props) as TabsProps),
+    ...(resolveHostTheme(theme, props) as TabsProps),
     ref: nodeRef,
   });
 }
@@ -1238,7 +1282,7 @@ export interface ProgressProps extends TernNodeProps {
 export function Progress(props: ProgressProps): ReactElement<ProgressProps> {
   const theme = useTheme();
   return createElement(HOST_PROGRESS, {
-    ...(resolveTheme(theme, { ...props, component: "progress" }) as ProgressProps),
+    ...(resolveHostTheme(theme, { ...props, component: "progress" }) as ProgressProps),
   });
 }
 
@@ -1282,7 +1326,7 @@ export interface BarChartProps extends TernNodeProps {
  */
 export function BarChart(props: BarChartProps): ReactElement<BarChartProps> {
   const theme = useTheme();
-  return createElement(HOST_BAR_CHART, resolveTheme(theme, props) as BarChartProps);
+  return createElement(HOST_BAR_CHART, resolveHostTheme(theme, props) as BarChartProps);
 }
 
 /**
@@ -1319,7 +1363,7 @@ export interface ChartProps extends TernNodeProps {
  */
 export function Chart(props: ChartProps): ReactElement<ChartProps> {
   const theme = useTheme();
-  return createElement(HOST_CHART, resolveTheme(theme, props) as ChartProps);
+  return createElement(HOST_CHART, resolveHostTheme(theme, props) as ChartProps);
 }
 
 /**
@@ -1353,7 +1397,7 @@ export interface SparklineProps extends TernNodeProps {
  */
 export function Sparkline(props: SparklineProps): ReactElement<SparklineProps> {
   const theme = useTheme();
-  return createElement(HOST_SPARKLINE, resolveTheme(theme, props) as SparklineProps);
+  return createElement(HOST_SPARKLINE, resolveHostTheme(theme, props) as SparklineProps);
 }
 
 // ---------------------------------------------------------------------------
@@ -1749,7 +1793,9 @@ export type {
 // auto-paste through), the scroll helpers (including the streaming auto-scroll
 // `followTail` / `syncStreamTail` / `isStreamFollowing` / `scrollToBottom` and
 // the `STREAM_AFFORDANCE_CHAR` scroll-to-bottom indicator), the panel
-// drag-resize helpers, the modal helpers, and the theme surface.
+// drag-resize helpers, the modal helpers, the theme surface, and the M4.5
+// runtime theme engine (`setTheme` / `getTheme` — an imperative switch
+// re-resolves the mounted scene in place, without a React re-render).
 export {
   activateTab,
   closeTab,
@@ -1767,6 +1813,7 @@ export {
   focusManager,
   followTail,
   FocusManager,
+  getTheme,
   isStreamFollowing,
   mergeTheme,
   MENU_Z_INDEX,
@@ -1788,6 +1835,7 @@ export {
   SELECTION_DOUBLE_CLICK_MS,
   selectionKey,
   setProgress,
+  setTheme,
   startPanelDrag,
   startSelection,
   STREAM_AFFORDANCE_CHAR,
