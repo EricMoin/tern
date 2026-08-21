@@ -93,6 +93,8 @@ import {
   type TableProps,
   type TabsProps,
   type TextareaProps,
+  type ThemeComponent,
+  type ThemeRole,
   type TreeProps,
 } from "@tern-tui/core";
 
@@ -266,15 +268,64 @@ const TABS_PROPS = new Set(["onChange", "onClose", "focusId", "focusManager"]);
  */
 const TREE_PROPS = new Set(["onChange", "focusId", "focusManager"]);
 
+// ---------------------------------------------------------------------------
+// M4.5 runtime theme hint carrier
+//
+// The host components resolve their `role` / `component` hints through the
+// core `resolveTheme` at element-creation time, stamping plain style keys.
+// The core runtime theme engine (`setTheme` / `getTheme`, M4.5 subtask 1)
+// re-resolves every node it has *recorded* — and the recording happens in
+// the core `Node` constructor, which reads a module-private Symbol that
+// `resolveTheme` stamps onto its returned props.
+//
+// That Symbol cannot ride a React element: `createElement` copies its config
+// with `for...in`, which iterates string keys only, so the Symbol would be
+// dropped before the reconciler ever sees it. The host components therefore
+// carry the hint under a string key (`resolveHostTheme` in `index.ts`), and
+// `toNodeProps` re-materializes it as the Symbol right before the core
+// factory call — so the node is recorded and a later core `setTheme` can
+// re-resolve it in place, WITHOUT a React re-render.
+// ---------------------------------------------------------------------------
+
+/** The string key the host components attach the runtime theme hint under
+ * (never a scene prop — stripped by `toNodeProps` exactly like `role` /
+ * `component`). */
+export const THEME_HINT_CARRIER = "__ternThemeHint";
+
+/** The runtime theme hint carried on the element props: the core hint
+ * Symbol (as stamped by `resolveTheme` on its output) plus the hint record
+ * itself (`role` / `component` + the style keys the theme stamped at
+ * creation — the keys a later re-resolution may rewrite, while an explicit
+ * prop is never in the set). */
+export interface ReactThemeHint {
+  /** The core hint Symbol, read off the resolved props object. */
+  symbol: symbol;
+  /** The hint record `resolveTheme` attached to its output. */
+  payload: {
+    role?: ThemeRole;
+    component?: ThemeComponent;
+    stamped: Set<"fg" | "bg" | "border_style">;
+  };
+}
+
 /**
  * Strip the React-only props (and the component-level `<StreamingText>`,
  * `<Input>` / `<Spinner>` / `<Select>` / `<Modal>` / `<Tabs>` / `<Tree>`
  * props), leaving the tern node props (style + layout keys) that the core
- * factories and `Node.setProps` understand.
+ * factories and `Node.setProps` understand. The M4.5 theme hint carrier is
+ * consumed here too: the Symbol is re-attached to the returned props (the
+ * core `Node` constructor strips it again when it records the node), so
+ * hinted nodes stay invisible to the scene props yet reachable by a later
+ * core `setTheme` re-resolution.
  */
 export function toNodeProps(props: TernProps, type?: string): NodeProps {
+  let themeHint: ReactThemeHint | undefined;
   const out: NodeProps = {};
   for (const [key, value] of Object.entries(props)) {
+    if (key === THEME_HINT_CARRIER) {
+      themeHint = value as ReactThemeHint;
+      continue;
+    }
     if (REACT_RESERVED_PROPS.has(key) || THEME_PROPS.has(key) || value === undefined) continue;
     if (type === "streaming_text" && STREAMING_TEXT_PROPS.has(key)) continue;
     if (type === "input" && INPUT_PROPS.has(key)) continue;
@@ -286,6 +337,18 @@ export function toNodeProps(props: TernProps, type?: string): NodeProps {
     if (type === "tabs" && TABS_PROPS.has(key)) continue;
     if (type === "tree" && TREE_PROPS.has(key)) continue;
     out[key] = value;
+  }
+  if (themeHint !== undefined) {
+    // Re-attach the core hint Symbol with the retained record, so the core
+    // `Node` constructor records this node for the runtime theme engine. On
+    // the update path (`Node.setProps`) the Symbol is inert — the node is
+    // already recorded; invisible to every string-keyed operation, and
+    // dropped by the native serialization, so scene props stay untouched.
+    Object.defineProperty(out, themeHint.symbol, {
+      value: themeHint.payload,
+      enumerable: true,
+      configurable: true,
+    });
   }
   return out;
 }

@@ -22,12 +22,14 @@ import {
   createRenderer,
   focusManager,
   followTail,
+  getTheme,
   isStreamFollowing,
   openModal,
   scrollTo,
   scrollToBottom,
   selectionKey,
   setSelectionClockForTesting,
+  setTheme,
   useFocus as coreUseFocus,
   type KeyEvent,
   type MouseEventJs,
@@ -65,9 +67,11 @@ import {
   ThemeProvider,
   createRoot,
   defaultTheme,
+  getTheme as reactGetTheme,
   hostConfig,
   name,
   render,
+  setTheme as reactSetTheme,
   tableKey,
   toNodeProps,
   Tree,
@@ -3302,6 +3306,287 @@ Deno.test("toNodeProps strips the semantic theme hints from scene props", () => 
     throw new Error(`theme hints leaked: ${JSON.stringify(out)}`);
   }
   if (out.text !== "x") throw new Error(`text = ${out.text}`);
+});
+
+// ---------------------------------------------------------------------------
+// M4.5 runtime theme engine — imperative switching
+//
+// The core `setTheme(overrides)` (M4.5 subtask 1) re-resolves every node
+// that was created with semantic `role` / `component` hints — the host
+// components carry the hint onto the element props and the reconciler records
+// it on the core node — pushing only the changed style keys and repainting,
+// with NO React re-render. The test mounts a tree under `ThemeProvider` with
+// theme A, calls core `setTheme(B)`, and asserts the next `snapshotFrame()`
+// is cell-for-cell equal to a fresh mount created under theme B.
+// ---------------------------------------------------------------------------
+
+/** Border glyphs per style (mirrors the @tern-tui/core test fake's painter:
+ * `[top-left, top-right, bottom-left, bottom-right, horizontal, vertical]`).
+ * The theme A → B switch drives a paint-visible difference through the
+ * `input` component preset's `border_style` (rounded → thick). */
+const themeGlyphs: Record<
+  string,
+  readonly [string, string, string, string, string, string]
+> = {
+  rounded: ["┌", "┐", "└", "┘", "─", "│"],
+  plain: ["+", "+", "+", "+", "-", "|"],
+  double: ["╔", "╗", "╚", "╝", "═", "║"],
+  thick: ["┏", "┓", "┗", "┛", "━", "┃"],
+};
+
+/** A fake native handle recording kind/props/children so the fake
+ * `render_to_buffer` can paint the captured scene (the same role the core
+ * test fake plays for its golden frames). */
+class FakeThemeNodeHandle {
+  readonly kind: string;
+  readonly props: Record<string, unknown>;
+  readonly children: FakeThemeNodeHandle[] = [];
+  constructor(type: string, props: unknown) {
+    this.kind = type;
+    this.props = (props ?? {}) as Record<string, unknown>;
+  }
+  content_size(): { width: number; height: number } {
+    return { width: 11, height: 2 };
+  }
+  add_child(child: unknown): unknown {
+    this.children.push(child as FakeThemeNodeHandle);
+    return child;
+  }
+  insert_before(child: unknown, _anchor: unknown): unknown {
+    this.children.push(child as FakeThemeNodeHandle);
+    return child;
+  }
+  set_props(props: unknown): void {
+    Object.assign(this.props, props as Record<string, unknown>);
+  }
+  set_prop(key: string, value: unknown): void {
+    this.props[key] = value;
+  }
+  append_span(): void {}
+  set_semantics(): void {}
+  clear_semantics(): void {}
+  remove(): boolean {
+    return true;
+  }
+}
+
+/** Paint the captured scene rows: each root-level box paints its bordered
+ * frame (the `border_style` glyphs) with its text leaves stacked inside
+ * (flex column, padded by `padding`). */
+function paintThemeScene(
+  root: FakeThemeNodeHandle,
+  width: number,
+  height: number,
+): string[] {
+  const rows: string[] = [];
+  for (let y = 0; y < height; y++) {
+    let row = "";
+    for (let x = 0; x < width; x++) {
+      let ch = " ";
+      for (const child of root.children) {
+        const pad = typeof child.props.padding === "number"
+          ? child.props.padding
+          : 0;
+        child.children.forEach((leaf, li) => {
+          const text = typeof leaf.props.text === "string"
+            ? leaf.props.text
+            : "";
+          const innerWidth = text.length;
+          const bw = innerWidth + 2 * pad;
+          const bh = child.children.length + 2 * pad;
+          const contentRow = pad + li;
+          if (x < bw && y < bh) {
+            const g = themeGlyphs[String(child.props.border_style ?? "none")];
+            let c = " ";
+            if (g !== undefined) {
+              if (y === 0) c = x === 0 ? g[0] : x === bw - 1 ? g[1] : g[4];
+              else if (y === bh - 1) {
+                c = x === 0 ? g[2] : x === bw - 1 ? g[3] : g[4];
+              } else c = x === 0 || x === bw - 1 ? g[5] : " ";
+              // The text leaf overrides its content cells (the border stays
+              // around it, exactly like the real compositor).
+              if (y === contentRow && x >= pad && x < pad + innerWidth) {
+                c = text[x - pad] ?? " ";
+              }
+            } else if (y === li && x < innerWidth) {
+              // A borderless leaf paints its text from the origin.
+              c = text[x] ?? " ";
+            }
+            if (c !== " ") ch = c;
+          }
+        });
+      }
+      row += ch;
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+/** A fake native `TuiRenderer` whose `render_to_buffer` paints the captured
+ * scene (the `snapshotFrame` the imperative-switch test compares). */
+class FakeThemeTuiRenderer {
+  destroyed = false;
+  renderCalls = 0;
+  /** The scene root handle, reused across `root()` calls so the scene the
+   * `Renderer` builds is captured for `render_to_buffer`. */
+  private rootHandle = new FakeThemeNodeHandle("root", {});
+  constructor(_options: unknown) {}
+  root(): FakeThemeNodeHandle {
+    return this.rootHandle;
+  }
+  start_event_stream(): void {}
+  hit_test(): bigint[] {
+    return [];
+  }
+  render(): void {
+    this.renderCalls++;
+  }
+  render_to_buffer(width?: number, height?: number): string[] {
+    return paintThemeScene(this.rootHandle, width ?? 20, height ?? 6);
+  }
+  render_to_buffer_styled(): unknown[] {
+    return [];
+  }
+  destroy(): void {
+    this.destroyed = true;
+  }
+  /** The terminal capabilities the fake reports (the JS `Renderer`
+   * `capabilities` getter reads this when accessed). */
+  capabilities = {
+    truecolor: true,
+    colors: 16_777_216,
+    terminalIdentity: "xterm",
+    probed: false,
+  };
+}
+
+/** The fake addon injected through `setAddonForTesting` for the M4.5 theme
+ * tests (paint-capable, like the core test fake). */
+const themeFakeAddon = {
+  TuiRenderer: FakeThemeTuiRenderer,
+  NodeHandle: FakeThemeNodeHandle,
+  create_node: (type: string, props?: unknown) => new FakeThemeNodeHandle(type, props),
+} as unknown as TernAddon;
+
+/** Whether two snapshot frames are cell-for-cell equal. */
+function framesEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+Deno.test("M4.5: core setTheme(B) re-resolves a mounted scene in place, matching a fresh mount under B", async () => {
+  setAddonForTesting(themeFakeAddon);
+  try {
+    // The theme A / theme B pair drives two paint-visible differences: the
+    // `input` component preset's border (rounded vs thick — visible in plain
+    // snapshotFrame rows) and the `primary` role leaf colors.
+    const THEME_A: ThemeOverrides = {
+      palette: { primary: { fg: "#aa0000", bg: "#000011" } },
+      components: { input: { fg: "#aa0000", bg: "#000011", border_style: "rounded" } },
+    };
+    const THEME_B: ThemeOverrides = {
+      palette: { primary: { fg: "#00bb00", bg: "#000022" } },
+      components: { input: { fg: "#00bb00", bg: "#000022", border_style: "thick" } },
+    };
+
+    const mount = async (theme: ThemeOverrides): Promise<{
+      renderer: Renderer;
+      frame: string[];
+      box: Node;
+      leaf: Node;
+    }> => {
+      const renderer = createRenderer({ headless: true, size: { width: 20, height: 6 } });
+      const ternRoot = createRoot(renderer);
+      await act(() => {
+        ternRoot.render(
+          createElement(
+            ThemeProvider,
+            { theme },
+            createElement(
+              Box,
+              { component: "input", padding: 1 },
+              createElement(Text, { text: "hi", role: "primary" }),
+            ),
+          ),
+        );
+      });
+      const frame = renderer.snapshotFrame(20, 6);
+      const box = renderer.root.children[0]!;
+      const leaf = box.children[0]!;
+      return { renderer, frame, box, leaf };
+    };
+
+    // Mount under theme A: the `ThemeProvider` context resolves the
+    // creation-time props; the host components carry the `component` /
+    // `role` hints onto the element props, so the core nodes are recorded
+    // for the runtime engine.
+    setTheme(THEME_A);
+    const underA = await mount(THEME_A);
+    const frameA = underA.frame;
+    const boxBefore = underA.renderer.root.children[0];
+    if (underA.box.props.border_style !== "rounded") {
+      throw new Error(`creation-time border = ${underA.box.props.border_style}`);
+    }
+
+    // Imperative switch: core setTheme(B) — NO React re-render. The core
+    // engine walks the recorded nodes, re-resolves them against B, pushes
+    // only the changed style keys, and schedules one coalesced repaint.
+    setTheme(THEME_B);
+    const switched = underA.renderer.snapshotFrame(20, 6);
+
+    // The scene was updated IN PLACE: the same node objects, now themed B —
+    // this is what "no React re-render" means (no remount, no commit).
+    if (underA.renderer.root.children[0] !== boxBefore) {
+      throw new Error("the switch must not remount the scene");
+    }
+    // Read through a function: TS control-flow narrowing would otherwise
+    // pin the getter-only prop accesses to the creation-time values (the
+    // same memory gotcha the theme re-render test documents).
+    const switchedProps = (): { border: unknown; fg: unknown; bg: unknown } => ({
+      border: underA.box.props.border_style,
+      fg: underA.leaf.props.fg,
+      bg: underA.leaf.props.bg,
+    });
+    if (switchedProps().border !== "thick") {
+      throw new Error(`switched border = ${switchedProps().border}`);
+    }
+    if (switchedProps().fg !== "#00bb00" || switchedProps().bg !== "#000022") {
+      throw new Error(
+        `switched leaf colors = fg ${switchedProps().fg}, bg ${switchedProps().bg}`,
+      );
+    }
+
+    // A fresh mount created directly under theme B paints cell-for-cell
+    // identically to the switched scene (the M4.5 golden contract).
+    const underB = await mount(THEME_B);
+    if (!framesEqual(switched, underB.frame)) {
+      throw new Error(
+        `switched frame:\n${switched.join("\n")}\n` +
+          `fresh-B frame:\n${underB.frame.join("\n")}`,
+      );
+    }
+
+    // Sanity: the switch really changed the painted cells (A != B) — the
+    // golden comparison above must not be trivially equal.
+    if (framesEqual(switched, frameA)) {
+      throw new Error("the switch must change the painted frame");
+    }
+
+    // Sanity: the re-exported API IS the core function (same reference), so
+    // an imperative switch through @tern-tui/react is the core engine.
+    if (reactSetTheme !== setTheme) {
+      throw new Error("the react setTheme re-export must be the core setTheme");
+    }
+    if (reactGetTheme !== getTheme) {
+      throw new Error("the react getTheme re-export must be the core getTheme");
+    }
+  } finally {
+    setAddonForTesting(null);
+  }
 });
 
 // ---------------------------------------------------------------------------
