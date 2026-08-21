@@ -2986,6 +2986,44 @@ Deno.test("getTheme returns a full Theme", () => {
   }
 });
 
+Deno.test("M4.5 live switch: setTheme(B) after creation repaints existing elements to a fresh B tree", () => {
+  const before = getTheme();
+  try {
+    // Elements created under theme A — a primitive tree (Box + Text) and a
+    // roadmap element (Input), both resolved through the `primary` role.
+    setTheme({ palette: { primary: { fg: "#aa1111", bg: "#aa2222" } } });
+    const treeA = Box({ role: "primary", children: [Text({ text: "x", role: "primary" })] });
+    const inputA = Input({ value: "v", role: "primary" });
+    const propsUnderA = treeA.props;
+    if (propsUnderA.fg !== "#aa1111" || inputA.props.fg !== "#aa1111") {
+      throw new Error(`elements not created under theme A: ${JSON.stringify(propsUnderA)}`);
+    }
+
+    // Live switch: setTheme(B) re-resolves the recorded nodes in place.
+    setTheme({ palette: { primary: { fg: "#bb3333", bg: "#bb4444" } } });
+
+    // The existing primitive tree now snapshots identically to a fresh tree
+    // created under theme B (and its nodes carry the B colors).
+    const live = snapshot(treeA);
+    const fresh = snapshot(Box({ role: "primary", children: [Text({ text: "x", role: "primary" })] }));
+    if (!snapshotsEqual(live, fresh)) {
+      throw new Error(`live tree != fresh B tree: ${JSON.stringify(live)} vs ${JSON.stringify(fresh)}`);
+    }
+    const propsAfterSwitch = treeA.props;
+    if (propsAfterSwitch.fg !== "#bb3333" || treeA.children[0]?.props.fg !== "#bb3333") {
+      throw new Error(`primitive live fg = ${JSON.stringify(propsAfterSwitch)}`);
+    }
+
+    // The roadmap element root re-resolves the same way.
+    const freshInput = Input({ value: "v", role: "primary" });
+    if (!snapshotsEqual(snapshot(inputA), snapshot(freshInput))) {
+      throw new Error("input live tree != fresh B input tree");
+    }
+  } finally {
+    setTheme(before);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Mouse wheel scroll + click-to-focus (subscribeWheelScroll / subscribeClickFocus)
 //
