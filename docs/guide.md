@@ -713,6 +713,14 @@ The Phase 2 event surface is consumed in the renderers:
 The theme system is pure prop data flow: semantic `role` / `component` hints
 on a node's props resolve to plain `fg` / `bg` / `border_style` style keys at
 element-creation time (the hints are consumed and never reach the scene).
+Since M4.5 the theme is also **runtime-switchable**: `setTheme(overrides)`
+swaps the module-level active theme and re-resolves every scene node that was
+created with hints in place — no remount, no React re-render, only the changed
+style keys are pushed (single-key writes, never a full-map replace) and
+exactly one coalesced repaint is scheduled. The golden contract: a switched
+scene paints cell-for-cell identically to a fresh mount created directly under
+the new theme (unit-tested in `@tern-tui/core`, `@tern-tui/react` and
+`@tern-tui/solid`).
 
 The default theme is One-Dark-flavored, with palette roles `primary` /
 `secondary` / `success` / `danger` / `warning` / `muted` / `border` and
@@ -724,14 +732,19 @@ per-component presets for `input` / `textarea` / `spinner` / `status_bar` /
   per-preset keys merge; the base is never mutated).
 - `resolveTheme(theme, props)` — stamp `fg` / `bg` / `border_style` onto
   props from `component` / `role` hints. Explicit props always win.
+- `setTheme(overrides)` / `getTheme()` — the runtime theme engine
+  (re-exported by `@tern-tui/core`, `@tern-tui/react` and `@tern-tui/solid`,
+  same function reference in all three): `setTheme` swaps the active theme
+  (merged over `defaultTheme`) and re-resolves every recorded hinted node in
+  place; `getTheme()` reads the active theme.
 - `@tern-tui/react`: `<ThemeProvider theme={overrides}>` provides a merged theme
   to the subtree; `useTheme()` reads it (defaults to `defaultTheme`).
-- `@tern-tui/solid`: `setTheme(overrides)` swaps the module-level active theme
-  (merged over `defaultTheme`); `getTheme()` reads it. Solid has no context,
-  so the theme is global state.
+- `@tern-tui/solid`: the element factories resolve their hints against the
+  active theme at creation time (module-level — solid has no context, so the
+  theme is global state).
 
 ```tsx
-// @tern-tui/react
+// @tern-tui/react — creation-time resolution via context
 <ThemeProvider theme={{ palette: { primary: { fg: "#123456" } } }}>
   <Box role="primary" />            {/* fg resolves to #123456 */}
   <Box component="input" />         {/* border_style from the input preset */}
@@ -739,7 +752,53 @@ per-component presets for `input` / `textarea` / `spinner` / `status_bar` /
 ```
 
 ```ts
-// @tern-tui/solid
-setTheme({ components: { input: { border_style: "double" } } });
-Input({ placeholder: "ask…" });     // framed box resolves the preset
+// A live switch — works identically through @tern-tui/core, @tern-tui/react
+// and @tern-tui/solid (the same function reference is re-exported):
+import { setTheme, getTheme } from "@tern-tui/core";
+
+setTheme({ palette: { primary: { fg: "#00bb00" } } });
+// Every node created with role="primary" re-resolves its fg in place; the
+// next frame paints the new color. Only the changed keys are pushed and
+// exactly one coalesced repaint runs — a React tree is not re-rendered.
+getTheme().palette.primary.fg;      // "#00bb00" — the live active theme
+```
+
+The `kitchen-sink-react` / `kitchen-sink-solid` demos exercise a live theme
+switch under the PTY smoke harness: the mounted scene is switched mid-session
+and asserted against the new theme, then a contrast audit runs on the active
+theme.
+
+## Contrast audit
+
+The M4.5 contrast checker audits any theme against the WCAG 2.1 contrast
+formulas. Everything is a pure function over the theme system's string colors
+(`#rrggbb` hex, `indexed:N` for a slot of the fixed xterm 256-color palette,
+or `default` — which carries no concrete RGB value and is skipped, never
+crashed on), so it runs anywhere the theme runs: unit tests, build-time theme
+linting, or a runtime `--check-contrast` flag.
+
+- `parseThemeColor(color)` — resolve a color string to `{ r, g, b }` (or
+  `null` for `default` / unparseable input). `XTERM_256` exposes the fixed
+  palette table.
+- `relativeLuminance(rgb)` — the WCAG 2.1 relative luminance (`0` for black,
+  `1` for white).
+- `contrastRatio(fg, bg)` — the WCAG 2.1 ratio `(L1 + 0.05) / (L2 + 0.05)`,
+  always `>= 1` and order-independent (`contrastRatio(fg, bg)` and
+  `contrastRatio(bg, fg)` agree); `null` when either color is unknown.
+- `auditTheme(theme, threshold = 4.5)` — every palette role and component
+  preset pair that falls below the threshold, in a deterministic order
+  (palette roles first, then component presets). `4.5` is the WCAG AA bar for
+  normal text and UI components.
+
+```ts
+import { auditTheme, contrastRatio, defaultTheme } from "@tern-tui/core";
+
+contrastRatio("#000000", "#ffffff"); // 21:1 (black on white)
+contrastRatio("#777777", "#ffffff"); // ≈ 4.48 — below the 4.5 AA bar
+
+const findings = auditTheme(defaultTheme);
+// The default One-Dark theme flags exactly two roles at 4.5:1 — muted
+// (≈ 2.55) and border (≈ 1.58); danger clears the bar narrowly (≈ 4.82).
+// Each finding carries { scope, name, fg, bg, ratio, threshold } so a
+// consumer can render "muted: 2.55:1 (below 4.5:1)" without re-computing.
 ```
