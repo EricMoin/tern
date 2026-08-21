@@ -46,21 +46,24 @@ jobs:
     # by the release job below.
     #
     # Cross-build recipes follow the napi-rs cross-build docs
-    # (https://napi.rs/docs/cross-build). Per-target verification status on
-    # GitHub hosted runners (rows without a native load-check are build-only):
-    #   fully load-checked: linux-gnu x64, darwin arm64, win32-x64 msvc
+    # (https://napi.rs/docs/cross-build). Runtime verification happens in
+    # ci.yml (M4.3): the napi-build matrix mirrors this one and runs a native
+    # load-check plus the runtime-smoke.mjs headless renderer gate in a
+    # runtime matching the binary, so the release matrix itself stays
+    # build-only. Verified set (ci.yml, on GitHub hosted runners):
+    #   runtime load-check + smoke:
+    #     - linux-gnu x64 — native (ubuntu-latest)
+    #     - linux-gnu arm64 — native on ubuntu-24.04-arm (no apt cross gcc)
+    #     - linux-musl x64/arm64 — node:alpine container smoke (arm64 row on
+    #       ubuntu-24.04-arm, image auto-pulled)
+    #     - freebsd x64 — FreeBSD 15 VM via cross-platform-actions/action
+    #       (the freebsd-runtime job downloads this job's artifact)
+    #     - darwin arm64 — native (macos-latest)
+    #     - win32-x64 msvc — native (windows-latest)
+    #     - win32-arm64 msvc — native on windows-11-arm
     #   build-only:
-    #     - linux-gnu arm64 — apt cross gcc; no arm64 runner (see the row
-    #       comment for the --use-napi-cross rationale and glibc-floor
-    #       trade-off)
-    #     - linux-musl x64/arm64 — zig via -x; a musl runtime (e.g. a
-    #       node:alpine container, as the napi-rs template tests musl
-    #       bindings) is required to load-check
-    #     - freebsd x64 — zig via -x; no FreeBSD hosted runner (napi-rs's
-    #       reference builds natively in a FreeBSD 15 VM via
-    #       cross-platform-actions/action)
-    #     - win32-arm64 msvc — MSVC cross-links on the x64 windows runner; a
-    #       native load-check is possible on the windows-11-arm hosted runner
+    #     - darwin x64 — cross-linked on the arm64 macos runner; no x64 mac
+    #       hosted runtime
     #     - riscv64 gnu — no riscv64 hosted runner / official Node runtime
     #     - android arm64 — NDK preinstalled on ubuntu-latest; no Android
     #       runtime on hosted runners (verify on-device, e.g. Termux)
@@ -85,30 +88,37 @@ jobs:
             # the apt sysroot glibc (2.39 on ubuntu-24.04) becomes the binary's
             # floor, vs glibc 2.17 with --use-napi-cross
             # (https://napi.rs/docs/cross-build) — revisit --use-napi-cross if
-            # the toolchain resolution is fixed. ci.yml mirrors this command.
+            # the toolchain resolution is fixed. ci.yml (M4.3) builds this
+            # target natively on the ubuntu-24.04-arm runner instead — no
+            # glibc floor there — while this release-time row keeps the
+            # deterministic apt cross gcc.
             build: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu && CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc npx napi build --platform --release --target aarch64-unknown-linux-gnu && node fix-dts.mjs
             load_check: false
           - host: ubuntu-latest
             target: x86_64-unknown-linux-musl
             # musl: -x routes through cargo-zigbuild (zig on PATH, set up
             # below); the CLI auto-appends -C target-feature=-crt-static, so
-            # the binary is static musl — no glibc floor. Build-only here: a
-            # musl runtime is required to load-check (napi-rs template tests
-            # musl bindings inside a node:alpine container).
+            # the binary is static musl — no glibc floor. Build-only here:
+            # the runtime smoke runs in ci.yml (M4.3) inside a node:alpine
+            # container, as the napi-rs template tests musl bindings.
             zig: true
             build: npx napi build --platform --release --target x86_64-unknown-linux-musl --cross-compile && node fix-dts.mjs
             load_check: false
           - host: ubuntu-latest
             target: aarch64-unknown-linux-musl
+            # arm64 musl: same zig -x recipe; runtime smoke in ci.yml (M4.3)
+            # via node:alpine on the ubuntu-24.04-arm runner (arm64 image
+            # auto-pulled).
             zig: true
             build: npx napi build --platform --release --target aarch64-unknown-linux-musl --cross-compile && node fix-dts.mjs
             load_check: false
           - host: ubuntu-latest
             target: x86_64-unknown-freebsd
             # FreeBSD: no hosted FreeBSD runner, so -x + zig cross-compiles
-            # from Linux (cargo-zigbuild). Build-only; napi-rs's reference
-            # setup builds natively inside a FreeBSD 15 VM
-            # (cross-platform-actions/action) if native verification is wanted.
+            # from Linux (cargo-zigbuild). Build-only here; the runtime smoke
+            # runs in ci.yml's freebsd-runtime job (M4.3) inside a FreeBSD 15
+            # VM via cross-platform-actions/action — the napi-rs reference
+            # setup (action@v1.4.0, operating_system: freebsd, version: '15.0').
             zig: true
             build: npx napi build --platform --release --target x86_64-unknown-freebsd --cross-compile && node fix-dts.mjs
             load_check: false
@@ -143,9 +153,11 @@ jobs:
           - host: windows-latest
             target: aarch64-pc-windows-msvc
             # MSVC cross-links all Windows arches on the x64 windows runner —
-            # no cross flag (napi-rs reference setup). Build-only here; a
-            # native load-check is possible on the windows-11-arm hosted
-            # runner (the napi-rs template tests the arm64 binding there).
+            # no cross flag (napi-rs reference setup). Build-only here;
+            # ci.yml (M4.3) builds this target natively on the windows-11-arm
+            # hosted runner with a load-check + runtime smoke (the napi-rs
+            # template tests the arm64 binding there; rustup is bootstrapped
+            # manually on that image).
             build: npx napi build --platform --release --target aarch64-pc-windows-msvc && node fix-dts.mjs
             load_check: false
     steps:

@@ -239,16 +239,18 @@ jobs:
 
   napi-build:
     # Multi-platform native addon strategy (napi-rs distribution model):
-    # build tern-node for the five most common targets in `napi.targets`
-    # (tern-node package.json) — the same rows as release.yml's build job,
-    # which carries the full expanded matrix (musl, FreeBSD, riscv64,
-    # Android, Windows arm64) at release time. Each row uploads its
-    # <platform>-<arch>.node binary; release.yml wires the per-platform
-    # binaries via optionalDependencies as tern-node-<platform> packages.
-    # Cross-compiled rows skip the native load-check because the binary
-    # arch differs from the runner arch. `npm run build` resolves to the
-    # RELEASE profile — these binaries are the release artifacts consumed
-    # by release.yml.
+    # build tern-node for every target in `napi.targets` (tern-node
+    # package.json) — the full release.yml build matrix. Since M4.3 every
+    # feasible row also gets a real runtime verification: a native load-check
+    # where the runner arch matches the target, plus a runtime smoke
+    # (runtime-smoke.mjs, the M4.3 headless renderer gate) executed in a
+    # runtime matching the binary — native node, a node:alpine container for
+    # the musl rows, or (for FreeBSD) the dedicated freebsd-runtime job.
+    # Rows without a matching hosted runtime stay build-only. Each row
+    # uploads its <platform>-<arch>.node binary; release.yml wires the
+    # per-platform binaries via optionalDependencies as tern-node-<platform>
+    # packages. `npm run build` resolves to the RELEASE profile — these
+    # binaries are the release artifacts consumed by release.yml.
     name: napi addon — ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
     needs: changes
@@ -261,38 +263,125 @@ jobs:
             target: x86_64-unknown-linux-gnu
             build: npm run build
             load_check: true
-          - host: ubuntu-latest
+            runtime: node runtime-smoke.mjs
+          - host: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            # Mirrors release.yml: npm run build -- <args> appends args to
-            # the LAST command of the script chain (node fix-dts.mjs), so
-            # cross rows invoke the napi CLI directly to pass --target.
-            # --use-napi-cross is avoided (its toolchain was not installed
-            # by npm in CI — npm/cli#4828 class of bug) in favor of the
-            # deterministic apt cross gcc; see the release.yml row comment
-            # for the full rationale and glibc-floor trade-off.
-            build: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu && CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc npx napi build --platform --release --target aarch64-unknown-linux-gnu && node fix-dts.mjs
+            # M4.3: native arm64 build on the arm64 hosted runner — replaces
+            # release.yml's apt cross gcc (no glibc-floor trade-off when the
+            # binary is built on the target arch). Runner arch matches the
+            # target, so load-check + runtime smoke run natively.
+            build: npm run build
+            load_check: true
+            runtime: node runtime-smoke.mjs
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            # musl: -x routes through cargo-zigbuild (zig on PATH, set up
+            # below); the CLI auto-appends -C target-feature=-crt-static, so
+            # the binary is static musl — no glibc floor. The glibc runner
+            # cannot load the musl binary, so the runtime smoke runs inside a
+            # node:alpine container (mirrors the napi-rs template's musl
+            # container test).
+            zig: true
+            build: npx napi build --platform --release --target x86_64-unknown-linux-musl --cross-compile && node fix-dts.mjs
             load_check: false
+            runtime: "docker run --rm -v $PWD:/check -w /check node:alpine node runtime-smoke.mjs"
+          - host: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            # arm64 musl on the arm64 runner: zig cross-build, then the same
+            # node:alpine container smoke — Docker pulls the arm64 image
+            # automatically on this host (no --platform flag needed).
+            zig: true
+            build: npx napi build --platform --release --target aarch64-unknown-linux-musl --cross-compile && node fix-dts.mjs
+            load_check: false
+            runtime: "docker run --rm -v $PWD:/check -w /check node:alpine node runtime-smoke.mjs"
+          - host: ubuntu-latest
+            target: x86_64-unknown-freebsd
+            # FreeBSD: no hosted FreeBSD runner, so -x + zig cross-compiles
+            # from Linux (cargo-zigbuild). Build-only here — the binary's
+            # runtime verification happens in the freebsd-runtime job (a
+            # FreeBSD 15 VM via cross-platform-actions/action, mirroring the
+            # napi-rs reference setup).
+            zig: true
+            build: npx napi build --platform --release --target x86_64-unknown-freebsd --cross-compile && node fix-dts.mjs
+            load_check: false
+            runtime: ""
+          - host: ubuntu-latest
+            target: riscv64gc-unknown-linux-gnu
+            # riscv64: napi-rs ships no generated CI job for it — the recipe
+            # is "no flag + a cross gcc you install" (decision matrix). No
+            # riscv64 hosted runner / official Node runtime → build-only
+            # (verify on-device).
+            build: sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu && CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc npx napi build --platform --release --target riscv64gc-unknown-linux-gnu && node fix-dts.mjs
+            load_check: false
+            runtime: ""
+          - host: ubuntu-latest
+            target: aarch64-linux-android
+            # Android/Termux: no cross flag — the CLI configures the NDK
+            # toolchain from ANDROID_NDK_LATEST_HOME (preinstalled on
+            # ubuntu-latest runners) and stops before Cargo if it is missing.
+            # Build-only: no Android runtime on hosted runners; verify
+            # on-device (e.g. Termux).
+            build: npx napi build --platform --release --target aarch64-linux-android && node fix-dts.mjs
+            load_check: false
+            runtime: ""
           - host: macos-latest
             target: x86_64-apple-darwin
             # Direct napi invocation (arg forwarding as above); the macos
-            # runner cross-links x86_64 natively with no cross flag.
+            # runner (arm64) cross-links x86_64 natively with no cross flag.
+            # Build-only: macos-latest is arm64, so there is no x64 mac
+            # hosted runtime to load-check on.
             build: npx napi build --platform --release --target x86_64-apple-darwin && node fix-dts.mjs
             load_check: false
+            runtime: ""
           - host: macos-latest
             target: aarch64-apple-darwin
             build: npm run build
             load_check: true
+            runtime: node runtime-smoke.mjs
           - host: windows-latest
             target: x86_64-pc-windows-msvc
             build: npm run build
             load_check: true
+            runtime: node runtime-smoke.mjs
+          - host: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            # M4.3: native arm64 build on the windows-11-arm hosted runner.
+            # rustup is not preinstalled on that image, so it is bootstrapped
+            # manually below (mirroring the napi-rs template); the standard
+            # toolchain action is skipped on this host. Runner arch matches
+            # the target, so load-check + runtime smoke run natively.
+            build: npm run build
+            load_check: true
+            runtime: node runtime-smoke.mjs
     steps:
       - uses: actions/checkout@v7
 
+      # Windows 11 ARM: rustup is not preinstalled on the windows-11-arm
+      # image, so it is bootstrapped manually before the toolchain step
+      # (mirroring the napi-rs template's windows-11-arm steps).
+      - name: Install rustup (windows-11-arm)
+        if: ${{ matrix.settings.host == 'windows-11-arm' }}
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe" -OutFile rustup-init.exe
+          .\rustup-init.exe --default-toolchain none -y
+          "$env:USERPROFILE\.cargo\bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+          "CARGO_HOME=$env:USERPROFILE\.cargo" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+
+      - name: Install Rust (windows-11-arm)
+        if: ${{ matrix.settings.host == 'windows-11-arm' }}
+        shell: pwsh
+        run: |
+          rustup install stable
+          rustup target add ${{ matrix.settings.target }}
+          cargo --version
+
       # napi build compiles via cargo, so the pinned Rust toolchain is
       # required; rustflags is cleared to match a local build. The target
-      # triple is registered via rustup for the cross-compiled rows.
+      # triple is registered via rustup for the cross-compiled rows. Skipped
+      # on windows-11-arm, which bootstraps rustup manually above.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        if: ${{ matrix.settings.host != 'windows-11-arm' }}
         with:
           rustflags: ""
           target: ${{ matrix.settings.target }}
@@ -302,6 +391,21 @@ jobs:
           cache: false
 
       - uses: Swatinem/rust-cache@v2
+
+      # zig is the cross linker for the musl and FreeBSD rows (-x routes
+      # through cargo-zigbuild, which the CLI auto-installs; the explicit
+      # install below pins the version like the napi-rs generated CI).
+      - uses: mlugg/setup-zig@v2
+        if: ${{ matrix.settings.zig }}
+        with:
+          version: 0.14.1
+
+      - uses: taiki-e/install-action@v2
+        if: ${{ matrix.settings.zig }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tool: cargo-zigbuild
 
       - uses: actions/setup-node@v7
         with:
@@ -323,9 +427,55 @@ jobs:
         if: ${{ matrix.settings.load_check }}
         run: node load-check.mjs
 
+      # M4.3 runtime smoke: runs runtime-smoke.mjs (the M4.3 headless
+      # renderer gate) in a runtime matching the binary — native node on
+      # runner-matching rows, node:alpine for the musl rows. Rows with an
+      # empty `runtime` (freebsd — verified by the freebsd-runtime job —
+      # darwin-x64, riscv64, android) skip this step.
+      - name: Runtime smoke (${{ matrix.settings.target }})
+        working-directory: src/bindings/tern-node
+        if: ${{ matrix.settings.runtime != '' }}
+        run: ${{ matrix.settings.runtime }}
+
       - name: Upload addon binary
         uses: actions/upload-artifact@v7
         with:
           name: tern-node-${{ matrix.settings.target }}
           path: src/bindings/tern-node/tern-node.*.node
           if-no-files-found: error
+
+  freebsd-runtime:
+    # M4.3 runtime verification for the FreeBSD binary: no hosted FreeBSD
+    # runner exists, so the x86_64-unknown-freebsd artifact built by the
+    # napi-build job is downloaded and executed inside a FreeBSD 15 VM via
+    # cross-platform-actions/action (the napi-rs reference setup). The
+    # action syncs the workspace into the VM and runs the script at the
+    # workspace root; node is installed via pkg, then the M4.3 runtime smoke
+    # runs against the downloaded binary.
+    name: Runtime smoke — freebsd x64 (FreeBSD VM)
+    runs-on: ubuntu-latest
+    needs: [changes, napi-build]
+    if: needs.changes.outputs.smoke == 'true'
+    steps:
+      - uses: actions/checkout@v7
+
+      # Download the binary built by the napi-build freebsd row into the
+      # addon dir, next to index.js and runtime-smoke.mjs.
+      - name: Download freebsd addon binary
+        uses: actions/download-artifact@v8
+        with:
+          name: tern-node-x86_64-unknown-freebsd
+          path: src/bindings/tern-node
+
+      - name: Runtime smoke (FreeBSD VM)
+        uses: cross-platform-actions/action@v1.4.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          operating_system: freebsd
+          version: '15.0'
+          shell: bash
+          run: |
+            sudo pkg install -y node
+            node --version
+            cd src/bindings/tern-node && node runtime-smoke.mjs
