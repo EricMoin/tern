@@ -115,13 +115,14 @@ import {
   endSelection,
   focusAt,
   focusManager,
+  getTheme,
   menuClick,
   menuHover,
   menuKey,
-  mergeTheme,
   pasteIntoTextarea,
   resolveTheme,
   setStreamAutoScroll,
+  setTheme,
   startPanelDrag,
   startSelection,
   syncStreamTail,
@@ -163,8 +164,6 @@ import {
   type TreeNode,
   type TreeProps as CoreTreeProps,
   type TreeState,
-  type Theme,
-  type ThemeOverrides,
 } from "@tern-tui/core";
 
 export const name = "@tern-tui/solid";
@@ -244,6 +243,7 @@ export {
   followTail,
   focusManager,
   focusPanel,
+  getTheme,
   isStreamFollowing,
   FocusManager,
   MENU_Z_INDEX,
@@ -266,6 +266,7 @@ export {
   SELECTION_DOUBLE_CLICK_MS,
   selectionKey,
   setProgress,
+  setTheme,
   startPanelDrag,
   startSelection,
   STREAM_AFFORDANCE_CHAR,
@@ -299,30 +300,18 @@ export type {
 // ---------------------------------------------------------------------------
 // Theme
 //
-// Solid has no React-style context, so the theme is module-level state: the
-// element factories below resolve their `role` / `component` hints against
-// the active theme (see {@link getTheme}) at element-creation time, and
-// `setTheme` swaps it. The active theme always merges over the core
-// `defaultTheme`, so partial themes keep the default palette/presets.
+// The theme state lives in @tern-tui/core's runtime theme engine (M4.5): the
+// `setTheme` / `getTheme` re-exported below are the core engine's. A
+// `setTheme(overrides)` call swaps the merged active theme AND re-resolves
+// every scene node that was created with `role` / `component` hints in
+// place, so a call AFTER element creation live-updates the existing scene
+// (the creation-time-only semantics of earlier releases are gone). The
+// element factories below resolve their hints against the active theme (see
+// {@link getTheme}) at element-creation time exactly as before, so a
+// `setTheme` call before creation still stamps the new theme onto
+// subsequently created elements. The active theme always merges over the
+// core `defaultTheme`, so partial themes keep the default palette/presets.
 // ---------------------------------------------------------------------------
-
-/** The active theme resolved by the element factories. */
-let activeTheme: Theme = defaultTheme;
-
-/**
- * Set the active theme merged over the core `defaultTheme` (`mergeTheme`):
- * a partial theme keeps the default palette and presets for everything it
- * does not override. Subsequent element-creation resolves against the new
- * theme — the Solid-flavored `ThemeProvider` equivalent.
- */
-export function setTheme(theme: ThemeOverrides): void {
-  activeTheme = mergeTheme(defaultTheme, theme);
-}
-
-/** The active theme currently resolved by the element factories. */
-export function getTheme(): Theme {
-  return activeTheme;
-}
 
 /**
  * Apply a single prop to a tern scene node. @tern-tui/core's `Node.setProps`
@@ -580,21 +569,45 @@ export const use: UniversalRenderer<Node>["use"] = renderer.use;
  * funnels into `Node.setProps` (props) and `Node.addChild`/`Node.insertBefore`
  * (children). The active theme is resolved onto the props at element-creation
  * time (`role` / `component` hints become plain `fg` / `bg` / `border_style`).
+ *
+ * When the resolution consumes semantic hints, the node is constructed with
+ * the resolved props directly so the runtime theme engine records it — a
+ * later `setTheme` call re-resolves it in place. Otherwise the props object
+ * is returned by identity (reactive accessors survive) and the plain
+ * create-then-spread path applies it exactly as before.
  */
 export function Box(props: NodeProps = {}): Node {
+  const resolved = resolveTheme(getTheme(), props);
+  if (resolved !== props) {
+    // Hints consumed: `children` / `ref` are solid-runtime keys — strip them
+    // from the scene props and apply them through `spread`, exactly as the
+    // plain path does, so they never reach the node's props.
+    const { children, ref, ...rest } = resolved;
+    const node = TernBox(rest);
+    if (children !== undefined || ref !== undefined) spread(node, { children, ref });
+    return node;
+  }
   const node = createElement("box");
-  spread(node, resolveTheme(getTheme(), props));
+  spread(node, resolved);
   return node;
 }
 
 /**
  * Create a `text` scene node through the solid renderer. Props (e.g.
  * `{ text: "hi" }`) are applied via the renderer's `spread`. The active
- * theme is resolved onto the props at element-creation time.
+ * theme is resolved onto the props at element-creation time (see {@link Box}
+ * for the hint-recording construction path).
  */
 export function Text(props: NodeProps = {}): Node {
+  const resolved = resolveTheme(getTheme(), props);
+  if (resolved !== props) {
+    const { children, ref, ...rest } = resolved;
+    const node = TernText(rest);
+    if (children !== undefined || ref !== undefined) spread(node, { children, ref });
+    return node;
+  }
   const node = createElement("text");
-  spread(node, resolveTheme(getTheme(), props));
+  spread(node, resolved);
   return node;
 }
 
@@ -617,11 +630,22 @@ export function Text(props: NodeProps = {}): Node {
  * reaches the scene props.
  */
 export function StreamingText(props: NodeProps = {}): Node {
-  const node = createElement("streaming_text");
   const plain = { ...props };
   const autoScroll = plain.autoScroll !== false;
   delete plain.autoScroll;
-  spread(node, resolveTheme(getTheme(), plain));
+  const resolved = resolveTheme(getTheme(), plain);
+  if (resolved !== plain) {
+    // Hints consumed: construct with the resolved props so the runtime theme
+    // engine records the node (see {@link Box}); `children` / `ref` are
+    // applied through `spread` so they never reach the scene props.
+    const { children, ref, ...rest } = resolved;
+    const node = TernStreamingText(rest);
+    if (children !== undefined || ref !== undefined) spread(node, { children, ref });
+    setStreamAutoScroll(node, autoScroll);
+    return node;
+  }
+  const node = createElement("streaming_text");
+  spread(node, resolved);
   setStreamAutoScroll(node, autoScroll);
   return node;
 }
