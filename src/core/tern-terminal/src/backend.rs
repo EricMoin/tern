@@ -79,6 +79,13 @@ pub struct Backend {
     /// [`flush_diff`] flush; `None` before the first flush. Drives the
     /// empty-diff fast path in [`flush_diff_to`].
     last_flush_pos: Option<(u16, u16)>,
+    /// The renderer's opt-in for iTerm2 hidden accessibility annotations
+    /// (OSC 1337 `AddHiddenAnnotation`), set via
+    /// [`with_a11y_annotations`](Backend::with_a11y_annotations). Off by
+    /// default; the write itself is additionally gated on the interactive
+    /// probe reporting an iTerm2 terminal — see
+    /// [`set_a11y_annotations`](Backend::set_a11y_annotations).
+    a11y_annotations: bool,
 }
 
 /// The terminal's color capabilities, detected once at first use (see
@@ -193,10 +200,13 @@ impl<W: Write> Write for CountingWriter<W> {
 }
 
 impl Backend {
-    /// A fresh backend, with no park position recorded yet.
+    /// A fresh backend, with no park position recorded yet and iTerm2
+    /// accessibility annotations disabled (see
+    /// [`with_a11y_annotations`](Backend::with_a11y_annotations)).
     pub const fn new() -> Self {
         Self {
             last_flush_pos: None,
+            a11y_annotations: false,
         }
     }
 
@@ -242,6 +252,33 @@ impl Backend {
     pub fn set_clipboard(&self, text: &str) -> io::Result<()> {
         let mut out = io::stdout();
         set_clipboard_to(&mut out, text)
+    }
+
+    /// Write iTerm2 hidden accessibility annotations (`OSC 1337 ;
+    /// AddHiddenAnnotation = <summary> BEL`) for `entries` to stdout — one
+    /// sequence per entry — so VoiceOver can read the scene's semantics
+    /// store in iTerm2's accessibility mode.
+    ///
+    /// A strict no-op (zero bytes) unless the backend was built with
+    /// [`with_a11y_annotations`](Backend::with_a11y_annotations) AND the
+    /// interactive probe reports the terminal self-identifies as iTerm2
+    /// (the only terminal that understands the sequence) — see
+    /// [`flush_a11y_annotations_gated_to`]. iTerm2's `AddHiddenAnnotation`
+    /// does not reveal the annotation window on receipt, so the write never
+    /// disturbs the visible screen.
+    pub fn set_a11y_annotations(&self, entries: &[A11yAnnotation]) -> io::Result<()> {
+        let mut out = io::stdout();
+        flush_a11y_annotations_gated_to(&mut out, self.a11y_annotations, probe(), entries)
+    }
+
+    /// Opt into iTerm2 hidden accessibility annotations (OSC 1337
+    /// `AddHiddenAnnotation`) for this backend: when enabled, every
+    /// [`set_a11y_annotations`](Backend::set_a11y_annotations) call emits
+    /// the annotations — provided the interactive probe reports the
+    /// terminal is iTerm2. Off by default.
+    pub fn with_a11y_annotations(mut self, enabled: bool) -> Self {
+        self.a11y_annotations = enabled;
+        self
     }
 
     /// Apply the renderer's startup screen transitions on stdout: the
@@ -546,6 +583,96 @@ pub fn set_clipboard_to<W: Write>(w: &mut W, text: &str) -> io::Result<()> {
     w.write_all(encoded.as_bytes())?;
     w.write_all(b"\x07")?;
     w.flush()
+}
+
+/// A hidden accessibility annotation for iTerm2: the summary text of one
+/// `OSC 1337 ; AddHiddenAnnotation = <summary> BEL` sequence, which
+/// VoiceOver reads when inspecting the terminal. Emitted via
+/// [`flush_a11y_annotations_to`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct A11yAnnotation {
+    summary: String,
+}
+
+impl A11yAnnotation {
+    /// An annotation whose VoiceOver text is `summary`.
+    pub fn new(summary: impl Into<String>) -> Self {
+        Self {
+            summary: summary.into(),
+        }
+    }
+
+    /// The annotation's VoiceOver text.
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+}
+
+/// Write hidden accessibility annotations (`OSC 1337 ; AddHiddenAnnotation
+/// = <summary> BEL`) for `entries` to any `Write` target — one sequence
+/// per entry, in order — the seam [`Backend::set_a11y_annotations`]
+/// funnels stdout through (mirroring [`set_clipboard_to`]).
+///
+/// The escape is `ESC ] 1337 ; AddHiddenAnnotation = <summary> BEL`. The
+/// summary is written raw — iTerm2's `AddHiddenAnnotation` takes the
+/// message text unencoded, unlike the OSC 52 clipboard payload which is
+/// base64-encoded (per the iTerm2 escape-codes documentation, accessed
+/// 2026-08-21). BEL (`\x07`) terminates the OSC string, matching the
+/// project's OSC 0/52 convention; a terminal accepts BEL or ST (`ESC \`)
+/// interchangeably as the OSC terminator. `AddHiddenAnnotation` does not
+/// reveal the annotation window on receipt, so emitting these never
+/// disturbs the visible screen. The whole batch is written and flushed
+/// once.
+pub fn flush_a11y_annotations_to<W: Write>(
+    w: &mut W,
+    entries: &[A11yAnnotation],
+) -> io::Result<()> {
+    for entry in entries {
+        w.write_all(b"\x1b]1337;AddHiddenAnnotation=")?;
+        w.write_all(entry.summary.as_bytes())?;
+        w.write_all(b"\x07")?;
+    }
+    w.flush()
+}
+
+/// Whether iTerm2 hidden accessibility annotations should be emitted: the
+/// caller opted in (`opt_in`) and the terminal self-identifies as iTerm2
+/// (`caps.terminal_identity` contains "iTerm2" — the probe's XTVERSION /
+/// TN / DA2 answer, e.g. `iTerm2 3.5.0`).
+///
+/// The pure decision behind [`flush_a11y_annotations_gated_to`], mirroring
+/// the probe-gated pattern of [`enable_event_listening_with`]: only the
+/// terminal that understands the `AddHiddenAnnotation` sequence receives
+/// it, and an unknown or silent terminal (identity `None`) stays
+/// conservative.
+pub fn a11y_annotations_enabled(opt_in: bool, caps: &TerminalCapabilities) -> bool {
+    opt_in
+        && caps
+            .terminal_identity
+            .as_deref()
+            .is_some_and(|id| id.contains("iTerm2"))
+}
+
+/// Write iTerm2 hidden accessibility annotations to any `Write` target,
+/// gated by [`a11y_annotations_enabled`]: when the caller did not opt in
+/// or the terminal is not a self-identified iTerm2, the write is a strict
+/// no-op — `Ok(())` with zero bytes — so the emitter can run without ever
+/// disturbing a terminal that does not understand the sequence.
+///
+/// The same injectable-capabilities seam as
+/// [`enable_event_listening_with`]: `caps` is supplied by the caller so
+/// the gating is unit-testable against an in-memory buffer without a
+/// terminal or a probe run.
+fn flush_a11y_annotations_gated_to<W: Write>(
+    w: &mut W,
+    opt_in: bool,
+    caps: &TerminalCapabilities,
+    entries: &[A11yAnnotation],
+) -> io::Result<()> {
+    if !a11y_annotations_enabled(opt_in, caps) {
+        return Ok(());
+    }
+    flush_a11y_annotations_to(w, entries)
 }
 
 /// Queue the renderer's post-raw-mode startup sequence into `w`: the
@@ -2347,6 +2474,92 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "\x1b]52;c;aGnwn5mC\x07",
             "the payload must base64-encode the UTF-8 bytes"
+        );
+    }
+
+    #[test]
+    fn flush_a11y_annotations_emits_exact_osc1337_sequences() {
+        // Two entries, each one `OSC 1337 ; AddHiddenAnnotation = <summary>
+        // BEL`: the summary is written raw (no base64), the BEL terminator
+        // matches the project's OSC 0/52 convention, and both sequences
+        // share a single trailing flush.
+        let mut out = Vec::new();
+        flush_a11y_annotations_to(
+            &mut out,
+            &[
+                A11yAnnotation::new("button: Save"),
+                A11yAnnotation::new("textbox: Search, focused"),
+            ],
+        )
+        .expect("flush should succeed");
+        assert_eq!(
+            String::from_utf8(out.clone()).unwrap(),
+            "\x1b]1337;AddHiddenAnnotation=button: Save\x07\x1b]1337;AddHiddenAnnotation=textbox: Search, focused\x07",
+            "got: {:?}",
+            out
+        );
+        // The ST terminator must not appear: every sequence is BEL-terminated.
+        assert!(!out.windows(2).any(|w| w == b"\x1b\\"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn a11y_annotations_gated_writes_nothing_without_opt_in() {
+        // The opt-in gate: on a self-identified iTerm2 terminal, a renderer
+        // that never opted in writes zero bytes — the emitter stays silent
+        // until the caller enables it.
+        let caps = TerminalCapabilities {
+            terminal_identity: Some("iTerm2 3.5.0".to_string()),
+            ..TerminalCapabilities::default()
+        };
+        let entries = [A11yAnnotation::new("button: Save")];
+        let mut out = Vec::new();
+        flush_a11y_annotations_gated_to(&mut out, false, &caps, &entries)
+            .expect("flush should succeed");
+        assert!(out.is_empty(), "got: {:?}", out);
+    }
+
+    #[test]
+    fn a11y_annotations_gated_writes_nothing_for_non_iterm2() {
+        // The terminal gate: an opted-in renderer on a terminal the probe
+        // did not identify as iTerm2 (kitty here, or an unknown/silent
+        // terminal with identity `None`) writes zero bytes — the sequence
+        // only ever reaches the terminal that understands it.
+        let caps = TerminalCapabilities {
+            terminal_identity: Some("kitty(0.36.0)".to_string()),
+            ..TerminalCapabilities::default()
+        };
+        let entries = [A11yAnnotation::new("button: Save")];
+        let mut out = Vec::new();
+        flush_a11y_annotations_gated_to(&mut out, true, &caps, &entries)
+            .expect("flush should succeed");
+        assert!(out.is_empty(), "got: {:?}", out);
+    }
+
+    #[test]
+    fn a11y_annotations_enabled_truth_table() {
+        let iterm2 = TerminalCapabilities {
+            terminal_identity: Some("iTerm2 3.5.0".to_string()),
+            ..TerminalCapabilities::default()
+        };
+        let kitty = TerminalCapabilities {
+            terminal_identity: Some("kitty(0.36.0)".to_string()),
+            ..TerminalCapabilities::default()
+        };
+        assert!(
+            !a11y_annotations_enabled(false, &iterm2),
+            "opt-in off never enables"
+        );
+        assert!(
+            a11y_annotations_enabled(true, &iterm2),
+            "opt-in plus an iTerm2 identity enables"
+        );
+        assert!(
+            !a11y_annotations_enabled(true, &kitty),
+            "a non-iTerm2 terminal never enables"
+        );
+        assert!(
+            !a11y_annotations_enabled(true, &TerminalCapabilities::default()),
+            "an unknown terminal stays conservative"
         );
     }
 
