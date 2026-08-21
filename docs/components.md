@@ -123,6 +123,7 @@ Input/Textarea design notes in this document).
 | [Checkbox / Radio / Toggle](#checkbox--radio--toggle) | ✅ Shipped | — |
 | [Menu](#menu) | ✅ Shipped | — |
 | [HelpPanel](#helppanel) | ✅ Shipped | — |
+| [Semantics (a11y metadata)](#semantics) | ✅ Shipped | — (default-off store; terminal a11y emission M4.2) |
 
 ---
 
@@ -1239,3 +1240,34 @@ Cluster-aware cursor movement is shipped: the editing components (`Input`,
 via `tern_core::clusters` — move/delete/word-jump land on cluster boundaries,
 backspace/delete remove whole clusters, and `display_col` sums cluster width
 (shipped in Phase 8).
+
+## Semantics
+
+**Every interactive widget exposes accessibility metadata** — ARIA `role`,
+accessible `label`, active `state` flags, and the `enabled` / `selected`
+booleans — through the M4.1 semantics layer (see
+[a11y.md](a11y.md) for the full API documentation). The metadata lives in a
+**parallel bookkeeping store** that never changes painted cell output: the
+store is off by default, the JS wiring is best-effort (writes to a disabled
+store are dropped, never errors), and the compositor never reads it — so
+enabling semantics leaves `render_to_buffer` frames byte-identical.
+
+The per-component derivation (`syncSemantics`, run at factory creation and
+after every key-handler rebuild):
+
+| Component | `role` | `label` | `state` flags | `enabled` / `selected` |
+|-----------|--------|---------|---------------|------------------------|
+| Checkbox | `checkbox` | the `label` prop | `checked` (checked), `focused` | `!disabled` / `false` |
+| Toggle | `switch` | the `label` prop | `checked` (on), `focused` | `!disabled` / `false` |
+| Radio root | `radiogroup` | — | `focused` (a focused row exists) | `!disabled` / a member is confirmed |
+| Radio option row | `radio` | the option label | `checked` (selected row), `focused` (focused row) | `true` / the row is selected |
+| Select | `listbox` | — | `expanded` (dropdown open), `focused` (a highlighted row exists) | `!disabled` / a value is confirmed |
+| Input / Textarea | `textbox` | the `label` prop (input) | `focused` | `!disabled` / `false` |
+| Menu | `menu` | — | `expanded` (open) | `true` / `false` |
+
+State transitions flow through the key handlers: `checkboxKey` / `toggleKey`
+flip `checked`, `radioKey` moves the per-row `focused` / `selected` flags,
+`selectKey` drops `expanded` on confirm/dismiss, and the menu open/close path
+gains / loses `expanded`. Each transition is unit-tested in
+`packages/core/src/semantics_test.ts` through the read API, alongside the
+default-off contract and the cell-output invariance golden.
