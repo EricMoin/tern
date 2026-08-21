@@ -69,7 +69,15 @@
  *   `border_style` onto them — the output is ordinary `NodeProps`, so no new
  *   napi surface is introduced (constitution). The `@tern-tui/react` /
  *   `@tern-tui/solid` hosts resolve automatically; raw `@tern-tui/core` users call
- *   `resolveTheme` explicitly at element-creation time.
+ *   `resolveTheme` explicitly at element-creation time. The runtime engine
+ *   (`setTheme(overrides)` / `getTheme()`, the M4.5 slice) makes the theme
+ *   switchable after the fact: every node created with semantic hints is
+ *   re-resolved in place against the merged theme, pushing only the changed
+ *   style keys through the single-key `Node.setProp` path and scheduling one
+ *   coalesced repaint — a no-op switch performs zero native calls. A pure WCAG
+ *   contrast checker (`parseThemeColor` / `relativeLuminance` / `contrastRatio` /
+ *   `auditTheme`, see `./contrast.ts`) audits any theme's palette roles and
+ *   component presets against the 4.5:1 AA bar — no engine surface.
  * - `Renderer` owns the render/input loop: `render()` (synchronous, immediate
  *   paint), `requestFrame()` (coalesced paint on the next macrotask — several
  *   calls within one tick collapse into a single native render), `size` (the
@@ -602,6 +610,12 @@ export class Node {
   private constructor(type: NodeType, props: NodeProps, children: Node[]) {
     this.type = type;
     this.#handle = null;
+    // The M4.5 runtime theme engine: consume the semantic hint `resolveTheme`
+    // attached to these props (see the theme system section) and record it in
+    // the parallel store, so a later `setTheme` can re-resolve this node in
+    // place. Pure bookkeeping — the hint symbol is stripped before the props
+    // are mirrored, so the node's props and its native calls are untouched.
+    recordThemeHints(this, props);
     this.#props = toNativeProps({ ...props });
     this.#children = [...children];
     this.#parent = null;
@@ -8012,21 +8026,25 @@ export function resolveTheme(
   const out: NodeProps = { ...props };
   delete out.role;
   delete out.component;
-  const presetFilled = new Set<"fg" | "bg" | "border_style">();
+  // The style keys this resolution fills from the theme (a component preset
+  // fill, or a role palette fill) — the keys a later `setTheme` re-resolution
+  // may rewrite. A key the caller set explicitly is never in the set, so it
+  // always wins over both the preset and the palette.
+  const stamped = new Set<"fg" | "bg" | "border_style">();
   if (component !== undefined) {
     const preset = theme.components[component];
     if (preset !== undefined) {
       if (out.fg === undefined && preset.fg !== undefined) {
         out.fg = preset.fg;
-        presetFilled.add("fg");
+        stamped.add("fg");
       }
       if (out.bg === undefined && preset.bg !== undefined) {
         out.bg = preset.bg;
-        presetFilled.add("bg");
+        stamped.add("bg");
       }
       if (out.border_style === undefined && preset.border_style !== undefined) {
         out.border_style = preset.border_style;
-        presetFilled.add("border_style");
+        stamped.add("border_style");
       }
     }
   }
@@ -8036,20 +8054,211 @@ export function resolveTheme(
       // The role palette is the more specific intent: it overrides the
       // component preset's fg/bg, but never an explicit prop.
       if (
-        (out.fg === undefined || presetFilled.has("fg")) &&
+        (out.fg === undefined || stamped.has("fg")) &&
         colors.fg !== undefined
       ) {
         out.fg = colors.fg;
+        stamped.add("fg");
       }
       if (
-        (out.bg === undefined || presetFilled.has("bg")) &&
+        (out.bg === undefined || stamped.has("bg")) &&
         colors.bg !== undefined
       ) {
         out.bg = colors.bg;
+        stamped.add("bg");
       }
     }
   }
+  // The M4.5 runtime engine hook: carry the consumed hints (and the keys the
+  // theme stamped) on the returned props, so the `Node` created from them can
+  // be re-resolved by a later `setTheme`. The symbol is invisible to every
+  // string-keyed operation (`Object.keys` / spread / JSON), so the resolution
+  // output is otherwise byte-identical to a plain props object — when
+  // `setTheme` is never called, creation-time output is unchanged.
+  Object.defineProperty(out, THEME_HINT, {
+    value: { role, component, stamped },
+    enumerable: true,
+    configurable: true,
+  });
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Runtime theme engine (M4.5)
+//
+// The creation-time resolution above is static: a node keeps the colors the
+// theme it was created under stamped, forever. The runtime engine makes the
+// theme switchable after the fact — `setTheme(overrides)` swaps the
+// module-level active theme (`mergeTheme` over `defaultTheme`) and re-resolves
+// every recorded node in place, pushing only the changed style keys through
+// the single-key `Node.setProp` path and scheduling one coalesced repaint.
+//
+// The parallel hint store follows the M4.1 semantics pattern
+// (`packages/core/src/semantics.ts`): a WeakMap of pure bookkeeping keyed by
+// node, recorded at creation and never consulted by the compositor — so the
+// painted cells are byte-identical whether or not the engine is ever used.
+// ---------------------------------------------------------------------------
+
+/** The semantic hint retained for a node — the `role` / `component` it was
+ * resolved with at creation, plus the style keys the theme stamped (the keys
+ * a later re-resolution may rewrite; an explicit prop is never in the set,
+ * so it always wins over the preset and the palette). */
+interface ThemeHintRecord {
+  /** The palette role the node was resolved with, if any. */
+  role?: ThemeRole;
+  /** The component preset the node was resolved with, if any. */
+  component?: ThemeComponent;
+  /** The style keys `resolveTheme` filled from the theme at creation. */
+  stamped: Set<"fg" | "bg" | "border_style">;
+}
+
+/**
+ * The symbol `resolveTheme` attaches to the props object it returns when it
+ * consumed semantic hints. Enumerable on purpose: a factory that spreads the
+ * resolved props (`{ ...props }`) before `Node.create` keeps the hint, so
+ * every element kind records. Invisible to every string-keyed operation
+ * (`Object.keys` / spread / JSON), so the resolution output is otherwise an
+ * ordinary `NodeProps` object.
+ */
+const THEME_HINT = Symbol("tern.tui.themeHint");
+
+/** The parallel hint store (M4.1 pattern): node → the semantic hints it was
+ * created with. Pure bookkeeping, exactly like the semantics stores — the
+ * compositor never reads it. */
+const themeHints = new WeakMap<Node, ThemeHintRecord>();
+
+/** The walkable mirror of `themeHints` — a WeakMap is not iterable, and
+ * `setTheme` must walk every recorded node. Holds `WeakRef`s (never strong
+ * references, so a dead node is collectible); entries whose node was
+ * collected are pruned during the next walk. */
+const themedNodes = new Set<WeakRef<Node>>();
+
+/** Every live renderer, registered at construction and dropped on destroy —
+ * the `setTheme` repaint targets. A switch schedules exactly one coalesced
+ * frame per live renderer whose scene actually holds themed nodes. */
+const liveRenderers = new Set<Renderer>();
+
+/** The module-level active theme the runtime engine resolves against. Starts
+ * as the core `defaultTheme`, so creation-time resolution is unchanged until
+ * `setTheme` is called. */
+let activeTheme: Theme = defaultTheme;
+
+/**
+ * Consume the theme hint `resolveTheme` attached to `props` and record it for
+ * the node in the parallel store. Called from the `Node` constructor, before
+ * the props are mirrored — the symbol is stripped (consumed, like the hints
+ * themselves), so it never reaches the node's props or the native layer.
+ *
+ * A node created without hints is never recorded: a later `setTheme` switch
+ * leaves it alone — zero native calls (the walk's diff is empty because the
+ * node is not in the store at all).
+ */
+function recordThemeHints(node: Node, props: NodeProps): void {
+  const hinted = props as NodeProps & { [THEME_HINT]?: ThemeHintRecord };
+  const hint = hinted[THEME_HINT];
+  if (hint === undefined) return;
+  delete hinted[THEME_HINT];
+  const record: ThemeHintRecord = { stamped: hint.stamped };
+  // Set conditionally: `exactOptionalPropertyTypes` rejects an explicit
+  // `undefined` for an optional property.
+  if (hint.role !== undefined) record.role = hint.role;
+  if (hint.component !== undefined) record.component = hint.component;
+  themeHints.set(node, record);
+  themedNodes.add(new WeakRef(node));
+}
+
+/**
+ * Whether `node`'s subtree contains at least one node with a recorded theme
+ * hint — the repaint-target check behind `setTheme`: a renderer is only asked
+ * to repaint when its scene actually holds themed nodes. The scene root itself
+ * is never recorded, so a renderer with no themed content reports `false`.
+ */
+function subtreeHasThemeHint(node: Node): boolean {
+  if (themeHints.has(node)) return true;
+  for (const child of node.children) {
+    if (subtreeHasThemeHint(child)) return true;
+  }
+  return false;
+}
+
+/**
+ * Set the active theme merged over the core `defaultTheme` (`mergeTheme`):
+ * a partial theme keeps the default palette and presets for everything it
+ * does not override. Unlike the hosts' creation-time-only resolution, the
+ * core runtime engine then re-resolves every node that was created with
+ * semantic hints against the new theme, in place:
+ *
+ * - each recorded node's current props (minus the keys the theme stamped at
+ *   creation, so the new values replace the old) are re-run through
+ *   `resolveTheme` with the retained `role` / `component` hints;
+ * - the result is diffed against the node's `#props` mirror and ONLY the
+ *   changed keys are pushed, through the single-key `Node.setProp` path —
+ *   an equal-value write no-ops, so the scene mutation epoch stays untouched;
+ * - a stamped key the new theme no longer fills is cleared through `setProp`'s
+ *   existing removal path (the fresh-mount equivalent carries no such key);
+ * - when anything actually changed, one coalesced {@link Renderer.requestFrame}
+ *   is scheduled per live renderer. A switch that changed nothing (the same
+ *   theme, or a theme whose resolution leaves every node's props equal)
+ *   performs zero native calls and schedules no repaint.
+ */
+export function setTheme(overrides: ThemeOverrides): void {
+  activeTheme = mergeTheme(defaultTheme, overrides);
+  let pushed = false;
+  for (const ref of themedNodes) {
+    const node = ref.deref();
+    // The node was collected: prune the dead entry (the WeakMap entry is
+    // already gone) and move on. Deleting the current entry during the
+    // iteration is safe.
+    if (node === undefined) {
+      themedNodes.delete(ref);
+      continue;
+    }
+    const hint = themeHints.get(node);
+    // A defensive skip: recording only ever happens with at least one hint,
+    // and `resolveTheme`'s no-hint fast path must never run here (it would
+    // return the base props with `role` / `component` keys un-stripped).
+    if (hint === undefined) continue;
+    if (hint.role === undefined && hint.component === undefined) continue;
+    // Re-resolve against the node's current props, clearing the theme-owned
+    // keys first — the new theme's values replace them, while an explicit
+    // prop (never in `stamped`) always wins.
+    const base = { ...node.props };
+    for (const key of hint.stamped) delete (base as Record<string, unknown>)[key];
+    const re: ThemeResolvableProps = base;
+    if (hint.role !== undefined) re.role = hint.role;
+    if (hint.component !== undefined) re.component = hint.component;
+    const next = resolveTheme(activeTheme, re);
+    const current = node.props as Record<string, unknown>;
+    // Push ONLY the changed keys through the single-key setProp path; an
+    // equal-value write no-ops inside setProp too, so the scene mutation
+    // epoch stays untouched for a no-op switch.
+    for (const key of Object.keys(next)) {
+      if (current[key] !== next[key]) {
+        node.setProp(key, next[key]);
+        pushed = true;
+      }
+    }
+    // A stamped key the new theme no longer fills must be cleared — the
+    // fresh-mount equivalent (resolved under the new theme) carries no such
+    // key. The removal routes through setProp's existing undefined path.
+    for (const key of hint.stamped) {
+      if (!(key in next) && key in current) {
+        node.setProp(key, undefined);
+        pushed = true;
+      }
+    }
+  }
+  if (pushed) {
+    for (const renderer of liveRenderers) {
+      if (subtreeHasThemeHint(renderer.root)) renderer.requestFrame();
+    }
+  }
+}
+
+/** The active theme currently resolved by the element factories (the core
+ * counterpart of the hosts' `getTheme`). */
+export function getTheme(): Theme {
+  return activeTheme;
 }
 
 // ---------------------------------------------------------------------------
@@ -9090,6 +9299,9 @@ export class Renderer {
     }
     this.#native = new addon.TuiRenderer(nativeOptions);
     this.root = Node.wrapRoot(this.#native.root());
+    // The M4.5 runtime theme engine: register as a `setTheme` repaint target
+    // (unregistered in `destroy`).
+    liveRenderers.add(this);
   }
 
   /**
@@ -9603,6 +9815,8 @@ export class Renderer {
   destroy(): void {
     if (this.#destroyed) return;
     this.#destroyed = true;
+    // A destroyed renderer must not be a `setTheme` repaint target anymore.
+    liveRenderers.delete(this);
     // A pending coalesced frame must not fire after teardown: the native
     // renderer throws once destroyed, and the queued macrotask would call
     // `render()` on it.
