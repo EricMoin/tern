@@ -1187,8 +1187,22 @@ kitchen-sink demos render a help panel from a small keymap.
 semantic `role` / `component` hints on node props into plain `fg` / `bg` /
 `border_style` style keys at element-creation time (the hints are consumed and
 never reach the scene; explicit props always win). `@tern-tui/react` provides
-`<ThemeProvider>` + `useTheme`; `@tern-tui/solid` provides `setTheme` / `getTheme`
-(module-level, merged over `defaultTheme`).
+`<ThemeProvider>` + `useTheme`; `@tern-tui/solid` resolves hints against the
+module-level active theme. **M4.5 runtime switching (shipped):**
+`setTheme(overrides)` / `getTheme()` (re-exported by core, react and solid —
+the same function reference) swap the module-level active theme and re-resolve
+every scene node created with `role` / `component` hints in place: only the
+changed style keys are pushed (single-key writes, never a full-map replace),
+exactly one coalesced repaint runs, and a React tree is never re-rendered. The
+golden contract — a switched scene paints cell-for-cell identically to a fresh
+mount created directly under the new theme — is unit-tested in core
+(`index_test.ts` M4.5: golden / diff / un-hinted zero-calls / no-op), react and
+solid. **M4.5 contrast audit (shipped):** the WCAG 2.1 checker
+`parseThemeColor` / `relativeLuminance` / `contrastRatio` / `auditTheme`
+(`packages/core/src/contrast.ts`, pure functions over the theme's string
+colors — hex, `indexed:N`, `default`) audits any theme's palette roles and
+component presets; see docs/guide.md "Contrast audit" for the runnable
+example.
 
 **Soft wrap (shipped):** the `wrap` prop passes through to each content leaf
 of `DiffView` and is accepted on `StreamingText` for API stability — the
