@@ -4,6 +4,7 @@
 use super::*;
 use crossterm::tty::IsTty;
 use napi_derive::napi;
+use tern_terminal::backend::A11yAnnotation;
 use tern_terminal::probe::TerminalCapabilities;
 
 /// The terminal-facing renderer: owns raw mode + alternate screen, pushes
@@ -266,6 +267,25 @@ pub(crate) fn interactive_terminal_error(term_dumb: bool, stdout_tty: bool) -> O
     }
 }
 
+/// The hidden-annotation text for one [`A11yAnnotationJs`] entry:
+/// `[role][: label][, state...]` — e.g. `"button"`,
+/// `"textbox: Search, focused"`, `"checkbox: mute, checked, focused"`.
+/// The state order is kept as given (the
+/// [`semantics`](TuiRenderer::semantics) dump sorts it, so the JS side
+/// passes it sorted).
+fn a11y_annotation_summary(entry: &A11yAnnotationJs) -> String {
+    let mut summary = entry.role.clone();
+    if let Some(label) = &entry.label {
+        summary.push_str(": ");
+        summary.push_str(label);
+    }
+    for state in &entry.state {
+        summary.push_str(", ");
+        summary.push_str(state);
+    }
+    summary
+}
+
 #[napi]
 impl TuiRenderer {
     /// Enter raw mode + the alternate screen (unless `use_alt_screen` is
@@ -293,6 +313,13 @@ impl TuiRenderer {
         // requires a non-headless renderer and the interactive probe
         // reporting scroll-region support — see `should_scroll_optimize`.
         let scroll_optimization = options.scroll_optimization.unwrap_or(true);
+        // The caller's opt-in for iTerm2 hidden accessibility annotations
+        // (default off). Whether annotations are actually emitted
+        // additionally requires a non-headless renderer and the interactive
+        // probe reporting an iTerm2 terminal — the gating lives in the
+        // core `Backend::set_a11y_annotations` (see
+        // `tern_terminal::backend::flush_a11y_annotations_gated_to`).
+        let a11y_annotations = options.a11y_annotations.unwrap_or(false);
         // A headless renderer never touches a terminal: no raw mode, no
         // alternate screen, no event listening, no title. Its in-memory
         // backend reports the configured virtual size (default 80x24) and
@@ -351,7 +378,8 @@ impl TuiRenderer {
                 let _ = backend.enter_keyboard_enhancement();
             }
             (
-                Box::new(Backend::new()) as Box<dyn RenderBackend>,
+                Box::new(Backend::new().with_a11y_annotations(a11y_annotations))
+                    as Box<dyn RenderBackend>,
                 use_alt_screen,
                 keyboard_enhancement_pushed,
             )
@@ -756,6 +784,37 @@ impl TuiRenderer {
             }
         }
         Ok(dump)
+    }
+
+    /// Write iTerm2 hidden accessibility annotations for the scene's
+    /// semantics store: one `OSC 1337 AddHiddenAnnotation` per entry, so
+    /// VoiceOver can read the store's nodes in iTerm2's accessibility
+    /// mode. Each entry's summary is `[role][: label][, state...]` — e.g.
+    /// `"button"`, `"textbox: Search, focused"` — and the state order is
+    /// kept as given (the [`semantics`](Self::semantics) dump sorts it).
+    ///
+    /// The write is a strict no-op unless the renderer was constructed
+    /// with the `a11y_annotations` option AND the interactive probe
+    /// reports the terminal self-identifies as iTerm2 — the only terminal
+    /// that understands the sequence (see the core
+    /// `tern_terminal::backend::flush_a11y_annotations_gated_to`).
+    /// iTerm2's `AddHiddenAnnotation` does not reveal the annotation
+    /// window on receipt, so the write never disturbs the visible screen.
+    /// Errors on a destroyed renderer.
+    #[napi(js_name = "set_a11y_annotations")]
+    pub fn set_a11y_annotations(&self, entries: Vec<A11yAnnotationJs>) -> Result<()> {
+        let inner = self.inner.lock().expect("renderer inner poisoned");
+        if inner.destroyed {
+            return Err(Error::from_reason("renderer is destroyed"));
+        }
+        let annotations: Vec<A11yAnnotation> = entries
+            .iter()
+            .map(|entry| A11yAnnotation::new(a11y_annotation_summary(entry)))
+            .collect();
+        inner
+            .backend
+            .set_a11y_annotations(&annotations)
+            .map_err(|e| Error::from_reason(format!("set a11y annotations: {e}")))
     }
 
     /// Leave the alternate screen and raw mode and stop event listening,

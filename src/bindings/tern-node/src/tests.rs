@@ -1,6 +1,7 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tern_core::color::Color as _Color;
+use tern_terminal::backend::A11yAnnotation;
 
 mod conversion;
 mod node_ops;
@@ -192,6 +193,7 @@ fn headless_renderer() -> TuiRenderer {
         keyboard_enhancement: None,
         scroll_optimization: None,
         semantics: None,
+        a11y_annotations: None,
         width: None,
         height: None,
     })
@@ -225,6 +227,10 @@ struct CountingBackend {
     /// computed against the retained frame.
     last_flush_updates: Arc<Mutex<Vec<CellUpdate>>>,
     clipboard: Arc<Mutex<Option<String>>>,
+    /// The [`A11yAnnotation`]s most recently passed to
+    /// `set_a11y_annotations` (overwritten per call), so tests can assert
+    /// the renderer forwards the role/label/state summaries.
+    a11y_annotations: Arc<Mutex<Option<Vec<A11yAnnotation>>>>,
     /// The [`Cursor`] most recently passed to `flush_diff_with_cursor` (the
     /// cursor-aware flush), or `None` before one. Lets tests assert that
     /// `set_cursor` routes the render through the cursor-aware flush with the
@@ -266,6 +272,15 @@ impl CountingBackend {
     /// The text most recently passed to `set_clipboard`, or `None`.
     fn clipboard(&self) -> Option<String> {
         self.clipboard.lock().expect("clipboard poisoned").clone()
+    }
+
+    /// The [`A11yAnnotation`]s most recently passed to
+    /// `set_a11y_annotations`, or `None` before one.
+    fn a11y_annotations(&self) -> Option<Vec<A11yAnnotation>> {
+        self.a11y_annotations
+            .lock()
+            .expect("a11y annotations poisoned")
+            .clone()
     }
 
     /// The [`Cursor`] most recently passed to `flush_diff_with_cursor`, or
@@ -363,6 +378,14 @@ impl RenderBackend for CountingBackend {
 
     fn set_clipboard(&self, text: &str) -> io::Result<()> {
         *self.clipboard.lock().expect("clipboard poisoned") = Some(text.to_string());
+        Ok(())
+    }
+
+    fn set_a11y_annotations(&self, entries: &[A11yAnnotation]) -> io::Result<()> {
+        *self
+            .a11y_annotations
+            .lock()
+            .expect("a11y annotations poisoned") = Some(entries.to_vec());
         Ok(())
     }
 
