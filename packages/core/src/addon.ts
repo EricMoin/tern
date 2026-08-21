@@ -28,6 +28,8 @@ export type {
   HighlightSpanJs,
   KeyEvent,
   NodeHandle,
+  SceneSemanticsJs,
+  SemanticsNodeJs,
   StyleRunJs,
   TuiRenderer,
   TuiRendererOptions,
