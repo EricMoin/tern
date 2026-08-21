@@ -205,25 +205,30 @@ running system. The release matrix builds eleven targets:
 
 | Platform | Rust target triple | npm package | CI verification |
 |----------|--------------------|-------------|-----------------|
-| Linux x64 (glibc) | `x86_64-unknown-linux-gnu` | `@tern-tui/node-linux-x64-gnu` | native load-check |
-| Linux arm64 (glibc) | `aarch64-unknown-linux-gnu` | `@tern-tui/node-linux-arm64-gnu` | build-only |
-| Linux x64 (musl) | `x86_64-unknown-linux-musl` | `@tern-tui/node-linux-x64-musl` | build-only |
-| Linux arm64 (musl) | `aarch64-unknown-linux-musl` | `@tern-tui/node-linux-arm64-musl` | build-only |
-| FreeBSD x64 | `x86_64-unknown-freebsd` | `@tern-tui/node-freebsd-x64` | build-only |
-| Linux riscv64 (glibc) | `riscv64gc-unknown-linux-gnu` | `@tern-tui/node-linux-riscv64-gnu` | build-only |
-| Android arm64 | `aarch64-linux-android` | `@tern-tui/node-android-arm64` | build-only |
+| Linux x64 (glibc) | `x86_64-unknown-linux-gnu` | `@tern-tui/node-linux-x64-gnu` | runtime load-check + smoke (native) |
+| Linux arm64 (glibc) | `aarch64-unknown-linux-gnu` | `@tern-tui/node-linux-arm64-gnu` | runtime load-check + smoke (native) |
+| Linux x64 (musl) | `x86_64-unknown-linux-musl` | `@tern-tui/node-linux-x64-musl` | runtime load-check + smoke (node:alpine) |
+| Linux arm64 (musl) | `aarch64-unknown-linux-musl` | `@tern-tui/node-linux-arm64-musl` | runtime load-check + smoke (node:alpine) |
+| FreeBSD x64 | `x86_64-unknown-freebsd` | `@tern-tui/node-freebsd-x64` | runtime load-check + smoke (FreeBSD 15 VM) |
+| Linux riscv64 (glibc) | `riscv64gc-unknown-linux-gnu` | `@tern-tui/node-linux-riscv64-gnu` | build-only (verify on-device) |
+| Android arm64 | `aarch64-linux-android` | `@tern-tui/node-android-arm64` | build-only (verify on-device) |
 | macOS x64 (Intel) | `x86_64-apple-darwin` | `@tern-tui/node-darwin-x64` | build-only |
-| macOS arm64 (Apple Silicon) | `aarch64-apple-darwin` | `@tern-tui/node-darwin-arm64` | native load-check |
-| Windows x64 (MSVC) | `x86_64-pc-windows-msvc` | `@tern-tui/node-win32-x64-msvc` | native load-check |
-| Windows arm64 (MSVC) | `aarch64-pc-windows-msvc` | `@tern-tui/node-win32-arm64-msvc` | build-only |
+| macOS arm64 (Apple Silicon) | `aarch64-apple-darwin` | `@tern-tui/node-darwin-arm64` | runtime load-check + smoke (native) |
+| Windows x64 (MSVC) | `x86_64-pc-windows-msvc` | `@tern-tui/node-win32-x64-msvc` | runtime load-check + smoke (native) |
+| Windows arm64 (MSVC) | `aarch64-pc-windows-msvc` | `@tern-tui/node-win32-arm64-msvc` | runtime load-check + smoke (native) |
 
-A native load-check runs only on rows where the runner arch matches the target
-(linux-gnu x64, darwin arm64, win32-x64 msvc); every other row is build-only —
-the binary is cross-compiled and uploaded, but not loaded in CI. When the
-platform package is missing, the loader falls back to a locally built
-`tern-node.<platform>-<arch>.node`. On a build-only row, verify the binding on
-a matching runtime (e.g. a `node:alpine` container for musl, the
-`windows-11-arm` hosted runner for Windows arm64, on-device for Android).
+Every feasible platform now gets a runtime load-check plus a full renderer
+smoke (`runtime-smoke.mjs`) in a runtime matching the binary: natively where
+the runner arch matches the target (linux-gnu x64 and arm64 — the latter on
+the `ubuntu-24.04-arm` hosted runner — darwin arm64, win32-x64/arm64 msvc —
+the latter on the `windows-11-arm` hosted runner), inside a `node:alpine`
+container for the musl rows (a glibc runner cannot load a musl binary), and
+inside a FreeBSD 15 VM via `cross-platform-actions/action` for FreeBSD x64.
+macOS x64, riscv64, and Android stay build-only — cross-linked with no x64
+mac hosted runtime, and no hosted riscv64/Android runtime respectively —
+verify those on a matching device or runner. When the platform package is
+missing, the loader falls back to a locally built
+`tern-node.<platform>-<arch>.node`.
 
 ### Troubleshooting
 
