@@ -114,6 +114,7 @@ export { loadAddon, setAddonForTesting } from "./addon.ts";
 export type { TernAddon } from "./addon.ts";
 export { syncSemantics } from "./semantics.ts";
 export type { SemanticsDescriptor } from "./semantics.ts";
+export { A11Y_STREAM_VERSION, A11yStream } from "./a11y.ts";
 export {
   auditTheme,
   contrastRatio,
@@ -212,6 +213,7 @@ import { loadAddon } from "./addon.ts";
 import type { NativeIncrementalHighlighter, TernAddon } from "./addon.ts";
 import { syncSemantics } from "./semantics.ts";
 import type { SemanticsDescriptor } from "./semantics.ts";
+import { A11yStream } from "./a11y.ts";
 
 /**
  * The scene node kinds. `box`/`text`/`streaming_text` are materialized by the
@@ -9267,6 +9269,9 @@ export class Renderer {
    * of the native store gate (see `CreateRendererOptions.semantics`), kept
    * in sync with the constructor option and {@link setSemanticsEnabled}. */
   #semanticsEnabled = false;
+  /** The active a11y stream (see {@link startA11yStream}), or `null` when
+   * no stream is started. */
+  #a11y: A11yStream | null = null;
 
   /** The scene root. Attach content under it with `Node.addChild`. */
   readonly root: Node;
@@ -9424,6 +9429,38 @@ export class Renderer {
    */
   setSemanticsEnabled(enabled: boolean): void {
     this.#semanticsEnabled = enabled;
+  }
+
+  /**
+   * Start the a11y stream: every coalesced painted frame (see
+   * {@link requestFrame}) serializes the current `Renderer.semantics()`
+   * dump through `onLine` as a versioned JSONL line — one header line
+   * `{"v":1}` emitted synchronously at start, then one line per emission
+   * holding the full dump as ONE JSON array (scene node ids, which are
+   * `bigint`, serialize as decimal strings). No-change suppression drops an
+   * emission whose serialized dump is byte-identical to the last one.
+   * The stream is a pure read — it never touches layout or painted content
+   * (painted frames are byte-identical with the stream running) — and
+   * best-effort: a destroyed-renderer read error or a throwing sink is
+   * swallowed, never propagating into the frame path. Emits only from the
+   * coalesced frame path, so each painted frame yields at most one
+   * emission. Idempotent: calling while a stream is already active is a
+   * no-op.
+   */
+  startA11yStream(onLine: (line: string) => void): void {
+    if (this.#a11y !== null) return;
+    this.#a11y = new A11yStream(() => this.semantics(), onLine);
+  }
+
+  /**
+   * Stop the a11y stream: future emissions are dropped (an in-flight
+   * stream's `emit()` becomes a no-op). Idempotent: calling with no active
+   * stream is a no-op.
+   */
+  stopA11yStream(): void {
+    if (this.#a11y === null) return;
+    this.#a11y.close();
+    this.#a11y = null;
   }
 
   /**
@@ -9644,6 +9681,12 @@ export class Renderer {
       // Anchor the frame budget: the next coalesced frame spaces from this
       // native render, never earlier than the cap allows.
       this.#lastNativeRenderAt = performance.now();
+      // The a11y stream emits once per painted frame — from the coalesced
+      // path only (an explicit `render()` supersedes a pending frame, so
+      // the two paths never both fire), giving at most one emission per
+      // native render. Best-effort: a read or sink error is swallowed by
+      // the stream and never reaches this loop.
+      this.#a11y?.emit();
       const callbacks = this.#frameCallbacks;
       this.#frameCallbacks = [];
       for (const callback of callbacks) callback();
@@ -9822,6 +9865,10 @@ export class Renderer {
     // `render()` on it.
     this.#cancelFrame();
     this.#events.close();
+    // A destroyed renderer must not stream: close the a11y stream so its
+    // best-effort read never touches the destroyed native renderer.
+    this.#a11y?.close();
+    this.#a11y = null;
     this.#native.destroy();
   }
 
