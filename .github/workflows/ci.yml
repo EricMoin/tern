@@ -234,8 +234,24 @@ jobs:
           npm install
           npm run build:debug
 
+      # The tmux end-to-end harness (run-e2e-tmux.sh, M4.4) drives the demos
+      # inside a real tmux session. tmux is NOT guaranteed on GitHub-hosted
+      # runner images (absent from the macos-14 / ubuntu-24.04 runner
+      # READMEs), so install it deterministically; `tmux -V` verifies the
+      # install (the job fails if brew could not provide it).
+      - name: Install tmux
+        run: |
+          brew install tmux
+          tmux -V
+
       - name: PTY smoke (script harness)
         run: bash packages/examples/run-smoke.sh
+
+      # tmux e2e (M4.4): standalone suite over the same smoke path filter —
+      # runs the demos inside a real tmux session (vs. the `script` PTY
+      # above), after run-smoke.sh, on the same change set.
+      - name: tmux e2e (run-e2e-tmux.sh)
+        run: bash packages/examples/run-e2e-tmux.sh
 
   napi-build:
     # Multi-platform native addon strategy (napi-rs distribution model):
