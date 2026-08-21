@@ -11,8 +11,11 @@
  * `StatusBar`, a `Tabs` bar, the M3 surface — `Checkbox` / `Toggle` / `Radio`
  * (driven by `checkboxKey` / `toggleKey` / `radioKey`), a floating `Menu`
  * (driven by `openMenu` / `menuKey`), and a `HelpPanel` rendered from a
- * small `Keymap` — and a custom theme via `ThemeProvider`
- * (`role` / `component` hints resolved onto plain node props).
+ *  small `Keymap` — and a custom theme via `ThemeProvider`
+ * (`role` / `component` hints resolved onto plain node props). The M4.5
+ * surface is exercised live: a runtime `setTheme` switch re-resolves the
+ * mounted themed nodes in place (no React re-render) and a WCAG 2.1 contrast
+ * audit (`auditTheme` / `contrastRatio`) runs against the active theme.
  *
  * Every widget is asserted against its scene node after driving it (the
  * same assertion style as the @tern-tui/core unit tests): a failing assertion
@@ -41,13 +44,16 @@ import {
   Radio,
   HelpPanel,
   Keymap,
+  auditTheme,
   checkboxKey,
+  contrastRatio,
+  createRenderer,
+  defaultTheme,
   toggleKey,
   radioKey,
   CHECKBOX_CHECKED_GLYPH,
   TOGGLE_ON_GLYPH,
   RADIO_SELECTED_GLYPH,
-  createRenderer,
   useFocus as coreUseFocus,
   SCROLLBAR_THUMB_CHAR,
   type MouseEventJs,
@@ -97,6 +103,8 @@ import {
   useWheelScroll,
   visibleTableRows,
   wheelScroll,
+  getTheme,
+  setTheme,
   type KeyEvent,
   type Node,
   type Renderer,
@@ -883,6 +891,57 @@ assert(
 // --- Theme ------------------------------------------------------------------------
 assert(themedPrimary?.props.fg === "#123456", "role=primary resolves the custom palette fg");
 assert(themedInput?.props.border_style === "double", "component=input resolves the preset border_style");
+
+// --- M4.5 live theme switch + contrast audit --------------------------------------
+// The runtime theme engine: `setTheme(overrides)` swaps the module-level
+// active theme and re-resolves every node created with `role` / `component`
+// hints in place — no React re-render, only the changed style keys pushed,
+// exactly one coalesced repaint. The themed nodes were recorded at mount
+// (their hints carried onto the element props), so the switch updates them.
+const primaryBefore = themedPrimary;
+const inputBefore = themedInput;
+setTheme({
+  palette: { primary: { fg: "#00bb00" } },
+  components: { input: { border_style: "thick" } },
+});
+// Read through functions: TS control-flow narrowing pins a const-typed
+// property access to its first-checked literal (setTheme mutates the props
+// in place, so a plain property read would be typed against the old value).
+const liveFg = (): unknown => themedPrimary?.props.fg;
+const liveBorder = (): unknown => themedInput?.props.border_style;
+assert(liveFg() === "#00bb00", "setTheme re-resolves role=primary fg in place");
+assert(liveBorder() === "thick", "setTheme re-resolves component=input border_style in place");
+assert(
+  themedPrimary === primaryBefore && themedInput === inputBefore,
+  "the switch updates the same nodes in place (no remount)",
+);
+assert(getTheme().palette.primary.fg === "#00bb00", "getTheme reads the live active theme");
+
+// The WCAG 2.1 contrast checker: pure functions over the theme's string
+// colors (hex / indexed:N / default), so the audit runs anywhere the theme
+// runs. Black on white is 21:1; the default muted role sits below the 4.5
+// AA bar; the default One-Dark palette flags exactly two roles (muted ≈
+// 2.55, border ≈ 1.58 — danger clears the bar narrowly at ≈ 4.82).
+const blackOnWhite = contrastRatio("#000000", "#ffffff");
+assert(
+  blackOnWhite !== null && blackOnWhite >= 20,
+  `black on white is 21:1 (got ${blackOnWhite})`,
+);
+const mutedRatio = contrastRatio(
+  defaultTheme.palette.muted.fg,
+  defaultTheme.palette.muted.bg,
+);
+assert(
+  mutedRatio !== null && mutedRatio < 4.5,
+  `the default muted role is below the 4.5 AA bar (got ${mutedRatio})`,
+);
+const audit = auditTheme(getTheme());
+assert(
+  audit.length === 2 &&
+    audit.some((f) => f.name === "muted") &&
+    audit.some((f) => f.name === "border"),
+  `auditTheme flags exactly muted + border below 4.5 (got ${JSON.stringify(audit.map((f) => `${f.scope}:${f.name}`))})`,
+);
 
 // --- M3 form primitives (scene-root siblings) --------------------------------------
 // The Checkbox / Toggle / Radio / HelpPanel nodes mount as renderer.root
