@@ -106,6 +106,14 @@ export { loadAddon, setAddonForTesting } from "./addon.ts";
 export type { TernAddon } from "./addon.ts";
 export { syncSemantics } from "./semantics.ts";
 export type { SemanticsDescriptor } from "./semantics.ts";
+export {
+  auditTheme,
+  contrastRatio,
+  parseThemeColor,
+  relativeLuminance,
+  XTERM_256,
+} from "./contrast.ts";
+export type { ContrastFinding, Rgb } from "./contrast.ts";
 export type {
   ContentSize,
   HighlightSpanJs,
