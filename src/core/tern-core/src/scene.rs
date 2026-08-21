@@ -5,6 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 use crate::rect::Rect;
+use crate::semantics::SemanticsNode;
 use crate::style::Style;
 
 /// Stable identity of a scene node, unique within a [`Scene`].
@@ -91,6 +92,14 @@ pub struct SceneNode {
 /// [`Scene::take_dirty`] to limit its per-frame paint-signature walk to the
 /// mutated nodes instead of the whole tree. The hint is interior-mutable so
 /// a renderer holding only `&Scene` can drain it.
+///
+/// One deliberate exception to "every mutation pushes a dirty id": the
+/// semantics store (see the `semantics` field) bumps the epoch on real
+/// writes but pushes nothing. Semantics is pure bookkeeping — it can never
+/// change painted content — so its mutations must not widen the compositor's
+/// paint-signature work. The compositor's dirty path treats an
+/// empty-pushed-set / unchanged-rects frame as a no-op and returns the
+/// retained frame unchanged.
 #[derive(Debug)]
 pub struct Scene {
     nodes: HashMap<NodeId, SceneNode>,
@@ -112,6 +121,17 @@ pub struct Scene {
     /// scene cannot introspect. When set, the compositor falls back to the
     /// whole-tree paint-signature walk instead of the pushed set.
     force_full_scan: Cell<bool>,
+    /// The parallel accessibility-semantics map: node id → [`SemanticsNode`]
+    /// (see [`crate::semantics`]). Pure bookkeeping — layout and the
+    /// compositor never read it, and no write to it ever pushes to the
+    /// `dirty` set (semantics cannot change painted content). Writes are
+    /// gated by [`Scene::semantics_enabled`].
+    semantics: HashMap<NodeId, SemanticsNode>,
+    /// Master switch for the semantics store. Off by default; while off,
+    /// [`Scene::set_semantics`] rejects writes (returns `false`). Disabling
+    /// does not wipe existing entries — it only gates future writes — so a
+    /// later re-enable restores the stored tree as-is.
+    semantics_enabled: bool,
 }
 
 impl Default for Scene {
@@ -144,6 +164,8 @@ impl Scene {
             epoch: 0,
             dirty: RefCell::new(HashSet::new()),
             force_full_scan: Cell::new(false),
+            semantics: HashMap::new(),
+            semantics_enabled: false,
         }
     }
 
@@ -326,7 +348,9 @@ impl Scene {
     /// removed.
     ///
     /// Each removed node (including any `stream` it carries) is dropped with
-    /// the removal, so a streaming node's spans never outlive the node.
+    /// the removal, so a streaming node's spans never outlive the node. The
+    /// parallel semantics map is purged for every removed subtree id too —
+    /// a semantics entry never outlives its scene node.
     pub fn remove(&mut self, id: NodeId) -> bool {
         if id == self.root || !self.nodes.contains_key(&id) {
             return false;
@@ -348,6 +372,9 @@ impl Scene {
         }
         for r in to_remove {
             self.nodes.remove(&r);
+            // The parallel semantics map must not outlive its scene node:
+            // purge the entry of every removed subtree id.
+            self.semantics.remove(&r);
             // Every removed subtree id is pushed: the compositor must repaint
             // the OLD bounds of each (their new bounds are gone), so each is
             // a dirty node in its own right.
@@ -463,6 +490,75 @@ impl Scene {
         self.nodes.get(&id).and_then(|n| n.props.get(key))
     }
 
+    /// Turn the semantics store on or off. Returns `true` when the flag
+    /// actually changed (the epoch bumps), `false` when it already had the
+    /// requested value (a no-op: nothing changes, no bump).
+    ///
+    /// Disabling does not wipe existing entries — it only gates future
+    /// [`Scene::set_semantics`] writes — so a later re-enable restores the
+    /// stored tree as-is.
+    pub fn set_semantics_enabled(&mut self, enabled: bool) -> bool {
+        if self.semantics_enabled == enabled {
+            return false;
+        }
+        self.semantics_enabled = enabled;
+        self.epoch += 1;
+        true
+    }
+
+    /// Whether the semantics store accepts writes.
+    pub const fn semantics_enabled(&self) -> bool {
+        self.semantics_enabled
+    }
+
+    /// Set the accessibility semantics of a node. Returns `false` when the
+    /// store is disabled (the default — call [`Scene::set_semantics_enabled`]
+    /// first) or the node does not exist.
+    ///
+    /// An equal-value write (the incoming node equals the stored one) is a
+    /// no-op: nothing is replaced and the epoch is not bumped — the same
+    /// equal-write contract as [`Scene::set_prop`].
+    ///
+    /// A real write bumps the epoch but pushes no dirty id: the semantics
+    /// store is pure bookkeeping and can never change painted content, so the
+    /// compositor's dirty set stays untouched (see the `Scene` type docs).
+    pub fn set_semantics(&mut self, id: NodeId, node: SemanticsNode) -> bool {
+        if !self.semantics_enabled || !self.nodes.contains_key(&id) {
+            return false;
+        }
+        if self.semantics.get(&id) == Some(&node) {
+            return true;
+        }
+        self.semantics.insert(id, node);
+        self.epoch += 1;
+        true
+    }
+
+    /// Remove a node's semantics entry. Returns `true` when an entry existed
+    /// and was removed (the epoch bumps); `false` when there was nothing to
+    /// clear (a no-op: no bump). Not gated by the store's enable flag — it is
+    /// a cleanup operation and removing a stale entry is always safe.
+    pub fn clear_semantics(&mut self, id: NodeId) -> bool {
+        if self.semantics.remove(&id).is_none() {
+            return false;
+        }
+        self.epoch += 1;
+        true
+    }
+
+    /// The semantics of a node, or `None` when the node has none. Reads are
+    /// not gated by the store's enable flag: entries written while enabled
+    /// stay readable after disabling.
+    pub fn semantics(&self, id: NodeId) -> Option<&SemanticsNode> {
+        self.semantics.get(&id)
+    }
+
+    /// Iterate over the populated semantics entries (node id → node), in
+    /// arbitrary map order. Reads are not gated by the store's enable flag.
+    pub fn semantics_iter(&self) -> impl Iterator<Item = (&NodeId, &SemanticsNode)> {
+        self.semantics.iter()
+    }
+
     /// The clip rect declared on a node via the `clip_x` / `clip_y` /
     /// `clip_width` / `clip_height` props (in scene coordinates), or `None`
     /// when any of the four is absent. When set, the compositor restricts
@@ -553,6 +649,7 @@ impl Scene {
 mod tests {
     use super::*;
     use crate::color::Color;
+    use crate::semantics::{SemanticsNode, SemanticsRole};
     use crate::style::{BorderStyle, Modifiers};
 
     #[test]
@@ -1247,5 +1344,192 @@ mod tests {
         assert!(scene.set_prop(t, "text", PropValue::Str("y".to_string())));
         let (ids, _) = scene.take_dirty();
         assert!(ids.contains(&t), "a real change records the id");
+    }
+
+    // --- semantics store -------------------------------------------------
+
+    fn checkbox_node(label: &str) -> SemanticsNode {
+        let mut n = SemanticsNode::new(SemanticsRole::Checkbox);
+        n.label = Some(label.to_string());
+        n
+    }
+
+    #[test]
+    fn semantics_store_is_off_by_default_and_rejects_writes() {
+        // The store defaults to off: set_semantics fails (returning false),
+        // reads stay empty, and no epoch/dirty state changes.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let a = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        let (_, _) = scene.take_dirty(); // clear the add-child push
+        let epoch = scene.epoch();
+
+        assert!(!scene.semantics_enabled(), "the store starts disabled");
+        assert!(!scene.set_semantics(a, checkbox_node("x")));
+        assert_eq!(scene.semantics(a), None);
+        assert_eq!(scene.semantics_iter().count(), 0);
+        assert!(!scene.clear_semantics(a), "nothing to clear");
+
+        assert_eq!(scene.epoch(), epoch, "rejected writes must not bump");
+        let (ids, force) = scene.take_dirty();
+        assert!(ids.is_empty() && !force, "rejected writes push nothing");
+    }
+
+    #[test]
+    fn semantics_enable_then_set_get_roundtrip() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let a = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+
+        // Enabling flips the flag and bumps the epoch exactly once.
+        assert!(scene.set_semantics_enabled(true));
+        assert!(scene.semantics_enabled());
+        assert_eq!(scene.epoch(), 2, "enable bumps once (add_child bumped once)");
+
+        let node = checkbox_node("mute");
+        assert!(scene.set_semantics(a, node.clone()));
+        assert_eq!(scene.semantics(a), Some(&node));
+        assert_eq!(scene.semantics_iter().count(), 1);
+
+        // Re-enabling to the same value is a no-op.
+        assert!(!scene.set_semantics_enabled(true));
+        assert_eq!(scene.epoch(), 3, "no-op enable must not bump");
+
+        // The iterator yields the populated (id, node) pair.
+        let entries: Vec<(NodeId, &SemanticsNode)> = scene
+            .semantics_iter()
+            .map(|(id, n)| (*id, n))
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, a);
+        assert_eq!(entries[0].1, &node);
+    }
+
+    #[test]
+    fn equal_value_semantics_write_is_noop() {
+        // Mirroring set_prop: an equal-value write returns true (the value is
+        // as requested) but neither bumps the epoch nor pushes a dirty id.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let a = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        scene.set_semantics_enabled(true);
+
+        let node = checkbox_node("mute");
+        assert!(scene.set_semantics(a, node.clone()));
+        let epoch = scene.epoch();
+
+        assert!(scene.set_semantics(a, node.clone()));
+        assert!(scene.set_semantics(a, checkbox_node("mute"))); // equal by value
+        assert_eq!(scene.epoch(), epoch, "equal semantics writes must not bump");
+        assert_eq!(scene.semantics(a), Some(&node));
+    }
+
+    #[test]
+    fn real_semantics_write_bumps_epoch_but_never_dirty() {
+        // A real semantics write bumps the epoch (the app-level change
+        // signal) but must NOT push the node into the compositor's dirty set:
+        // semantics is pure bookkeeping that cannot change painted content.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let a = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        scene.set_semantics_enabled(true);
+        let (_, _) = scene.take_dirty(); // clear add-time pushes
+
+        assert!(scene.set_semantics(a, checkbox_node("mute")));
+        let epoch = scene.epoch();
+        let (ids, force) = scene.take_dirty();
+        assert!(
+            ids.is_empty(),
+            "a semantics write must never push a dirty id (got {ids:?})"
+        );
+        assert!(!force);
+
+        assert!(scene.set_semantics(a, checkbox_node("unmute")));
+        assert_eq!(scene.epoch(), epoch + 1, "a real write bumps once");
+        let (ids, _) = scene.take_dirty();
+        assert!(ids.is_empty(), "still nothing pushed after a second write");
+    }
+
+    #[test]
+    fn clear_semantics_removes_the_entry() {
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let a = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        scene.set_semantics_enabled(true);
+        assert!(scene.set_semantics(a, checkbox_node("mute")));
+
+        let epoch = scene.epoch();
+        assert!(scene.clear_semantics(a));
+        assert_eq!(scene.epoch(), epoch + 1, "a real clear bumps once");
+        assert_eq!(scene.semantics(a), None);
+        assert_eq!(scene.semantics_iter().count(), 0);
+
+        // Clearing an absent entry is a no-op.
+        let epoch = scene.epoch();
+        assert!(!scene.clear_semantics(a));
+        assert!(!scene.clear_semantics(NodeId(999)));
+        assert_eq!(scene.epoch(), epoch, "no-op clears must not bump");
+    }
+
+    #[test]
+    fn set_semantics_rejects_missing_nodes() {
+        let mut scene = Scene::new();
+        scene.set_semantics_enabled(true);
+        let epoch = scene.epoch();
+
+        assert!(!scene.set_semantics(NodeId(999), checkbox_node("x")));
+        assert_eq!(scene.epoch(), epoch, "missing-node writes must not bump");
+        assert_eq!(scene.semantics(NodeId(999)), None);
+    }
+
+    #[test]
+    fn remove_subtree_purges_semantics_of_every_removed_id() {
+        // The parallel semantics map must never outlive its scene node:
+        // removing a subtree drops the semantics of every id in it, while a
+        // sibling outside the subtree keeps its entry.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let a = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        let b = scene.add_child(a, NodeKind::Box, Style::new()).unwrap();
+        let c = scene.add_child(b, NodeKind::Text, Style::new()).unwrap();
+        let d = scene.add_child(root, NodeKind::Text, Style::new()).unwrap();
+        scene.set_semantics_enabled(true);
+        for id in [a, b, c, d] {
+            assert!(scene.set_semantics(id, checkbox_node("x")));
+        }
+        assert_eq!(scene.semantics_iter().count(), 4);
+
+        assert!(scene.remove(a));
+        for id in [a, b, c] {
+            assert_eq!(scene.semantics(id), None, "removed id {id:?} keeps no semantics");
+        }
+        assert!(scene.semantics(d).is_some(), "a sibling outside the subtree keeps its entry");
+        assert_eq!(scene.semantics_iter().count(), 1);
+
+        // Removing the last semantics-carrying node empties the store.
+        assert!(scene.remove(d));
+        assert_eq!(scene.semantics_iter().count(), 0);
+    }
+
+    #[test]
+    fn disable_gates_writes_but_preserves_entries() {
+        // Disabling is a write-gate, not a wipe: existing entries stay
+        // readable and re-enabling restores writability as-is.
+        let mut scene = Scene::new();
+        let root = scene.root_id();
+        let a = scene.add_child(root, NodeKind::Box, Style::new()).unwrap();
+        scene.set_semantics_enabled(true);
+        let node = checkbox_node("mute");
+        assert!(scene.set_semantics(a, node.clone()));
+
+        assert!(scene.set_semantics_enabled(false));
+        assert!(!scene.semantics_enabled());
+        assert!(!scene.set_semantics(a, checkbox_node("other")));
+        assert_eq!(scene.semantics(a), Some(&node), "the stored entry survives a disable");
+        assert_eq!(scene.semantics_iter().count(), 1);
+
+        assert!(scene.set_semantics_enabled(true));
+        assert!(scene.set_semantics(a, checkbox_node("other")));
+        assert_eq!(scene.semantics(a).unwrap().label.as_deref(), Some("other"));
     }
 }

@@ -12,6 +12,8 @@
 //!   scrollable panes and clipped overlays
 //! * [`Rect`] / [`Size`] — geometry used by layout
 //! * [`Scene`] / [`SceneNode`] — the scene tree produced by the reconciler
+//! * [`SemanticsNode`] / [`SemanticsRole`] / [`SemanticsState`] — the
+//!   accessibility semantics store (pure bookkeeping, default-off)
 //! * [`LayoutEngine`] — the trait implemented by tern-layout
 //!
 //! This crate performs no terminal I/O and depends only on `unicode-width`
@@ -28,6 +30,7 @@ pub mod cursor;
 pub mod layout;
 pub mod rect;
 pub mod scene;
+pub mod semantics;
 pub mod style;
 
 pub use buffer::{diff, Buffer, Region};
@@ -37,4 +40,5 @@ pub use cursor::{Cursor, CursorShape};
 pub use layout::LayoutEngine;
 pub use rect::{Rect, Size};
 pub use scene::{NodeId, NodeKind, PropMap, PropValue, Scene, SceneNode, Span};
+pub use semantics::{SemanticsNode, SemanticsRole, SemanticsState};
 pub use style::{BorderStyle, Modifiers, Style, UnderlineStyle};
