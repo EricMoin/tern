@@ -332,6 +332,7 @@ Each demo renders a scene, asserts it against the scene tree, and quits on
 
 - [docs/guide.md](docs/guide.md) — getting started, component API reference, event model, theme usage
 - [docs/api/](docs/api/index.html) — generated API reference for `@tern-tui/core` / `@tern-tui/react` / `@tern-tui/solid` (build: `deno task docs:api`)
+- [docs/api-stability.md](docs/api-stability.md) — public API inventory and the 1.0 freeze boundary (M5.1)
 - [docs/architecture.md](docs/architecture.md) — render pipeline and repository conventions
 - [docs/components.md](docs/components.md) — code-agent component roadmap and status
 - [CHANGELOG.md](CHANGELOG.md) — release history

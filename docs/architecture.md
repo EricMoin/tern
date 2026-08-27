@@ -2,7 +2,8 @@
 
 tern is a terminal UI (TUI) renderer with a Fuchsia-style monorepo layout.
 A JavaScript reconciler drives a Rust rendering pipeline; the terminal is the
-output device.
+output device. The public API inventory and its 1.0 freeze boundary live in
+[api-stability.md](api-stability.md).
 
 ## Data Flow
 
