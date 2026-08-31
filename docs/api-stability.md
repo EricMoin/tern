@@ -561,9 +561,9 @@ interfaces are the user-facing API → stable; (4) dispose\*/subscribe\* wiring
 helpers default to experimental (M3-era focus wiring), promoted to stable only
 as pure pass-throughs of core-stable symbols (no solid-local state or control
 flow beyond a trivial conditional repaint); (5) option/type interfaces follow
-the stability of what they type; (6) deprecation-candidate: none. Counts: 170
-total — **140 stable**, **25 experimental**, **5 internal**, **0
-deprecation-candidate** (167 from `index.ts` across 64 `^export` lines + 3 from
+the stability of what they type; (6) deprecation-candidate: `renderer` (M5.2,
+see hand-off below). Counts: 170 total — **140 stable**, **24 experimental**,
+**5 internal**, **1 deprecation-candidate** (167 from `index.ts` across 64
 `universal.ts`).
 
 #### A. Package metadata — `index.ts`
@@ -702,25 +702,25 @@ All **stable** — core-stable theme type surface.
 | `ThemeRoleColors` | type | index.ts:296 | stable |
 | `ThemeStylePreset` | type | index.ts:297 | stable |
 
-#### E. Universal-renderer surface — `index.ts:525-564`
+#### E. Universal-renderer surface — `index.ts:526-579`
 
 | Symbol | Kind | Source | Stability | Rationale |
 |---|---|---|---|---|
-| `replaceNode` | function | index.ts:525 | internal | Position-accurate in-parent replacement convenience mirroring solid-js' internal `insertNode`+`removeNode` sequence. NOT a `RendererOptions` key (v1.9.14 has no `replaceNode`) and not user-facing tern API. |
-| `rendererOptions` | const (alias of `options`) | index.ts:549 | internal | The `RendererOptions` object wired into `createRenderer`; exported so tests and embedders can exercise the tree-op callbacks (`replaceText`, `isTextNode`, `setProperty`, anchor `insertNode`, traversal) not reachable on the renderer surface. |
-| `renderer` | const | index.ts:551 | experimental | The configured `UniversalRenderer<Node>` instance. Reachable by embedders, but the documented mount path is the destructured primitives; freeze boundary deferred. |
-| `render` | const | index.ts:553 | experimental | Universal-renderer mount primitive — SolidJS users legitimately reach it to mount scenes; part of the renderer contract rather than the tern component API. |
-| `insert` | const | index.ts:554 | experimental | Reactive insertion primitive (solid-js universal contract). |
-| `spread` | const | index.ts:555 | experimental | Props/children spread primitive (solid-js universal contract). |
-| `createElement` | const | index.ts:556 | experimental | Tag → tern node factory dispatch primitive. |
-| `createTextNode` | const | index.ts:557 | experimental | Text-leaf creation primitive. |
-| `insertNode` | const | index.ts:558 | experimental | Tree-op callback (anchor insertion). |
-| `setProp` | const | index.ts:559 | experimental | Property write primitive (funnels into `Node.setProps` via the options' `setProperty`). |
-| `mergeProps` | const | index.ts:560 | experimental | solid-js prop-merge primitive. |
-| `effect` | const | index.ts:561 | experimental | Reactive effect primitive (`createRenderEffect`). |
-| `memo` | const | index.ts:562 | experimental | Reactive memo primitive. |
-| `createComponent` | const | index.ts:563 | experimental | Component-creation primitive. |
-| `use` | const | index.ts:564 | experimental | `untrack`-based directive primitive. |
+| `replaceNode` | function | index.ts:526 | internal | Position-accurate in-parent replacement convenience mirroring solid-js' internal `insertNode`+`removeNode` sequence. NOT a `RendererOptions` key (v1.9.14 has no `replaceNode`) and not user-facing tern API. |
+| `rendererOptions` | const (alias of `options`) | index.ts:551 | internal | The `RendererOptions` object wired into `createRenderer`; exported so tests and embedders can exercise the tree-op callbacks (`replaceText`, `isTextNode`, `setProperty`, anchor `insertNode`, traversal) not reachable on the renderer surface. |
+| `renderer` | const | index.ts:562 | deprecation-candidate | Superseded by the destructured mount primitives (`render`, `insert`, `spread`, `createElement`, `createTextNode`, `insertNode`, `setProp`, `mergeProps`, `effect`, `memo`, `createComponent`, `use`); M5.2 deprecation decision, removal scheduled for 0.4.0. |
+| `render` | const | index.ts:568 | experimental | Universal-renderer mount primitive — SolidJS users legitimately reach it to mount scenes; part of the renderer contract rather than the tern component API. |
+| `insert` | const | index.ts:569 | experimental | Reactive insertion primitive (solid-js universal contract). |
+| `spread` | const | index.ts:570 | experimental | Props/children spread primitive (solid-js universal contract). |
+| `createElement` | const | index.ts:571 | experimental | Tag → tern node factory dispatch primitive. |
+| `createTextNode` | const | index.ts:572 | experimental | Text-leaf creation primitive. |
+| `insertNode` | const | index.ts:573 | experimental | Tree-op callback (anchor insertion). |
+| `setProp` | const | index.ts:574 | experimental | Property write primitive (funnels into `Node.setProps` via the options' `setProperty`). |
+| `mergeProps` | const | index.ts:575 | experimental | solid-js prop-merge primitive. |
+| `effect` | const | index.ts:576 | experimental | Reactive effect primitive (`createRenderEffect`). |
+| `memo` | const | index.ts:577 | experimental | Reactive memo primitive. |
+| `createComponent` | const | index.ts:578 | experimental | Component-creation primitive. |
+| `use` | const | index.ts:579 | experimental | `untrack`-based directive primitive. |
 
 #### F. Element factories — `index.ts:579-1185` (20)
 
@@ -814,8 +814,8 @@ contract, not user-facing tern API.
 | `Renderer<NodeType>` | interface | universal.ts:52 | internal | Vendored solid-js `Renderer` contract type. Distinct from the `@tern-tui/core` `Renderer` re-exported at index.ts:196. |
 | `RendererOptions<NodeType>` | interface | universal.ts:39 | internal | Vendored `RendererOptions` contract type (canonical 1.9.14 key set). |
 
-**Totals (solid):** 170 symbols — **140 stable**, **25 experimental**, **5
-internal**, **0 deprecation-candidate**.
+**Totals (solid):** 170 symbols — **140 stable**, **24 experimental**, **5
+internal**, **1 deprecation-candidate**.
 
 ### 4. napi backside — `src/bindings/tern-node/index.d.ts` (53 surface items)
 
@@ -969,7 +969,7 @@ above** (198 core + 134 react + 140 solid + 47 napi). Composition:
   (`create_node`, `highlight`) pinned transitively by core's `Node`/`highlightCode`
   materialization.
 
-### Stays experimental (opt-out, may break in minor — 86 symbols)
+### Stays experimental (opt-out, may break in minor — 85 symbols)
 
 Not part of the 1.0 promise. Consumers opt in at their own risk; the surface may
 change or move within 0.x and may break in a minor. Per surface:
@@ -993,8 +993,8 @@ change or move within 0.x and may break in a minor. Per surface:
   `SparklineProps`, `Sparkline`), and the runtime theme engine (2: `setTheme`,
   `getTheme`). These wrap core surfaces that have never seen a release; freeze
   only after a release cycle proves the contracts.
-- **`@tern-tui/solid` (25)** — the universal-renderer mount surface (13:
-  `renderer`, `render`, `insert`, `spread`, `createElement`, `createTextNode`,
+- **`@tern-tui/solid` (24)** — the universal-renderer mount surface (12:
+  `render`, `insert`, `spread`, `createElement`, `createTextNode`,
   `insertNode`, `setProp`, `mergeProps`, `effect`, `memo`, `createComponent`,
   `use`), the behavior-bearing M3-era wiring helpers (7: `subscribeInput`,
   `subscribeFocusTraversal`, `subscribePaste`, `subscribeResize`,
@@ -1031,11 +1031,15 @@ or reorganized without notice or deprecation. Per surface:
 
 ### Deprecation-candidate hand-off (M5.2 input)
 
-**The hand-off list is empty: 0 symbols across all four surfaces.** No
-`@deprecated` marker exists in any audited file, and no symbol is superseded by
-a newer API — every non-seam export is current, and all test/reconciler seams
-are tagged `internal` (excluded) rather than deprecated. There are therefore no
-replacement names to record.
+**The hand-off list contains 1 symbol across all four surfaces.** The
+`@tern-tui/solid` `renderer` export (index.ts:562) — the configured
+`UniversalRenderer<Node>` instance — is superseded by the destructured mount
+primitives (`render`, `insert`, `spread`, `createElement`, `createTextNode`,
+`insertNode`, `setProp`, `mergeProps`, `effect`, `memo`, `createComponent`,
+`use`) and is scheduled for removal in **0.4.0**. It carries the only
+`@deprecated` marker found in any audited file; every other non-seam export is
+current, and all test/reconciler seams are tagged `internal` (excluded) rather
+than deprecated.
 
 The M5.2 deprecation lifecycle (deprecate → warn → remove, ≥ 1 minor cycle,
 per the roadmap) should nevertheless seed its first walk-through from the
@@ -1043,13 +1047,13 @@ forward-looking watch items this audit surfaced:
 
 | Watch item | Symbols at risk | When it becomes a candidate | Candidate replacement |
 |------------|-----------------|-----------------------------|------------------------|
-| Solid universal-renderer mount surface (experimental) | `render`, `insert`, `spread`, `createElement`, `createTextNode`, `insertNode`, `setProp`, `mergeProps`, `effect`, `memo`, `createComponent`, `use`, `renderer` | If the 1.0 freeze narrows the official mount API to a `render`-only contract | A narrower documented mount API (e.g. `render` only), named at M5.2/M5.7 decision time |
+| Solid universal-renderer mount surface (experimental) | `render`, `insert`, `spread`, `createElement`, `createTextNode`, `insertNode`, `setProp`, `mergeProps`, `effect`, `memo`, `createComponent`, `use` | If the 1.0 freeze narrows the official mount API to a `render`-only contract | A narrower documented mount API (e.g. `render` only), named at M5.2/M5.7 decision time (`renderer` moved to deprecation-candidate in M5.2 — see hand-off above) |
 | Solid behavior-bearing wiring helpers (experimental) | `subscribeInput`, `subscribeFocusTraversal`, `subscribePaste`, `subscribeResize`, `subscribePanelDrag`, `subscribeMenuMouse`, `subscribeSelection` | If the 1.0 freeze narrows them (they carry solid-local behavior M5.1 declined to freeze) | None named yet — decision deferred |
 | napi `IncrementalHighlighter` / `HighlightAppendJs` (experimental) | `IncrementalHighlighter` (constructor/`append`/`reset`), `HighlightAppendJs` | If the markdown streaming path is reworked before 1.0 | None — not part of the re-export contract |
 
-These are **not** deprecation candidates today — they are experimental surface
-M5.2 should re-check when the freeze narrows. M5.2 must not run a deprecation
-cycle on any of them without a new decision.
+The remaining watch items above are **not** deprecation candidates today — they
+are experimental surface M5.2 should re-check when the freeze narrows. M5.2
+must not run a deprecation cycle on any of them without a new decision.
 
 ### Cross-surface reconciliation
 

@@ -46,6 +46,12 @@ deviations require user approval.
 4. **Golden buffers.** Golden buffer tests are the fact standard for
    rendering correctness. Any change to rendering must update or add the
    corresponding golden.
+5. **Deprecation & API stability.** Any public-API change must check
+   [docs/api-stability.md](docs/api-stability.md) and
+   [docs/api-lifecycle.md](docs/api-lifecycle.md). New exports enter
+   experimental with `@since`; removals go through the deprecation cycle
+   (≥ 1 minor, never silent); tier changes update the inventory table, the
+   CHANGELOG, and the boundary-change section.
 
 ## Building the native addon
 
