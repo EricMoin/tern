@@ -83,6 +83,7 @@ import {
   type Renderer as UniversalRenderer,
   type RendererOptions,
 } from "./universal.ts";
+import { deprecatedValue } from "./deprecate.ts";
 // @deno-types="../../../node_modules/solid-js/types/index.d.ts"
 import { createSignal } from "solid-js";
 import {
@@ -532,11 +533,12 @@ export function replaceNode(node: Node, replacedNode: Node): void {
 }
 
 /**
- * The configured universal renderer. `render(code, node)` mounts a scene under
- * `node`; the destructured primitives below are the standard custom-renderer
- * surface (same shape solid-js/universal exports for its own DOM renderer).
+ * The raw universal renderer instance (`render(code, node)` mounts a scene
+ * under `node`). Internal: the public `renderer` export below proxies this
+ * instance with a one-time deprecation warning, and the destructured
+ * primitives read it directly so internal code never warns.
  */
-const renderer: UniversalRenderer<Node> = createRenderer(options);
+const rendererInstance: UniversalRenderer<Node> = createRenderer(options);
 
 /**
  * The `RendererOptions` object wired into `createRenderer` above, exported so
@@ -548,20 +550,33 @@ const renderer: UniversalRenderer<Node> = createRenderer(options);
  */
 export { options as rendererOptions };
 
-export { renderer };
+/**
+ * The configured universal renderer. `render(code, node)` mounts a scene under
+ * `node`; the destructured primitives are the standard custom-renderer surface.
+ *
+ * @deprecated Use the destructured primitives instead: `render`, `insert`,
+ * `spread`, `createElement`, `createTextNode`, `insertNode`, `setProp`,
+ * `mergeProps`, `effect`, `memo`, `createComponent`, `use`; removal in 0.4.0.
+ * @since 0.1.0
+ */
+export const renderer: UniversalRenderer<Node> = deprecatedValue(
+  rendererInstance,
+  "renderer",
+  "[tern] renderer is deprecated; use the destructured primitives (render/insert/spread/createElement/createTextNode/insertNode/setProp/mergeProps/effect/memo/createComponent/use) instead (removal scheduled for 0.4.0).",
+);
 
-export const render: UniversalRenderer<Node>["render"] = renderer.render;
-export const insert: UniversalRenderer<Node>["insert"] = renderer.insert;
-export const spread: UniversalRenderer<Node>["spread"] = renderer.spread;
-export const createElement: UniversalRenderer<Node>["createElement"] = renderer.createElement;
-export const createTextNode: UniversalRenderer<Node>["createTextNode"] = renderer.createTextNode;
-export const insertNode: UniversalRenderer<Node>["insertNode"] = renderer.insertNode;
-export const setProp: UniversalRenderer<Node>["setProp"] = renderer.setProp;
-export const mergeProps: UniversalRenderer<Node>["mergeProps"] = renderer.mergeProps;
-export const effect: UniversalRenderer<Node>["effect"] = renderer.effect;
-export const memo: UniversalRenderer<Node>["memo"] = renderer.memo;
-export const createComponent: UniversalRenderer<Node>["createComponent"] = renderer.createComponent;
-export const use: UniversalRenderer<Node>["use"] = renderer.use;
+export const render: UniversalRenderer<Node>["render"] = rendererInstance.render;
+export const insert: UniversalRenderer<Node>["insert"] = rendererInstance.insert;
+export const spread: UniversalRenderer<Node>["spread"] = rendererInstance.spread;
+export const createElement: UniversalRenderer<Node>["createElement"] = rendererInstance.createElement;
+export const createTextNode: UniversalRenderer<Node>["createTextNode"] = rendererInstance.createTextNode;
+export const insertNode: UniversalRenderer<Node>["insertNode"] = rendererInstance.insertNode;
+export const setProp: UniversalRenderer<Node>["setProp"] = rendererInstance.setProp;
+export const mergeProps: UniversalRenderer<Node>["mergeProps"] = rendererInstance.mergeProps;
+export const effect: UniversalRenderer<Node>["effect"] = rendererInstance.effect;
+export const memo: UniversalRenderer<Node>["memo"] = rendererInstance.memo;
+export const createComponent: UniversalRenderer<Node>["createComponent"] = rendererInstance.createComponent;
+export const use: UniversalRenderer<Node>["use"] = rendererInstance.use;
 
 /**
  * Create a `box` scene node through the solid renderer. Props (including

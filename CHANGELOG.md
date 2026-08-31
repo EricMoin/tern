@@ -35,6 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fg` exactly as before — additive and opt-in, so existing scenes paint
   byte-identically.
 
+### Deprecated
+
+- **`@tern-tui/solid` `renderer` export deprecated** — use the destructured
+  renderer primitives (`render`/`insert`/`spread`/`createElement`/
+  `createTextNode`/`insertNode`/`setProp`/`mergeProps`/`effect`/`memo`/
+  `createComponent`/`use`) instead; deprecated in 0.3.0, scheduled for removal
+  in 0.4.0 (≥1 minor cycle, per `docs/api-lifecycle.md`).
+
 ## [0.2.0] - 2026-08-10
 
 ### Added

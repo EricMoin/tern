@@ -75,7 +75,6 @@ import {
   type Renderer,
   type Theme,
   type TreeNode,
-  renderer,
   rendererOptions,
   replaceNode,
   render,
@@ -222,8 +221,8 @@ Deno.test("renderer exposes the universal primitive surface", () => {
       throw new Error("expected a renderer primitive function, got " + typeof fn);
     }
   }
-  if (typeof renderer.render !== "function") {
-    throw new Error("renderer.render must be a function");
+  if (typeof render !== "function") {
+    throw new Error("render must be a function");
   }
 });
 
