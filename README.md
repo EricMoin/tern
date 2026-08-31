@@ -1,5 +1,7 @@
 # tern
 
+![tern](assets/tern-lockup.svg)
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.94](https://img.shields.io/badge/rust-1.94-orange)](rust-toolchain.toml)
 [![CI](https://github.com/EricMoin/tern/actions/workflows/ci.yml/badge.svg)](https://github.com/EricMoin/tern/actions/workflows/ci.yml)
