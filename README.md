@@ -1,10 +1,18 @@
 # tern
 
-![tern](assets/tern-lockup.svg)
+<p align="center">
+  <img src="assets/tern-lockup.svg" alt="tern" width="300">
+</p>
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust 1.94](https://img.shields.io/badge/rust-1.94-orange)](rust-toolchain.toml)
-[![CI](https://github.com/EricMoin/tern/actions/workflows/ci.yml/badge.svg)](https://github.com/EricMoin/tern/actions/workflows/ci.yml)
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/rust-1.94-orange" alt="Rust 1.94"></a>
+  <a href="https://github.com/EricMoin/tern/actions/workflows/ci.yml"><img src="https://github.com/EricMoin/tern/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://www.npmjs.com/package/@tern-tui/core"><img src="https://img.shields.io/npm/v/@tern-tui/core" alt="npm"></a>
+  <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen" alt="Node >= 20"></a>
+  <a href="https://www.typescriptlang.org"><img src="https://img.shields.io/badge/types-TypeScript-blue" alt="TypeScript"></a>
+  <a href="https://www.npmjs.com/package/@tern-tui/core"><img src="https://img.shields.io/npm/dm/@tern-tui/core" alt="Downloads"></a>
+</p>
 
 **Build rich terminal UIs for code agents with React or SolidJS, rendered by a
 Rust-native engine.**
