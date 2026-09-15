@@ -25,6 +25,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       js: ${{ steps.filter.outputs.js }}
       smoke: ${{ steps.filter.outputs.smoke }}
+      showcase: ${{ steps.filter.outputs.showcase }}
     steps:
       - uses: actions/checkout@v7
 
@@ -46,6 +47,8 @@ jobs:
             smoke:
               - 'src/bindings/tern-node/**'
               - 'packages/examples/**'
+            showcase:
+              - 'packages/showcase/**'
 
   # Single-file line cap (CONTRIBUTING.md §3 "文件行数"). No path filter and no
   # changes gate: the rule spans Rust and JS alike, the job costs a couple of
@@ -178,7 +181,7 @@ jobs:
       # resolves the locally-installed compiler after `npm install`. Each
       # package's tsconfig extends tsconfig.base.json at the repo root.
       - name: Type check (tsc)
-        run: npx tsc -p packages/core && npx tsc -p packages/react && npx tsc -p packages/solid && npx tsc -p packages/examples
+        run: npx tsc -p packages/core && npx tsc -p packages/react && npx tsc -p packages/solid && npx tsc -p packages/examples && npx tsc -p packages/showcase
 
       - name: Type check (deno check)
         run: npm run check
@@ -267,6 +270,73 @@ jobs:
       # above), after run-smoke.sh, on the same change set.
       - name: tmux e2e (run-e2e-tmux.sh)
         run: bash packages/examples/run-e2e-tmux.sh
+
+  app-e2e:
+    # Interactive showcase editor, end-to-end (M6). The editor in
+    # packages/showcase is tern's first real consumer — private, in-repo, never
+    # published. run-e2e-tmux.sh drives it inside a real tmux session and
+    # asserts the rendered screen, so this job runs on macOS for the same
+    # reason the smoke job does: it needs a real terminal, and the native
+    # tern-node addon the editor loads at runtime is built here.
+    name: App e2e (showcase editor, macOS)
+    runs-on: macos-latest
+    needs: changes
+    if: needs.changes.outputs.showcase == 'true'
+    steps:
+      - uses: actions/checkout@v7
+
+      # napi build compiles the binding via cargo, so the pinned Rust
+      # toolchain is required. rustflags is cleared to match a local build.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+          # Cargo caching is handled by Swatinem/rust-cache below; disabling
+          # the built-in cache (default on) avoids two overlapping cache
+          # entries for the same cargo registry and target dirs.
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          # Hash every package-lock.json in the repo so both the root
+          # `npm install` and the tern-node addon `npm install` below share one
+          # npm cache keyed on all lockfiles.
+          cache-dependency-path: "**/package-lock.json"
+
+      # The editor and its e2e harness run under deno (deno-first).
+      - uses: denoland/setup-deno@v2
+        with:
+          cache: true
+
+      # npm install (not npm ci): the root workspace includes
+      # src/bindings/tern-node, whose tern-node-<platform> optional
+      # dependencies are not yet on the registry, so the lockfile cannot pin
+      # them and npm ci's sync check would fail (CONTRIBUTING.md, "Building
+      # the native addon").
+      - name: Install JS dependencies
+        run: npm install
+
+      # DEBUG addon (npm run build:debug), exactly as the smoke job builds it:
+      # this gate asserts behaviour, not throughput, so compile time wins.
+      - name: Build tern-node addon
+        working-directory: src/bindings/tern-node
+        run: |
+          npm install
+          npm run build:debug
+
+      # tmux is NOT guaranteed on GitHub-hosted runner images, so install it
+      # deterministically; `tmux -V` verifies the install (the job fails if
+      # brew could not provide it).
+      - name: Install tmux
+        run: |
+          brew install tmux
+          tmux -V
+
+      - name: App e2e (run-e2e-tmux.sh)
+        run: bash packages/showcase/run-e2e-tmux.sh
 
   napi-build:
     # Multi-platform native addon strategy (napi-rs distribution model):

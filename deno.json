@@ -3,7 +3,8 @@
     "./packages/core",
     "./packages/react",
     "./packages/solid",
-    "./packages/examples"
+    "./packages/examples",
+    "./packages/showcase"
   ],
   "imports": {
     "@tern-tui/core": "./packages/core/src/index.ts"
