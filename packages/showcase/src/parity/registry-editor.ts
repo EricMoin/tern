@@ -37,7 +37,8 @@ export type LayerId = "core" | "react" | "solid";
 /** The screens the plan knows. A registry entry belongs to exactly one. */
 export type ScreenId =
   | "editor" | "sidebar" | "chooser" | "find" | "replace" | "help"
-  | "preview" | "profile" | "minimap" | "a11y" | "parity" | "shell";
+  | "preview" | "profile" | "minimap" | "a11y" | "parity" | "shell"
+  | "palette" | "preferences" | "theme" | "diff";
 
 /** How a framework gap stands today. */
 export type Classification = "real" | "already shipped" | "partially shipped";
@@ -112,6 +113,7 @@ export const LAYERS: readonly LayerId[] = ["core", "react", "solid"];
 export const SCREENS: readonly ScreenId[] = [
   "editor", "sidebar", "chooser", "find", "replace", "help",
   "preview", "profile", "minimap", "a11y", "parity", "shell",
+  "palette", "preferences", "theme", "diff",
 ];
 /** The three layers, for the entries every emitter paints. */
 export const ALL_LAYERS: readonly LayerId[] = ["core", "react", "solid"];

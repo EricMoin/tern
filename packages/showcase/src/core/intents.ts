@@ -13,13 +13,16 @@ import type { KeyEvent } from "@tern-tui/core";
 import type { Position } from "./buffer.ts";
 import type { PointerIntent, PointerContext, ScrollIntent } from "./events.ts";
 import type { Motion, MotionContext } from "./motions.ts";
+import type { AuxPaneId } from "./pane-ids.ts";
 import type { PlanFocus } from "./plan.ts";
 import type { TextEdit } from "./search.ts";
 import type { Selection, SelectionUnit } from "./selection.ts";
 
 /** The modal overlays the command layer knows about. They are part of what a key
- * MEANS — `escape` in the find overlay is not `escape` in the editor. */
-export type ModalId = "find" | "replace" | "help";
+ * MEANS — `escape` in the find overlay is not `escape` in the editor. The
+ * auxiliary panes (pane-ids.ts) are overlays too: while one is on top it owns the
+ * keyboard exactly as the find overlay does. */
+export type ModalId = "find" | "replace" | "help" | AuxPaneId;
 
 /** What a command asks the DOCUMENT to do. `state.ts` applies these through its
  * ONE splice, which keeps the line index and the wrap cache in step. */
@@ -34,6 +37,10 @@ export type DocumentIntent =
 export type SearchAction =
   | "open" | "close" | "append" | "backspace"
   | "next" | "previous" | "replace-open";
+
+/** What a command asks an auxiliary pane to do (panes.ts owns the state). */
+export type PaneAction =
+  | "prev" | "next" | "activate" | "filter-append" | "filter-backspace" | "a11y-toggle";
 
 /** What a command asks the APPLICATION's own state to do — no document change. */
 export type AppIntent =
@@ -50,6 +57,7 @@ export type AppIntent =
   | { kind: "buffer"; action: "new" | "close" | "next" | "previous" }
   | { kind: "wrap"; on: boolean }
   | { kind: "gutter"; on: boolean }
+  | { kind: "pane"; action: PaneAction; text?: string }
   | { kind: "file"; action: "save" | "open" | "new" }
   | { kind: "quit" }
   | PointerIntent

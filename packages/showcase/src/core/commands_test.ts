@@ -25,7 +25,7 @@ const KINDS = new Set([
   "insert", "delete", "replace-all",
   "move", "cursor", "select", "select-all", "clear-selection", "history",
   "search", "modal", "focus", "sidebar", "file", "quit",
-  "buffer", "wrap", "gutter",
+  "buffer", "wrap", "gutter", "pane",
   "pointer", "scroll",
 ]);
 

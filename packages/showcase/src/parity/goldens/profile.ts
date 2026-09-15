@@ -1,8 +1,9 @@
-//! Screen "profile" — a tall, wide screen over many short rows.
+//! Screen "profile" — the render-profile pane and its frame-time chart.
 //!
-//! Regime: SIZE. 29 editor rows at 100 columns over 40 short rows, so the mode line's
-//! right group sits far from its left group. Anchors: core-table-profile,
-//! core-charts-profile.
+//! Regime: the profile pane charts the frames the app really built (the clock is
+//! injected so the record is stable; the app still times its own buildPlan). A
+//! tall wide screen with the overlay over many short rows. Anchors:
+//! core-table-profile, core-charts-profile.
 
 import type { ScreenPlan } from "../../core/plan.ts";
 import { key, referencePlan, type Fixture } from "./fixture.ts";
@@ -13,13 +14,14 @@ const DOC = Array.from({ length: 40 }, (_, index) =>
 /** The screen's fixed scenario. */
 export const FIXTURE: Fixture = {
   screen: "profile",
-  regime: "a tall wide screen: 29 editor rows over 40 short rows, mode-line segments at both edges",
+  regime: "the render-profile pane over 40 short rows: a chart of the frames measured in-process",
   anchors: ["core-table-profile", "core-charts-profile"],
-  pending: "the render-profile pane does not exist in the app-core yet; the regime it reads — many short rows on a tall screen, with the cost samples the plan reports in stats — is what this fixture pins",
+  pending: null,
   size: { rows: 30, cols: 100 },
   path: "demo/profile.ts",
   text: DOC,
-  drive: { kind: "app", keys: [key("down"), key("down"), key("down")] },
+  clock: [0, 2, 2, 5, 5, 9, 9, 14, 14, 20, 20, 27],
+  drive: { kind: "app", keys: [key("r", { alt: true })] },
 };
 
 /** The ScreenPlan the REAL core produced for {@link FIXTURE}: one HeadlessApp

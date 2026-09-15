@@ -4,7 +4,7 @@ import type { RecordedBuffer } from "../record.ts";
 export const BUFFER: RecordedBuffer = {
   screen: "help",
   layer: "react",
-  planFingerprint: "abee5bef",
+  planFingerprint: "b34cfb8f",
   recordedBy: "t13 react layer (layers/react/record.ts)",
   rows: [
     "export function help(): void {}                             ",
@@ -20,7 +20,7 @@ export const BUFFER: RecordedBuffer = {
     "           │       end  Move line end          │            ",
     "           │   ctrl+up  Move paragraph backward│            ",
     "           │ ctrl+down  Move paragraph forward │            ",
-    "           │44 shortcuts                       │            ",
+    "           │51 shortcuts                       │            ",
     "           └───────────────────────────────────┘            ",
     "                                                            ",
     "                                                            ",

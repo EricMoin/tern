@@ -17,6 +17,7 @@ import type { CommandContext, ModalId } from "./intents.ts";
 import { modalInputFor } from "./modals.ts";
 import type { OverlayState } from "./overlay.ts";
 import { buildPlan, type PlanFocus, type ScreenPlan, type SidebarInput, type TabsInput } from "./plan.ts";
+import type { PaneState } from "./panes.ts";
 import type { ModalInput } from "./plan-modals.ts";
 import type { Selection } from "./selection.ts";
 import type { ViewportSize } from "./viewport.ts";
@@ -42,6 +43,10 @@ export interface PlanSource {
   readonly tabs: TabsInput | undefined;
   readonly overlay: OverlayState;
   readonly keymap: Keymap;
+  /** The auxiliary panes' own state; their overlay content is built from it. */
+  readonly panes: PaneState;
+  /** The file list the picker filters (the sidebar's own items). */
+  readonly files: readonly string[];
 }
 
 /** The screen plan for `source` — the app's one call into `plan.ts`. */
@@ -118,5 +123,7 @@ function modalInput(source: PlanSource): ModalInput | null {
     replacement: source.overlay.replacement,
     caseSensitive: source.overlay.search.caseSensitive,
     shortcuts: source.keymap.list(),
+    panes: source.panes,
+    files: source.files,
   });
 }

@@ -42,6 +42,9 @@ export function holds(region: PlanRegion, cell: Position): boolean {
  * item. */
 export type PointerTarget =
   | { readonly pane: "modal" }
+  /** The 1-cell split between the file list and the editor — the panel drag
+   * handle (panels.ts, the registry's core-panels-split). */
+  | { readonly pane: "gutter" }
   | { readonly pane: "sidebar"; readonly index: number }
   | { readonly pane: "editor"; readonly position: Position };
 
@@ -63,9 +66,16 @@ export function resolvePointer(
   const modal = modalOf(plan);
   if (modal !== null && holds(modal, cell)) return { pane: "modal" };
   const sidebar = sidebarOf(plan);
-  if (sidebar !== null && holds(sidebar, cell)) {
-    const item = sidebar.items.find((entry) => entry.screenRow === cell.row - sidebar.y);
-    return { pane: "sidebar", index: item?.index ?? -1 };
+  if (sidebar !== null) {
+    if (holds(sidebar, cell)) {
+      const item = sidebar.items.find((entry) => entry.screenRow === cell.row - sidebar.y);
+      return { pane: "sidebar", index: item?.index ?? -1 };
+    }
+    // The split's own cell: the editor's first column on a body row the list shares
+    // with it. A press or drag here resizes the split rather than placing a caret.
+    if (cell.col === sidebar.x + sidebar.width && cell.row >= sidebar.y && cell.row < sidebar.y + sidebar.height) {
+      return { pane: "gutter" };
+    }
   }
   const editor = editorOf(plan);
   if (editor === null || !holds(editor, cell)) return null; // the mode line, or dead space

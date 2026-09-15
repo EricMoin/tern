@@ -27,11 +27,13 @@ import {
   replaceEdit,
   type TextEdit,
 } from "./search.ts";
+import { isAuxPane } from "./pane-ids.ts";
 import { expandSelection, ordered, type Selection, type SelectionUnit } from "./selection.ts";
 import type {
   CommandContext,
   Handler,
   Intent,
+  PaneAction,
 } from "./intents.ts";
 import type { PointerIntent } from "./events.ts";
 
@@ -42,6 +44,7 @@ export type {
   Handler,
   Intent,
   ModalId,
+  PaneAction,
   SearchAction,
   SearchContext,
 } from "./intents.ts";
@@ -78,6 +81,8 @@ export type CommandId =
   | "wrap-toggle" | "gutter-toggle"
   | "sidebar-toggle" | "sidebar-up" | "sidebar-down" | "sidebar-activate"
   | "focus-toggle" | "help"
+  | "picker-open" | "palette-open" | "preferences-open" | "theme-open"
+  | "profile-open" | "diff-open" | "a11y-toggle"
   | "pointer-press" | "pointer-drag" | "pointer-double-click" | "wheel-scroll"
   | "paste"
   | MotionCommandId;
@@ -156,6 +161,16 @@ const BINDINGS: ReadonlyArray<readonly [CommandId, string, KeyCombo?]> = [
   ["sidebar-activate", "Open the highlighted file"],
   ["focus-toggle", "Switch pane", { name: "tab", ctrl: true }],
   ["help", "Keyboard shortcuts", { name: "f1" }],
+  // The auxiliary panes (panes.ts): overlays the command table raises. Their own
+  // navigation reuses up/down/enter, which the handlers below route to the pane
+  // while one is open, so no second key vocabulary exists.
+  ["picker-open", "Open the file picker", { name: "p", ctrl: true }],
+  ["palette-open", "Command palette", { name: "p", ctrl: true, shift: true }],
+  ["preferences-open", "Preferences", { name: "p", alt: true }],
+  ["theme-open", "Theme audit", { name: "t", alt: true }],
+  ["profile-open", "Render profile", { name: "r", alt: true }],
+  ["diff-open", "External change diff", { name: "d", alt: true }],
+  ["a11y-toggle", "Toggle the a11y stream", { name: "a", alt: true }],
   // Reached by the mouse, the wheel and the terminal's paste, never by a combo —
   // which is what `Command.key` being optional is for. A combo-less command is
   // dispatch-only: `registerCommands` (keymap.ts:50-67) registers it nowhere.
@@ -165,8 +180,21 @@ const BINDINGS: ReadonlyArray<readonly [CommandId, string, KeyCombo?]> = [
   ["wheel-scroll", "Scroll the view"],
   ["paste", "Paste the clipboard"],
 ];
+/**
+ * The commands an OPEN auxiliary pane still lets through. Every other command is
+ * `null` while a pane is on top, so a key pressed at the picker can never reach the
+ * document behind it — the overlay owns the keyboard exactly as the find overlay does
+ * (the allowlist is what keeps that a single rule instead of a guard per handler).
+ */
+const PANE_COMMANDS: ReadonlySet<CommandId> = new Set<CommandId>([
+  "move-line-up", "move-line-down", "insert-newline", "insert-char", "backspace", "insert-tab",
+  "cancel", "focus-toggle",
+  "picker-open", "palette-open", "preferences-open", "theme-open", "profile-open", "diff-open", "a11y-toggle",
+]);
+
 /** Run `id` against `ctx` — the ONE place a command id becomes an Intent. */
 export function applyCommand(id: CommandId, ctx: CommandContext): Intent | null {
+  if (isAuxPane(ctx.modal) && !PANE_COMMANDS.has(id)) return null;
   return HANDLERS[id](ctx);
 }
 
@@ -208,6 +236,13 @@ function searching(ctx: CommandContext): boolean {
   return ctx.modal === "find" || ctx.modal === "replace";
 }
 
+/** The typeahead filter intent for an auxiliary pane, or `null` for a pane whose
+ * rows are not filtered — the picker and the palette are the two that type. */
+function filterAction(ctx: CommandContext, action: PaneAction, text: string | undefined): Intent | null {
+  if (ctx.modal !== "picker" && ctx.modal !== "palette") return null;
+  return text === undefined ? { kind: "pane", action } : { kind: "pane", action, text };
+}
+
 /** The delete intent for a range, or `null` when the range is empty — an empty
  * delete must not reach the buffer, because it would push an undo step that
  * undoes nothing. */
@@ -238,11 +273,18 @@ function removeBackward(ctx: CommandContext, motion: Motion): Intent | null {
 function motionHandlers(): { [K in MotionCommandId]: Handler } {
   const handlers = {} as { [K in MotionCommandId]: Handler };
   for (const motion of MOTION_IDS) {
-    handlers[`move-${motion}`] = (ctx) => ({
-      kind: "move",
-      motion,
-      extend: ctx.key.shift === true,
-    });
+    handlers[`move-${motion}`] = (ctx) => {
+      // An open auxiliary pane owns up/down: the same keys walk its rows rather
+      // than the document behind it. Every other motion is a no-op while it is open
+      // (applyCommand drops it anyway, but a direct applyCommand call must not move
+      // a caret the overlay is covering).
+      if (isAuxPane(ctx.modal)) {
+        if (motion === "line-up") return { kind: "pane", action: "prev" };
+        if (motion === "line-down") return { kind: "pane", action: "next" };
+        return null;
+      }
+      return { kind: "move", motion, extend: ctx.key.shift === true };
+    };
   }
   return handlers;
 }
@@ -258,21 +300,26 @@ const HANDLERS: Record<CommandId, Handler> = {
   "insert-char": (ctx) => {
     const text = typedCharacter(ctx.key);
     if (text === null) return null;
+    if (isAuxPane(ctx.modal)) return filterAction(ctx, "filter-append", text);
     return searching(ctx) ? { kind: "search", action: "append", text } : { kind: "insert", text };
   },
   // Enter in the replace overlay runs the whole replacement: the overlay has no
-  // per-match key of its own, and the query it inherited is the find's.
+  // per-match key of its own, and the query it inherited is the find's. In an
+  // auxiliary pane it activates the highlighted row.
   "insert-newline": (ctx) => {
+    if (isAuxPane(ctx.modal)) return { kind: "pane", action: "activate" };
     if (ctx.modal === "replace") return replaceEveryMatch(ctx);
     if (ctx.modal === "find") return { kind: "search", action: "next" };
     return { kind: "insert", text: "\n" };
   },
   "insert-tab": (ctx) =>
-    searching(ctx) ? null : { kind: "insert", text: "\t" },
-  "backspace": (ctx) =>
-    searching(ctx)
+    searching(ctx) || isAuxPane(ctx.modal) ? null : { kind: "insert", text: "\t" },
+  "backspace": (ctx) => {
+    if (isAuxPane(ctx.modal)) return filterAction(ctx, "filter-backspace", undefined);
+    return searching(ctx)
       ? { kind: "search", action: "backspace" }
-      : removeBackward(ctx, "char-backward"),
+      : removeBackward(ctx, "char-backward");
+  },
   "delete-forward": (ctx) =>
     ctx.selection !== null ? removeRange(ctx.selection) : removeMotion(ctx, "char-forward"),
   "delete-word-backward": (ctx) => removeBackward(ctx, "word-backward"),
@@ -286,6 +333,7 @@ const HANDLERS: Record<CommandId, Handler> = {
   "select-paragraph": selectUnit("paragraph"),
   "select-document": () => ({ kind: "select-all" }),
   "cancel": (ctx) => {
+    if (isAuxPane(ctx.modal)) return { kind: "modal", action: "pop" };
     if (ctx.modal === "help") return { kind: "modal", action: "pop" };
     if (searching(ctx)) return { kind: "search", action: "close" };
     if (ctx.selection !== null) return { kind: "clear-selection" };
@@ -313,6 +361,13 @@ const HANDLERS: Record<CommandId, Handler> = {
   "sidebar-activate": () => ({ kind: "sidebar", action: "activate" }),
   "focus-toggle": () => ({ kind: "focus", pane: "toggle" }),
   "help": () => ({ kind: "modal", action: "push", id: "help" }),
+  "picker-open": () => ({ kind: "modal", action: "push", id: "picker" }),
+  "palette-open": () => ({ kind: "modal", action: "push", id: "palette" }),
+  "preferences-open": () => ({ kind: "modal", action: "push", id: "preferences" }),
+  "theme-open": () => ({ kind: "modal", action: "push", id: "theme" }),
+  "profile-open": () => ({ kind: "modal", action: "push", id: "profile" }),
+  "diff-open": () => ({ kind: "modal", action: "push", id: "diff" }),
+  "a11y-toggle": () => ({ kind: "pane", action: "a11y-toggle" }),
   "pointer-press": (ctx) => pointerIntent(ctx, "press"),
   "pointer-drag": (ctx) => pointerIntent(ctx, "drag"),
   "pointer-double-click": (ctx) => pointerIntent(ctx, "double-click"),

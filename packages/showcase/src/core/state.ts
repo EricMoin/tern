@@ -9,7 +9,7 @@
 // The state is a pure function of (initial state, intent sequence): replay the
 // same intents and the same ScreenPlan comes out, with no napi addon and no PTY.
 
-import { Keymap, type KeyEvent } from "@tern-tui/core";
+import { A11yStream, getTheme, Keymap, setTheme, type KeyEvent } from "@tern-tui/core";
 import { Buffer, type Position } from "./buffer.ts";
 import {
   applyCommand,
@@ -17,6 +17,7 @@ import {
   type CommandId,
   type Intent,
   type ModalId,
+  type PaneAction,
   type SearchAction,
 } from "./commands.ts";
 import { BufferSet } from "./buffers.ts";
@@ -32,18 +33,47 @@ import {
 import { dispatchKey, registerCommands, type CommandHost } from "./keymap.ts";
 import { clampPosition, displayCellOf, type MotionContext } from "./motions.ts";
 import { OverlayState } from "./overlay.ts";
-import { type PlanFocus, type ScreenPlan } from "./plan.ts";
+import {
+  a11yDump,
+  closePane,
+  isAuxPane,
+  newPaneState,
+  nextTabWidth,
+  openPane,
+  paletteCommands,
+  paneRows,
+  pickerFiles,
+  recordA11yLine,
+  recordSample,
+  themeChoice,
+  THEMES,
+  type AuxPaneId,
+  type PaneContext,
+  type PaneState,
+} from "./panes.ts";
+import { MIN_EDITOR_COLS, type PlanFocus, type ScreenPlan } from "./plan.ts";
 import { appContext, buildAppPlan, type PlanSource } from "./app-plan.ts";
 import { editorOf, resolvePointer, sidebarOf } from "./pointer.ts";
-import { newSidebar, reduceSidebar, type SidebarState } from "./sidebar-pane.ts";
+import { newSidebar, reduceSidebar, sidebarLabels, type SidebarState } from "./sidebar-pane.ts";
 import { ordered, type Selection } from "./selection.ts";
 import type { ViewportSize } from "./viewport.ts";
 
 /** The screen an app with no host yet reports. */
 const DEFAULT_SIZE: ViewportSize = { rows: 24, cols: 80 };
 
+/** The narrowest the file list may be dragged (a marker and a few label cells). */
+const SIDEBAR_MIN_WIDTH = 4;
+
+/** The width a double-click on the split restores. */
+const SIDEBAR_DEFAULT_WIDTH = 20;
+
 /** The event a programmatic run carries: no name, no character, no modifiers. */
 const IDLE_KEY: KeyEvent = { name: "", ctrl: false, alt: false, shift: false };
+
+/** The frame clock the render-profile pane samples when the host injects none. */
+const defaultClock: () => number = typeof performance !== "undefined" && typeof performance.now === "function"
+  ? () => performance.now()
+  : () => Date.now();
 
 /** What the app asked the HOST to do — IO and exit. The core performs none of it,
  * so a save is a REQUEST the host drains. */
@@ -63,6 +93,13 @@ export interface AppOptions {
   sidebarVisible?: boolean;
   size?: ViewportSize;
   historyCap?: number;
+  /** The external text the host already read, shown by the diff pane. The core
+   * never reads a file: the host hands the text over and a command shows it. */
+  external?: string;
+  /** The frame clock the render-profile pane samples. Defaults to
+   * `performance.now`; a test injects a deterministic sequence so a recorded
+   * profile buffer is stable while still measuring real elapsed ticks. */
+  clock?: () => number;
 }
 
 /**
@@ -82,11 +119,21 @@ export class HeadlessApp implements CommandHost {
   #gutter = false;
   #effects: PendingEffect[] = [];
   #keymap: Keymap = new Keymap();
+  #panes: PaneState = newPaneState();
+  #clock: () => number;
+  #lastPlan: ScreenPlan | null = null;
+  #a11y: A11yStream | null = null;
+  /** Whether a split drag is in flight (started on the gutter, ended by a press
+   * anywhere else). The pointer vocabulary has no release event, so the next press
+   * is what ends it. */
+  #panelDrag = false;
 
   constructor(options: AppOptions = {}) {
     this.#buffers = new BufferSet(options.buffer ?? new Buffer(), options.path ?? null, options.historyCap);
     this.#size = { ...(options.size ?? DEFAULT_SIZE) };
     this.#sidebar = newSidebar(options);
+    this.#panes.external = options.external ?? null;
+    this.#clock = options.clock ?? defaultClock;
     registerCommands(this, this.#keymap);
   }
 
@@ -119,13 +166,32 @@ export class HeadlessApp implements CommandHost {
   get gutter(): boolean { return this.#gutter; }
   get bufferCount(): number { return this.#buffers.count; }
   get activeBuffer(): number { return this.#buffers.activeIndex; }
+  get panes(): Readonly<PaneState> { return this.#panes; }
+  /** The auxiliary pane on top, or null — the overlay stack's own answer, so the
+   * pane state and the modal stack cannot disagree about which pane is open. */
+  get paneId(): AuxPaneId | null {
+    const modal = this.modal;
+    return isAuxPane(modal) ? modal : null;
+  }
+
+  /** The external text the diff pane will compare against; `null` clears it.
+   * The host calls this after IT read a file — the core reads none. */
+  noteExternal(text: string | null): void {
+    this.#panes.external = text;
+  }
 
   /** The screen plan: the app's ONE call into `plan.ts`. The scroll is kept honest
    * in the one place that knows the editor's document height — the plan's own
    * region minus its tab-strip header; a caret outside that window rebuilds once. */
   plan(size: ViewportSize = this.#size): ScreenPlan {
     this.#size = { rows: size.rows, cols: size.cols };
+    const startedAt = this.#clock();
     const plan = this.#build();
+    // The render-profile pane's series: the cost of the build just made and the
+    // window it produced — measured here, where the build really happens.
+    this.#recordFrame(plan, this.#clock() - startedAt);
+    this.#lastPlan = plan;
+    if (this.#a11y !== null) this.#a11y.emit();
     // The file list's window is reconciled by the plan against the pane height IT
     // laid out; the app adopts the answer so the two never disagree about where the
     // list is scrolled. No rebuild: the window does not change the rows just emitted.
@@ -243,8 +309,16 @@ export class HeadlessApp implements CommandHost {
         this.#reduceSearch(intent.action, intent.text);
         return;
       case "modal":
-        if (intent.action === "push") this.#overlay.push(intent.id);
-        else this.#overlay.pop();
+        if (intent.action === "push") {
+          this.#overlay.push(intent.id);
+          // Raising an auxiliary pane resets its window; the search overlays keep
+          // their own session state in overlay.ts.
+          if (isAuxPane(intent.id)) openPane(this.#panes, intent.id);
+        } else {
+          const top = this.#overlay.modal;
+          this.#overlay.pop(intent.id);
+          if (isAuxPane(top)) closePane(this.#panes);
+        }
         return;
       case "focus":
         this.#focus = intent.pane === "toggle" ? (this.#focus === "editor" ? "sidebar" : "editor") : intent.pane;
@@ -257,6 +331,10 @@ export class HeadlessApp implements CommandHost {
         return;
       case "wrap":
         this.#wrap = intent.on;
+        this.#panes.prefs.wrap = intent.on;
+        return;
+      case "pane":
+        this.#reducePane(intent.action, intent.text);
         return;
       case "gutter":
         this.#gutter = intent.on;
@@ -294,6 +372,23 @@ export class HeadlessApp implements CommandHost {
   #reducePointer(action: "press" | "drag" | "double-click", cell: Position): void {
     const target = resolvePointer(this.#build(), cell, this.#geometry());
     if (target === null || target.pane === "modal") return;
+    if (target.pane === "gutter") {
+      // The panel drag starts on the split's own cell: the split follows the
+      // pointer, clamped so the editor keeps MIN_EDITOR_COLS and the list keeps its
+      // own minimum. A double-click restores the default width. State only — the
+      // plan lays the new width out.
+      this.#panelDrag = true;
+      this.#setSidebarWidth(action === "double-click" ? SIDEBAR_DEFAULT_WIDTH : cell.col);
+      return;
+    }
+    if (action === "drag" && this.#panelDrag) {
+      // A drag already in flight resolves its LATER cells against the split, not
+      // the pane under them — the pane boundaries move as the split does, so the
+      // cell that started the drag is the anchor and every later cell is a width.
+      this.#setSidebarWidth(cell.col);
+      return;
+    }
+    if (action === "press" || action === "double-click") this.#panelDrag = false;
     if (target.pane === "sidebar") {
       this.#focus = "sidebar";
       if (target.index >= 0) this.#sidebar.active = target.index;
@@ -305,6 +400,12 @@ export class HeadlessApp implements CommandHost {
     if (action === "drag") this.#caret.dragTo(clampPosition(buffer, position));
     else if (action === "double-click") this.#caret.doubleClick(buffer, clampPosition(buffer, position));
     else this.#caret.press(clampPosition(buffer, position));
+  }
+
+  /** Set the split's width, clamped between the list's minimum and the editor's. */
+  #setSidebarWidth(width: number): void {
+    const maxWidth = Math.max(SIDEBAR_MIN_WIDTH, this.#size.cols - MIN_EDITOR_COLS);
+    this.#sidebar.width = Math.max(SIDEBAR_MIN_WIDTH, Math.min(maxWidth, Math.round(width)));
   }
 
   /** A wheel event: move the viewport and DETACH it from the caret; the plan clamps. */
@@ -328,14 +429,147 @@ export class HeadlessApp implements CommandHost {
       wrap: this.#wrap,
       gutter: this.#gutter,
       sidebarVisible: sidebar.visible,
-      sidebarItems: sidebar.items,
+      sidebarItems: sidebarLabels(sidebar),
       sidebarWidth: sidebar.width,
       sidebarActive: sidebar.active,
       sidebarScroll: sidebar.scroll,
       tabs: this.#buffers.tabs(),
       overlay: this.#overlay,
       keymap: this.#keymap,
+      panes: this.#panes,
+      files: sidebar.items,
     };
+  }
+
+  /** Everything the auxiliary pane rows are a function of. */
+  #paneContext(): PaneContext {
+    return {
+      files: this.#sidebar.items,
+      bufferText: this.#editing.buffer.text(),
+      theme: getTheme(),
+    };
+  }
+
+  /** The rows the open pane would lay out — the count its navigation clamps to. */
+  #paneCount(id: AuxPaneId): number {
+    return paneRows(id, this.#panes, this.#paneContext()).length;
+  }
+
+  /** One frame sample, from a plan build the caller timed. */
+  #recordFrame(plan: ScreenPlan, planMs: number): void {
+    const editor = editorOf(plan);
+    recordSample(this.#panes, {
+      planMs,
+      lines: plan.stats.editor.linesTouched,
+      rows: editor?.rows.length ?? 0,
+    });
+  }
+
+  /** The auxiliary pane's reducer — navigation, filtering and the activation each
+   * pane's own row means. */
+  #reducePane(action: PaneAction, text: string | undefined): void {
+    const id = this.paneId;
+    if (action === "a11y-toggle") {
+      this.#toggleA11y();
+      return;
+    }
+    if (id === null) return;
+    if (action === "prev") {
+      this.#panes.index = Math.max(0, this.#panes.index - 1);
+      return;
+    }
+    if (action === "next") {
+      const count = this.#paneCount(id);
+      this.#panes.index = Math.min(Math.max(0, count - 1), this.#panes.index + 1);
+      return;
+    }
+    if (action === "filter-append") {
+      this.#panes.query += text ?? "";
+      this.#panes.index = 0;
+      return;
+    }
+    if (action === "filter-backspace") {
+      this.#panes.query = this.#panes.query.slice(0, -1);
+      this.#panes.index = 0;
+      return;
+    }
+    this.#activatePane(id);
+  }
+
+  /** Activate the highlighted row of `id`. The pane's rows and the per-row
+   * meaning live in panes.ts; only the effects belong to the app. */
+  #activatePane(id: AuxPaneId): void {
+    if (id === "picker") {
+      const file = pickerFiles(this.#panes, this.#sidebar.items)[this.#panes.index];
+      if (file === undefined) return;
+      this.#effects.push({ kind: "open", path: file });
+      this.#overlay.pop("picker");
+      closePane(this.#panes);
+      return;
+    }
+    if (id === "palette") {
+      const command = paletteCommands(this.#panes)[this.#panes.index];
+      if (command === undefined) return;
+      // Close the palette first, so the command it names runs against the screen
+      // it was selected from and cannot find the palette still on top.
+      this.#overlay.pop("palette");
+      closePane(this.#panes);
+      this.run(command, IDLE_KEY);
+      return;
+    }
+    if (id === "preferences") {
+      if (this.#panes.index === 0) {
+        this.#panes.prefs.wrap = !this.#panes.prefs.wrap;
+        this.#wrap = this.#panes.prefs.wrap;
+      } else if (this.#panes.index === 1) {
+        this.#panes.prefs.tabWidth = nextTabWidth(this.#panes.prefs.tabWidth);
+      } else if (this.#panes.index === 2) {
+        this.#overlay.push("theme");
+        openPane(this.#panes, "theme");
+      } else if (this.#panes.index === 3) {
+        this.#toggleA11y();
+      }
+      return;
+    }
+    if (id === "theme") {
+      const choice = THEMES[this.#panes.index];
+      if (choice === undefined) return;
+      this.#panes.prefs.theme = choice.name;
+      setTheme(themeChoice(choice.name).overrides);
+      return;
+    }
+    if (id === "diff") {
+      const text = this.#panes.external;
+      if (text === null) return;
+      this.load(text, this.#path);
+      this.#panes.external = null;
+      this.#overlay.pop("diff");
+      closePane(this.#panes);
+    }
+  }
+
+  /** Opt the a11y stream in or out. Turning it on starts a fresh framework
+   * A11yStream over the plan's own dump; turning it off closes it and clears the
+   * buffered lines. */
+  #toggleA11y(): void {
+    const on = !this.#panes.prefs.a11y;
+    this.#panes.prefs.a11y = on;
+    if (!on) {
+      this.#a11y?.close();
+      this.#a11y = null;
+      this.#panes.a11yLines.length = 0;
+      // The pane and the stream are one toggle: opting out closes the pane too.
+      this.#overlay.pop("a11y");
+      closePane(this.#panes);
+      return;
+    }
+    this.#a11y = new A11yStream(
+      () => (this.#lastPlan === null ? [] : a11yDump(this.#lastPlan)),
+      (line) => recordA11yLine(this.#panes, line),
+    );
+    // Opting in shows the stream: raise the pane so the JSONL is on screen.
+    this.#overlay.push("a11y");
+    openPane(this.#panes, "a11y");
   }
 
   /** The plan for the current state and size. */

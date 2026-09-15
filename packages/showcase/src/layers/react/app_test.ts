@@ -362,7 +362,8 @@ Deno.test("react: the hook path is the bare dispatcher path, key for key", async
     checked += 1;
     mounted.unmount();
   }
-  check(checked === 11, "expected the 11 key-driven fixtures, drove " + checked);
+  const appFixtures = FIXTURES.filter((fixture) => fixture.drive.kind === "app").length;
+  check(checked === appFixtures, "expected the " + appFixtures + " key-driven fixtures, drove " + checked);
   console.log("react identity: " + checked + " key-driven fixtures — the hook path is the bare dispatcher path, plan for plan");
 });
 

@@ -1,23 +1,23 @@
-//! Screen "a11y" — the EMPTY document.
+//! Screen "a11y" — the opt-in accessibility JSONL stream.
 //!
-//! Regime: the degenerate screen. One empty span, ten filler rows (FILLER_LINE,
-//! core/plan.ts:289) and a titleless document (NO_TITLE, core/plan.ts:41) — the shape
-//! a semantics walk or a contrast audit meets before anything is typed. Anchors:
+//! Regime: the a11y pane showing the framework A11yStream's own lines — a header
+//! and one semantics dump per changed frame — over the plan's regions. Anchors:
 //! core-a11y-stream, core-contrast-audit.
 
 import type { ScreenPlan } from "../../core/plan.ts";
-import { referencePlan, type Fixture } from "./fixture.ts";
+import { key, referencePlan, type Fixture } from "./fixture.ts";
 
 /** The screen's fixed scenario. */
 export const FIXTURE: Fixture = {
   screen: "a11y",
-  regime: "an empty document: one empty span, filler rows to the bottom, the [No Name] title",
+  regime: "the a11y stream pane: the framework's versioned JSONL over the plan's own regions",
   anchors: ["core-a11y-stream", "core-contrast-audit"],
   pending: null,
-  size: { rows: 12, cols: 40 },
+  size: { rows: 20, cols: 76 },
   path: null,
   text: "",
-  drive: { kind: "app", keys: [] },
+  clock: [0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6],
+  drive: { kind: "app", keys: [key("a", { alt: true })] },
 };
 
 /** The ScreenPlan the REAL core produced for {@link FIXTURE}: one HeadlessApp

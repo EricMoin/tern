@@ -1,0 +1,37 @@
+// Recorded by t12a core layer (layers/core/record.ts) — regenerate with formatRecordedBuffer.
+import type { RecordedBuffer } from "../record.ts";
+
+export const BUFFER: RecordedBuffer = {
+  screen: "theme",
+  layer: "core",
+  planFingerprint: "e9123e89",
+  recordedBy: "t12a core layer (layers/core/record.ts)",
+  rows: [
+    "const theme = 'one-dark';                                               ",
+    "                                                                        ",
+    "                                                                        ",
+    "                                                                        ",
+    "                                                                        ",
+    "                                                                        ",
+    "                                                                        ",
+    "           ┌─ Theme audit ─────────────────────────────────┐            ",
+    "           │ theme:one-dark  ( ) one-dark                  │            ",
+    "           │theme:solarized  (•) solarized                 │            ",
+    "           │ theme:contrast  ( ) contrast                  │            ",
+    "           │                                               │            ",
+    "           │                 contrast audit (WCAG AA 4.5:1)│            ",
+    "           │        primary  palette primary  4.08:1       │            ",
+    "           │         danger  palette danger  3.25:1        │            ",
+    "           │         border  palette border  2.79:1        │            ",
+    "           │current: solarized                             │            ",
+    "           └───────────────────────────────────────────────┘            ",
+    "                                                                        ",
+    "                                                                        ",
+    "                                                                        ",
+    "                                                                        ",
+    "                                                                        ",
+    "                                                                        ",
+    "                                                                        ",
+    " THEME  demo/theme.ts                                            2L  1:1",
+  ],
+};

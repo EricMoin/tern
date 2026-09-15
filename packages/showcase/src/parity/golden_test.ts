@@ -157,7 +157,7 @@ console.log("parity: " + PAIRS + " of " + (FIXTURES.length * LAYERS.length) + " 
 
 // --- the fixtures themselves --------------------------------------------------
 
-Deno.test("goldens: the twelve fixtures cover the screen vocabulary exactly, in its order", () => {
+Deno.test("goldens: the fixtures cover the screen vocabulary exactly, in its order", () => {
   check(FIXTURES.length === SCREENS.length, "expected " + SCREENS.length + " fixtures, got " + FIXTURES.length);
   SCREENS.forEach((screen, index) => {
     check(FIXTURES[index]?.screen === screen, "fixture " + index + " is " + FIXTURES[index]?.screen + ", expected " + screen);
@@ -172,7 +172,7 @@ Deno.test("goldens: the twelve fixtures cover the screen vocabulary exactly, in 
       check(entries.has(anchor), fixture.screen + ": anchor " + anchor + " is not a registry entry id");
     }
   }
-  console.log("parity: 12 fixtures — " + FIXTURES.map((fixture) => fixture.screen).join(", "));
+  console.log("parity: " + FIXTURES.length + " fixtures — " + FIXTURES.map((fixture) => fixture.screen).join(", "));
 });
 
 Deno.test("goldens: every plan is the real core's, twice over, and covers its whole screen", () => {
@@ -188,17 +188,21 @@ Deno.test("goldens: every plan is the real core's, twice over, and covers its wh
     const holes = planCoverage(plan);
     check(holes.length === 0, fixture.screen + ": the plan does not cover its screen — " + holes.join(", "));
   });
-  console.log("parity: 12 plans rebuilt from the real core, all covering their screens exactly");
+  console.log("parity: " + FIXTURES.length + " plans rebuilt from the real core, all covering their screens exactly");
 });
 
 /** The screens whose fixture must carry an overlay region, and the modal each one
- * names. The three modals are the vocabulary `commands.ts` declares (ModalId);
- * every other screen is a screen with NO modal, and its plan must not grow one. */
+ * names. The overlay vocabulary is `commands.ts`'s ModalId: the three search/help
+ * overlays plus the seven auxiliary panes (pane-ids.ts). Every other screen is a
+ * screen with NO modal, and its plan must not grow one. */
 const OVERLAY_SCREENS: ReadonlyMap<ScreenId, string> = new Map([
+  ["chooser", "picker"],
   ["find", "find"], ["replace", "replace"], ["help", "help"],
+  ["profile", "profile"], ["a11y", "a11y"],
+  ["palette", "palette"], ["preferences", "preferences"], ["theme", "theme"], ["diff", "diff"],
 ]);
 
-Deno.test("goldens: exactly the three overlay screens lay a modal region out", () => {
+Deno.test("goldens: exactly the overlay screens lay a modal region out", () => {
   const found: string[] = [];
   FIXTURES.forEach((fixture, index) => {
     const plan = PLANS[index]!;
@@ -218,11 +222,12 @@ Deno.test("goldens: exactly the three overlay screens lay a modal region out", (
     }
     found.push(fixture.screen);
   });
-  check(found.join(",") === "find,replace,help", "the overlay screens are " + found.join(","));
+  const expected = [...FIXTURES.map((fixture) => fixture.screen)].filter((screen) => OVERLAY_SCREENS.has(screen));
+  check(found.join(",") === expected.join(","), "the overlay screens are " + found.join(","));
   console.log("parity: overlays laid out for " + found.join(", ") + " — every other screen is overlay-free");
 });
 
-Deno.test("goldens: the twelve fixtures are twelve DIFFERENT screens, not twelve copies", () => {
+Deno.test("goldens: every fixture is a DIFFERENT screen, not a copy", () => {
   const seen = new Map<string, ScreenId>();
   FIXTURES.forEach((fixture, index) => {
     const plan = PLANS[index];
@@ -233,7 +238,7 @@ Deno.test("goldens: the twelve fixtures are twelve DIFFERENT screens, not twelve
     seen.set(key, fixture.screen);
   });
   check(seen.size === FIXTURES.length, "the fixtures are not distinct");
-  console.log("parity: 12 distinct plans — " + [...seen.values()].slice(0, 4).join(", ") + ", …");
+  console.log("parity: " + seen.size + " distinct plans — " + [...seen.values()].slice(0, 4).join(", ") + ", …");
 });
 
 // --- the recorded-buffer convention ------------------------------------------

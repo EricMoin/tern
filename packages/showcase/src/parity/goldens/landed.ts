@@ -81,6 +81,18 @@ import { BUFFER as profileReact } from "./buffers/profile.react.ts";
 import { BUFFER as replaceReact } from "./buffers/replace.react.ts";
 import { BUFFER as shellReact } from "./buffers/shell.react.ts";
 import { BUFFER as sidebarReact } from "./buffers/sidebar.react.ts";
+import { BUFFER as paletteCore } from "./buffers/palette.core.ts";
+import { BUFFER as preferencesCore } from "./buffers/preferences.core.ts";
+import { BUFFER as themeCore } from "./buffers/theme.core.ts";
+import { BUFFER as diffCore } from "./buffers/diff.core.ts";
+import { BUFFER as paletteReact } from "./buffers/palette.react.ts";
+import { BUFFER as preferencesReact } from "./buffers/preferences.react.ts";
+import { BUFFER as themeReact } from "./buffers/theme.react.ts";
+import { BUFFER as diffReact } from "./buffers/diff.react.ts";
+import { BUFFER as paletteSolid } from "./buffers/palette.solid.ts";
+import { BUFFER as preferencesSolid } from "./buffers/preferences.solid.ts";
+import { BUFFER as themeSolid } from "./buffers/theme.solid.ts";
+import { BUFFER as diffSolid } from "./buffers/diff.solid.ts";
 import { BUFFER as a11ySolid } from "./buffers/a11y.solid.ts";
 import { BUFFER as chooserSolid } from "./buffers/chooser.solid.ts";
 import { BUFFER as editorSolid } from "./buffers/editor.solid.ts";
@@ -123,6 +135,10 @@ export const LANDED: readonly LandedLayer[] = [
       a11y: a11yCore,
       parity: parityCore,
       shell: shellCore,
+      palette: paletteCore,
+      preferences: preferencesCore,
+      theme: themeCore,
+      diff: diffCore,
     },
   },
   {
@@ -141,6 +157,10 @@ export const LANDED: readonly LandedLayer[] = [
       a11y: a11yReact,
       parity: parityReact,
       shell: shellReact,
+      palette: paletteReact,
+      preferences: preferencesReact,
+      theme: themeReact,
+      diff: diffReact,
     },
   },
   {
@@ -159,6 +179,10 @@ export const LANDED: readonly LandedLayer[] = [
       a11y: a11ySolid,
       parity: paritySolid,
       shell: shellSolid,
+      palette: paletteSolid,
+      preferences: preferencesSolid,
+      theme: themeSolid,
+      diff: diffSolid,
     },
   },
 ];

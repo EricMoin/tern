@@ -16,14 +16,16 @@
 //! so the count the overlay reports and the edits `ctrl+enter` applies cannot
 //! disagree.
 
-import type { KeyCombo } from "@tern-tui/core";
+import { getTheme, type KeyCombo } from "@tern-tui/core";
 import type { Buffer } from "./buffer.ts";
 import type { ModalId } from "./commands.ts";
+import { isAuxPane, type PaneState, paneModal } from "./panes.ts";
 import type { ModalField, ModalInput, ModalItem } from "./plan-modals.ts";
 import { findMatches, type SearchMatch } from "./search.ts";
 
-/** The overlay's own title, per modal. */
-const TITLE: Record<ModalId, string> = { find: "Find", replace: "Replace", help: "Help" };
+/** The overlay's own title, per SEARCH overlay. The auxiliary panes carry their
+ * titles in panes.ts and are built there. */
+const TITLE: Record<"find" | "replace" | "help", string> = { find: "Find", replace: "Replace", help: "Help" };
 
 /** The query field's label — the same word in both search overlays, because the
  * replace overlay inherits the query the find overlay typed. */
@@ -51,6 +53,10 @@ export interface ModalSource {
   readonly query: string;
   readonly replacement: string;
   readonly caseSensitive: boolean;
+  /** The auxiliary panes' own state (panes.ts); consulted only for a pane id. */
+  readonly panes: PaneState;
+  /** The file list the picker filters. */
+  readonly files: readonly string[];
   /** The keymap's own listing (`Keymap.list()`, packages/core/src/keymap.ts:132) —
    * the same registry the dispatcher matches against and `HelpPanel` renders. */
   readonly shortcuts: readonly { readonly combo: KeyCombo; readonly description?: string }[];
@@ -66,6 +72,15 @@ export interface ModalSource {
  * times it occurs.
  */
 export function modalInputFor(source: ModalSource): ModalInput {
+  // The auxiliary panes are overlays too: their rows are built from the live pane
+  // state (panes.ts) and laid out by the same modal plan.
+  if (isAuxPane(source.id)) {
+    return paneModal(source.id, source.panes, {
+      files: source.files,
+      bufferText: source.buffer.text(),
+      theme: getTheme(),
+    });
+  }
   const title = TITLE[source.id];
   if (source.id === "help") {
     const items = shortcutItems(source.shortcuts);

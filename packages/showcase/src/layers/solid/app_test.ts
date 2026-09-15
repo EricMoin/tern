@@ -368,7 +368,7 @@ Deno.test("solid: the mode line is the framework's own status_bar over scene-nod
       checked += 1;
     });
   }
-  check(checked === 12, "expected the mode line on all twelve fixtures, checked " + checked);
+  check(checked === FIXTURES.length, "expected the mode line on all " + FIXTURES.length + " fixtures, checked " + checked);
   console.log("solid status bar: " + checked + " screens — Node segments through the framework's own factory");
 });
 
@@ -478,7 +478,8 @@ Deno.test("solid: the subscription path is the bare dispatcher path, key for key
     checked += 1;
     mounted.unmount();
   }
-  check(checked === 11, "expected the 11 key-driven fixtures, drove " + checked);
+  const appFixtures = FIXTURES.filter((fixture) => fixture.drive.kind === "app").length;
+  check(checked === appFixtures, "expected the " + appFixtures + " key-driven fixtures, drove " + checked);
   console.log("solid identity: " + checked + " key-driven fixtures — the subscription path is the bare dispatcher path, plan for plan");
 });
 

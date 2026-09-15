@@ -74,19 +74,32 @@ export interface Fixture {
   readonly items?: readonly string[];
   readonly sidebarWidth?: number;
   readonly sidebarVisible?: boolean;
+  /** The external text the host hands the app for the diff pane (null: none). */
+  readonly external?: string;
+  /** The frame clock the render-profile pane samples, consumed in order. A fixture
+   * injects it so a recorded profile buffer is stable while the app still measures
+   * its real build cost. */
+  readonly clock?: readonly number[];
   readonly drive: FixtureDrive;
 }
 
 /** The app options the fixture's document and panes imply. */
 export function appOptions(fixture: Fixture): AppOptions {
-  return {
+  const options: AppOptions = {
     buffer: Buffer.fromString(fixture.text),
     path: fixture.path,
     size: fixture.size,
     items: fixture.items ?? [],
-    ...(fixture.sidebarWidth === undefined ? {} : { sidebarWidth: fixture.sidebarWidth }),
-    ...(fixture.sidebarVisible === undefined ? {} : { sidebarVisible: fixture.sidebarVisible }),
   };
+  if (fixture.sidebarWidth !== undefined) options.sidebarWidth = fixture.sidebarWidth;
+  if (fixture.sidebarVisible !== undefined) options.sidebarVisible = fixture.sidebarVisible;
+  if (fixture.external !== undefined) options.external = fixture.external;
+  if (fixture.clock !== undefined) {
+    const values = fixture.clock;
+    let at = 0;
+    options.clock = () => values[at++] ?? values[values.length - 1] ?? 0;
+  }
+  return options;
 }
 
 /**
@@ -124,7 +137,17 @@ function planSidebar(fixture: Fixture, drive: Extract<FixtureDrive, { kind: "pla
  * is held to. */
 export function referencePlan(fixture: Fixture): ScreenPlan {
   const drive = fixture.drive;
-  if (drive.kind === "app") return driveApp(fixture, drive.keys).plan(fixture.size);
+  if (drive.kind === "app") {
+    const app = driveApp(fixture, drive.keys);
+    // A fixture with a clock opens a pane that reads the frame history (the
+    // render profile, the a11y stream): warm it so the reference is the plan
+    // after a few real builds rather than the first frame such a pane could not
+    // have data for. Every other fixture is driven exactly as before.
+    if (fixture.clock !== undefined) {
+      for (let frame = 0; frame < 4; frame += 1) app.plan(fixture.size);
+    }
+    return app.plan(fixture.size);
+  }
   const state = editingState(Buffer.fromString(fixture.text));
   const sidebar = planSidebar(fixture, drive);
   const title = drive.title ?? fixture.path;

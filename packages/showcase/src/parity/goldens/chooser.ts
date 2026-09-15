@@ -1,32 +1,31 @@
-//! Screen "chooser" — the option list windowed into its pane.
+//! Screen "chooser" — the file picker: a filtered Select OVERLAY plus the Tree sidebar.
 //!
-//! Regime: a SCROLLED window (items 17-25 of 30, the active item inside it) — cells
-//! the app's own reducer cannot set, because it clamps the list scroll down to the
-//! active index only (core/state.ts:368). This fixture therefore drives buildPlan
-//! directly. Anchors: core-select-chooser, core-menu-commands, core-progress-scan,
-//! core-spinner-scan.
+//! Regime: a WINDOWED option list — the picker's Select filters the workspace
+//! paths and the plan windows the matches to the overlay's own box, with the
+//! file list beside it painted as the framework's Tree. The scenario is driven
+//! through the REAL dispatch route (ctrl+p opens the picker, typing filters it,
+//! down walks it). Anchors: core-select-chooser, core-tree-file-list,
+//! core-menu-commands.
 
 import type { ScreenPlan } from "../../core/plan.ts";
-import { referencePlan, type Fixture } from "./fixture.ts";
+import { chars, key, referencePlan, type Fixture } from "./fixture.ts";
 
 const ITEMS = Array.from({ length: 30 }, (_, index) => "src/feature-" + String(index + 1).padStart(2, "0") + ".ts");
 
 /** The screen's fixed scenario. */
 export const FIXTURE: Fixture = {
   screen: "chooser",
-  regime: "a scrolled option window: 8 visible rows cut from a list of 30, the active item inside the window",
-  anchors: ["core-select-chooser", "core-menu-commands", "core-progress-scan", "core-spinner-scan"],
-  pending: "the chooser overlay does not exist in the app-core yet; the plan cells it will window are driven directly — see the drive below and core/state.ts:368 for why no key sequence reaches them",
-  size: { rows: 10, cols: 44 },
+  regime: "the file picker: a prefix-filtered Select windowed into its overlay, the Tree sidebar beside it",
+  anchors: ["core-select-chooser", "core-tree-file-list", "core-menu-commands"],
+  pending: null,
+  size: { rows: 14, cols: 50 },
   path: "demo/chooser.ts",
   text: "const chosen = await pick();\nexport { chosen };\n",
   items: ITEMS,
   sidebarWidth: 20,
   drive: {
-    kind: "plan",
-    scroll: 0,
-    caret: { row: 0, col: 0 },
-    sidebar: { active: 19, scroll: 17 },
+    kind: "app",
+    keys: [key("p", { ctrl: true }), ...chars("src/feature"), key("down"), key("down")],
   },
 };
 
