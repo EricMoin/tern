@@ -47,6 +47,21 @@ jobs:
               - 'src/bindings/tern-node/**'
               - 'packages/examples/**'
 
+  # Single-file line cap (CONTRIBUTING.md §3 "文件行数"). No path filter and no
+  # changes gate: the rule spans Rust and JS alike, the job costs a couple of
+  # seconds, and a required check that only runs on some paths is a check that
+  # silently stops protecting the paths it was added for.
+  filesize:
+    name: Source file line cap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - name: Check source file line cap
+        run: node tools/check-file-size.mjs
+
   rust:
     name: Rust (build + test)
     runs-on: ubuntu-latest
