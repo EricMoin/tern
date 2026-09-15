@@ -30,6 +30,36 @@ deviations require user approval.
 - **Roadmap discipline.** New features must be checked against
   [docs/components.md](docs/components.md) before starting; do not open new
   directions at will.
+- **One concern per file, 800 lines max.** Every hand-written source file is
+  at most **800 lines** (`node tools/check-file-size.mjs`; gate 1 of
+  `tools/verify.sh` and the `filesize` CI job). A file that grows past that
+  stops being reviewable as a unit — the diff surface, the ownership boundary
+  and the public surface blur into one blob. Split along the seams the code
+  already has:
+
+  - **Rust** — `foo.rs` keeps the module doc, the primary type and the submodule
+    wiring; `foo/` holds the cohesive slices, exactly as
+    `tern-components/src/compositor.rs` does. Item visibility that crosses a
+    submodule boundary becomes `pub(super)`; the parent keeps `pub use
+    <sub>::*;` so every existing path still resolves.
+  - **TypeScript** — a package entry (`index.ts`) becomes a barrel that
+    re-exports exactly the names it exported before, and the body moves into
+    topic modules (see `packages/core/src/`, `packages/react/src/`). Sharing a
+    name between two barrels needs distinct directories (`reconciler.ts` +
+    `reconciler/*.ts`).
+  - **Tests** — `*_test.ts` is one file per topic; shared fakes and fixtures
+    live in `testkit.ts` / `testkit/*.ts`.
+
+  Generated artifacts are exempt (the script skips them: napi's
+  `index.d.ts` / `index.js`, and everything gitignored). The five files listed
+  in the script's `DEFERRED` map are mid-refactor; that list may only shrink.
+
+## Checking a change
+
+Scope your checks to what you touched. `AGENTS.md` maps changed paths to the
+exact command (and lists the repository gotchas — `NO_COLOR`, `cargo fmt`,
+generated files). The full suite below is for handover and cross-cutting
+changes, not for every edit.
 
 ## Quality gates (minimum acceptance for any change)
 

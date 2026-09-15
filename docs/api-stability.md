@@ -17,9 +17,9 @@ recording a per-symbol stability intent:
 
 | Surface | Entry file(s) | Size | Symbols |
 |---------|---------------|------|---------|
-| `@tern-tui/core` | `packages/core/src/index.ts` | 9,965 lines | 238 |
-| `@tern-tui/react` | `packages/react/src/index.ts` + `packages/react/src/reconciler.ts` | 1,864 + 895 lines | 167 |
-| `@tern-tui/solid` | `packages/solid/src/index.ts` + `packages/solid/src/universal.ts` | 1,682 + 342 lines | 170 |
+| `@tern-tui/core` | `packages/core/src/index.ts` (barrel over 28 topic modules) | 255 lines | 238 |
+| `@tern-tui/react` | `packages/react/src/index.ts` + `packages/react/src/reconciler.ts` (barrels over 10 modules) | 143 + 92 lines | 167 |
+| `@tern-tui/solid` | `packages/solid/src/index.ts` + `packages/solid/src/universal.ts` | 1,697 + 342 lines | 170 |
 | napi backside | `src/bindings/tern-node/index.d.ts` (NAPI-RS generated) | 868 lines | 53 surface items |
 
 **Method.** For the three JS packages, every `export` statement was enumerated
