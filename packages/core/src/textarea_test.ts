@@ -4,6 +4,7 @@ import { COMBINING_ACUTE, FAMILY_EMOJI } from "./testkit.ts";
 import { fakeContentSizes, withFakeAddon } from "./testkit.ts";
 import { attachedPanels, diffHunks, mouse } from "./testkit.ts";
 import { Box, DIFF_ADD_FG, DIFF_DEL_FG, DiffView, PANEL_DRAG_MIN_SIZE, Panels, Spinner, StatusBar, Text, Textarea, collapsePanel, createRenderer, dragPanels, editTextareaKey, endPanelDrag, expandPanel, focusPanel, name, pasteIntoTextarea, startPanelDrag, tick, togglePanel } from "./index.ts";
+import { caretDisplayIn, caretDisplayRow, charAtDisplayCol, currentDisplayCol, displayBase, logicalAtDisplayRow, measureText, offsetOfCol, textareaHeight, textareaWidth, totalDisplayRows, visibleScroll, wrapCount, wrapLineWithOffsets } from "@tern-tui/core";
 
 
 Deno.test("editTextareaKey backspace and delete remove a ZWJ family emoji whole", () => {
@@ -725,5 +726,41 @@ Deno.test("DiffView passes scroll_x/scroll_y to the root and wrap to the content
     if ("wrap" in (unwrapped.children[i]?.children[2]?.props ?? {})) {
       throw new Error(`row ${i} content must not carry wrap when unset`);
     }
+  }
+});
+
+Deno.test("textarea windowing seam is public and matches the composed window", () => {
+  // G1: the display-row seam is public API — an application reuses the
+  // framework's own row math instead of re-deriving it (imported from the
+  // package root, so this fails on a tree where the seam is module-private).
+  if (textareaWidth({ width: 12 }) !== 12 || textareaWidth({ width: 0 }) !== null) {
+    throw new Error("textareaWidth");
+  }
+  if (textareaHeight({ height: 4 }) !== 4 || textareaHeight({}) !== null) {
+    throw new Error("textareaHeight");
+  }
+  // The wrapping exports keep resolving through the same entry point.
+  if (wrapLineWithOffsets("one two three", 6).length !== 3 || measureText("ab", 6).rows !== 1) {
+    throw new Error("wrapping exports");
+  }
+  const lines = ["one two three", "short"];
+  if (wrapCount("one two three", 6) !== 3 || displayBase(lines, 1, 6) !== 3) {
+    throw new Error("row weights");
+  }
+  if (totalDisplayRows(lines, 6) !== 4 || offsetOfCol("one two three", 5, 6) !== 1) {
+    throw new Error("row totals");
+  }
+  if (caretDisplayRow(lines, 1, 2, 6) !== 3) throw new Error("caretDisplayRow");
+  if (caretDisplayIn("one two three", 5, 1, 6).start !== 4) throw new Error("caretDisplayIn");
+  if (currentDisplayCol(lines, 0, 5, 6) !== 1) throw new Error("currentDisplayCol");
+  if (charAtDisplayCol("one two three", 1, 1, 6) !== 5) throw new Error("charAtDisplayCol");
+  const at = logicalAtDisplayRow(lines, 3, 6);
+  if (at.row !== 1 || at.offset !== 0) throw new Error("logicalAtDisplayRow");
+  if (visibleScroll(lines, 1, 2, 6, 2, 0) !== 2 || visibleScroll(lines, 1, 2, 6, null, 0) !== 0) {
+    throw new Error("visibleScroll");
+  }
+  // The seam is exactly the window Textarea composes: scroll 2 + height 2.
+  if (Textarea({ lines, width: 6, height: 2, row: 1, col: 2 }).children.length !== 2) {
+    throw new Error("composed window");
   }
 });

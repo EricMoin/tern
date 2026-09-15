@@ -1,8 +1,8 @@
 //! The single-line Input element and its edit model.
 
 import { Node, Text } from "./node.ts";
-import { textWidth } from "./textarea.ts";
 import { clusterAt, columnToIndex, indexToColumn, lastClusterBefore } from "./textutil.ts";
+import { textWidth } from "./textwrap.ts";
 import type { NodeProps } from "./types.ts";
 
 import type {

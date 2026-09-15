@@ -1,7 +1,7 @@
 //! The Progress element.
 
 import { Node, Text } from "./node.ts";
-import { textWidth } from "./textarea.ts";
+import { textWidth } from "./textwrap.ts";
 import type { NodeProps } from "./types.ts";
 /** Props for the `Progress` element. Style/layout keys flow to the framed
  * box; `value`/`max` (or `ratio`) drive the fill math; `label` /
