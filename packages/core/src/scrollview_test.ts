@@ -2,7 +2,10 @@
 
 import { state } from "./testkit.ts";
 import { withScrollFakeAddon } from "./testkit.ts";
-import { Box, FocusManager, HelpPanel, HelpPanelProps, Keymap, MODAL_BACKDROP_BG, MODAL_Z_INDEX, Modal, NodeProps, SCROLLBAR_THUMB_CHAR, SCROLLBAR_TRACK_CHAR, ScrollView, THEME_COMPONENTS, THEME_ROLES, Text, Theme, ThemeOverrides, ThemeResolvableProps, Toggle, closeModal, createRenderer, defaultTheme, keymap, mergeTheme, name, openModal, resolveTheme, scrollBy, scrollTo, scrollTop, useFocus } from "./index.ts";
+// `maxScroll` is a module-level helper (not part of the barrel
+// surface), so this case imports it straight from the module.
+import { maxScroll } from "./scrollview.ts";
+import { Box, FocusManager, HelpPanel, HelpPanelProps, Keymap, MODAL_BACKDROP_BG, MODAL_Z_INDEX, Modal, NodeProps, SCROLLBAR_THUMB_CHAR, SCROLLBAR_TRACK_CHAR, ScrollView, THEME_COMPONENTS, THEME_ROLES, Text, Theme, ThemeOverrides, ThemeResolvableProps, Toggle, closeModal, createRenderer, declareVirtualContent, defaultTheme, keymap, mergeTheme, name, openModal, resolveTheme, scrollBy, scrollTo, scrollTop, useFocus } from "./index.ts";
 
 
 Deno.test("HelpPanel renders a key-help overlay: right-aligned key column, dimmed descriptions, optional title", () => {
@@ -712,6 +715,72 @@ Deno.test("removing a scroll view clears its scrollbar from the scene", () => {
     }
     if (renderer.root.children.length !== 0) {
       throw new Error("view must be spliced out of the scene");
+    }
+  });
+});
+
+Deno.test("declareVirtualContent is measured before the per-child walk by maxScroll and scrollTo", () => {
+  withScrollFakeAddon(() => {
+    const renderer = createRenderer();
+    // A {5, 2} viewport over a 6x3 leaf: measured, both axes clamp at 1.
+    const child = Text({ text: "aaaaaa\nbbbbb\ncc" });
+    const view = ScrollView({ width: 5, height: 2 }, child);
+    renderer.root.addChild(view);
+    // Count the child's `contentSize` calls: the declared geometry must be
+    // consulted before the child walk, so a declared scroll never measures.
+    let childMeasures = 0;
+    const measured = child.contentSize.bind(child);
+    child.contentSize = () => {
+      childMeasures++;
+      return measured();
+    };
+    const measuredMax = maxScroll(view);
+    if (measuredMax.x !== 1 || measuredMax.y !== 1 || childMeasures !== 1) {
+      throw new Error(
+        `measured max = ${JSON.stringify(measuredMax)} after ${childMeasures} child call(s)`,
+      );
+    }
+    // A 40x100 virtual list (only the window is materialized): the declared
+    // geometry replaces the child walk in both `maxScroll` and `scrollTo`.
+    declareVirtualContent(view, { width: 40, height: 100 });
+    childMeasures = 0;
+    const declaredMax = maxScroll(view);
+    if (declaredMax.x !== 35 || declaredMax.y !== 98) {
+      throw new Error(`declared max = ${JSON.stringify(declaredMax)}`);
+    }
+    const applied = scrollTo(view, 0, 50);
+    if (applied.x !== 0 || applied.y !== 50) {
+      throw new Error(`applied = ${JSON.stringify(applied)}`);
+    }
+    const clamped = scrollTo(view, 999, 999);
+    if (clamped.x !== 35 || clamped.y !== 98) {
+      throw new Error(`clamped = ${JSON.stringify(clamped)}`);
+    }
+    if (childMeasures !== 0) {
+      throw new Error(
+        `declared geometry must not walk children: ${childMeasures} call(s)`,
+      );
+    }
+    // JS bookkeeping, never scene props; re-declaring replaces the geometry
+    // and the viewport still floors it (content that fits cannot scroll).
+    if ("virtualContent" in view.props) {
+      throw new Error(`declared geometry leaked: ${JSON.stringify(view.props)}`);
+    }
+    declareVirtualContent(view, { width: 2, height: 1 });
+    const floored = maxScroll(view);
+    if (floored.x !== 0 || floored.y !== 0) {
+      throw new Error(`floored max = ${JSON.stringify(floored)}`);
+    }
+    // The registry is per view: a second view over its own leaf still
+    // measures (nothing was patched globally).
+    const other = ScrollView(
+      { width: 5, height: 2 },
+      Text({ text: "aaaaaa\nbbbbb\ncc" }),
+    );
+    renderer.root.addChild(other);
+    const otherMax = maxScroll(other);
+    if (otherMax.x !== 1 || otherMax.y !== 1) {
+      throw new Error(`other max = ${JSON.stringify(otherMax)}`);
     }
   });
 });

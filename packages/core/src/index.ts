@@ -234,7 +234,7 @@ export type { PanelDragHandle, PanelDragResult, PanelSpec, PanelsProps } from ".
 export { PROGRESS_DEFAULT_WIDTH, PROGRESS_EMPTY_CHAR, PROGRESS_FILL_CHAR, Progress, setProgress } from "./progress.ts";
 export type { ProgressProps } from "./progress.ts";
 export { Renderer, createRenderer, framesEqual, styledFramesEqual } from "./renderer.ts";
-export { SCROLLBAR_THUMB_CHAR, SCROLLBAR_TRACK_CHAR, ScrollView, scrollBy, scrollTo, scrollTop } from "./scrollview.ts";
+export { SCROLLBAR_THUMB_CHAR, SCROLLBAR_TRACK_CHAR, ScrollView, declareVirtualContent, scrollBy, scrollTo, scrollTop } from "./scrollview.ts";
 export type { ScrollViewProps } from "./scrollview.ts";
 export { SELECT_FILTER_PLACEHOLDER, Select, selectKey, selectOptions, visibleOptions } from "./select.ts";
 export type { SelectOption, SelectProps, SelectState } from "./select.ts";

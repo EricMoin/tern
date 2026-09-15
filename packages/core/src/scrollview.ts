@@ -75,6 +75,16 @@ const SCROLLBAR_Z_INDEX = 1;
 const scrollbarLeaves = new WeakMap<Node, Node>();
 
 /**
+ * The JS-declared virtual content geometry of a scroll view (bookkeeping —
+ * never scene props, mirroring `tableRegionStates`): the full content size
+ * for a view whose content is *not* materialized as scene children. A
+ * virtualized list materializes only the visible window, so the per-child
+ * `contentSize()` walk in {@link scrollableContentSize} would measure the
+ * window, never the dataset. See {@link declareVirtualContent}.
+ */
+const virtualContentSizes = new WeakMap<Node, ContentSize>();
+
+/**
  * The thumb offset, thumb length and row text of a vertical scrollbar: one
  * row per viewport cell, `█` thumb rows at the scroll position and `░` track
  * rows elsewhere. The thumb length shrinks as the content overflows more
@@ -144,6 +154,32 @@ function scrollGeometry(
 }
 
 /**
+ * Declare the virtual content size of a scroll view: the full content
+ * geometry the scroll clamp measures for content that is not materialized as
+ * scene children. A virtualized list paints only the visible window, so the
+ * measured path — walking `view.children` and calling `contentSize()` per
+ * child — would measure the window, never the dataset (the same problem
+ * `tableRegionStates` solves for a table's windowed content region).
+ *
+ * Once declared, {@link maxScroll} — and therefore {@link scrollTo} /
+ * {@link scrollBy} / {@link scrollTop} and `renderScrollbar` — measures the
+ * declared geometry and never walks the children: O(1) per scroll instead of
+ * O(children). The declaration is JS bookkeeping, never scene props, and the
+ * size is floored at the viewport exactly like the measured path (content
+ * that fits cannot scroll).
+ *
+ * A `streaming_text` view measures its own stream (the node *is* the
+ * content) and ignores the declaration; a table region keeps priority:
+ * for a table node (or its content region) the full-dataset geometry
+ * recorded by the table stands in regardless of any declaration. The
+ * declaration lives in a `WeakMap`, so it is collected with the view;
+ * re-declaring replaces the previous geometry.
+ */
+export function declareVirtualContent(view: Node, size: ContentSize): void {
+  virtualContentSizes.set(view, { width: size.width, height: size.height });
+}
+
+/**
  * The scrollable content size of a scroll view: the larger of the view's own
  * laid-out size — a growing box measures its stacked content, e.g. a table's
  * content region — and its children's extents — a fixed-size scroll view's
@@ -152,11 +188,11 @@ function scrollGeometry(
  * cannot scroll). The scrollbar leaf is excluded: it is a viewport
  * decoration, not content.
  *
- * A table's content region is windowed (only the visible rows are
- * materialized), so its laid-out size measures the window — never the
- * dataset. For a table region (or a table root) the JS-known full content
- * size in `tableRegionStates` stands in, keeping the scroll clamp against the
- * whole dataset (bookkeeping, never scene props).
+ * Content whose nodes are not all materialized cannot be measured this way,
+ * so two JS-known records stand in, checked — in this order — before the
+ * child walk: a table region's (or table root's) full-dataset geometry in
+ * `tableRegionStates`, then the caller's {@link declareVirtualContent}
+ * geometry. Both are bookkeeping, never scene props.
  */
 function scrollableContentSize(view: Node, viewport: ContentSize): ContentSize {
   const table = tableRegionState(view);
@@ -164,6 +200,13 @@ function scrollableContentSize(view: Node, viewport: ContentSize): ContentSize {
     return {
       width: Math.max(table.contentWidth, viewport.width),
       height: Math.max(table.contentHeight, viewport.height),
+    };
+  }
+  const declared = virtualContentSizes.get(view);
+  if (declared !== undefined) {
+    return {
+      width: Math.max(declared.width, viewport.width),
+      height: Math.max(declared.height, viewport.height),
     };
   }
   const scrollbar = scrollbarLeaves.get(view);
@@ -287,7 +330,9 @@ export function ScrollView(
  * viewport). Updates the view's `scroll_x` / `scroll_y` props and refreshes
  * the scrollbar. The view must be attached to the scene: the clamp measures
  * the laid-out sizes, and `contentSize` errors on a detached node. Returns
- * the applied offsets.
+ * the applied offsets. The clamp measures the geometry declared by
+ * {@link declareVirtualContent}, when one is set, instead of walking the
+ * children.
  *
  * On a streaming node with auto-scroll enabled, a scroll to a position
  * *above* the content tail detaches the follow — the view stays pinned where
