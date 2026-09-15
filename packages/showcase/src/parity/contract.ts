@@ -40,7 +40,13 @@
 import {
   BARRELS, BARREL_SOURCES, barrelValues, recordedTypes, type BarrelId,
 } from "./barrel-types.ts";
-import { INVENTORY_GAP, ROLES, type RegistryEntry } from "./registry-editor.ts";
+import {
+  INVENTORY_GAP,
+  ROLES,
+  type Classification,
+  type FrameworkFixEntry,
+  type RegistryEntry,
+} from "./registry-editor.ts";
 import { REGISTRY, roleCounts, tierCounts } from "./registry-shell.ts";
 
 /** A name is live either as a runtime VALUE or as an erased TYPE. */
@@ -380,17 +386,45 @@ export function reportContract(
   lines.push("contract: registry — " + entries.length + " entries (" + surfaces + " surface, " + (entries.length - surfaces) + " framework-fix)");
   lines.push("contract: roles — " + reportRoles(entries));
   lines.push("contract: tiers — " + Object.entries(tierCounts(entries)).map(([tier, count]) => tier + " " + count).join(", "));
-  for (const entry of entries) {
-    if (entry.kind === "surface" && entry.role === "forced") {
-      lines.push("contract: forced — " + entry.id + " [" + entry.symbols.join(", ") + "] droppable=" + entry.droppable);
-    }
+  // The forced/repurposed dispositions, printed with role and droppability:
+  // an entry that had to be forced in is either earned dogfooding (not
+  // droppable) or says out loud that the app can lose it.
+  const disposed = entries.filter((entry) => entry.kind === "surface" && entry.role !== "natural");
+  lines.push("contract: dispositions — " + disposed.length + " forced/repurposed entries (role, droppable, id)");
+  for (const entry of disposed) {
+    if (entry.kind !== "surface") continue;
+    lines.push("contract:   role=" + entry.role + " droppable=" + entry.droppable + " id=" + entry.id + " [" + entry.symbols.join(", ") + "]");
+    lines.push("contract:     " + (entry.disposition ?? "<no disposition>"));
   }
+
   const excludedSet = excludedNames(excluded);
   lines.push("contract: excluded — " + excludedSet.size + " names, every one listed, none by wildcard");
-  const gapCovered = INVENTORY_GAP.filter((name) => coveredNames(entries).has(name)).length;
-  const gapExcluded = INVENTORY_GAP.filter((name) => excludedSet.has(name)).length;
-  lines.push("contract: inventory gap — " + INVENTORY_GAP.length + " unaudited names: " + gapCovered + " covered, " +
-    gapExcluded + " excluded, " + (INVENTORY_GAP.length - gapCovered - gapExcluded) + " declared unreachable");
+  for (const category of excluded) {
+    lines.push("contract:   [" + category.names.length + "] " + category.reason);
+    lines.push("contract:     " + category.names.join(", "));
+  }
+
+  const coveredGap = INVENTORY_GAP.filter((name) => coveredNames(entries).has(name));
+  const excludedGap = INVENTORY_GAP.filter((name) => excludedSet.has(name));
+  const unreachableGap = INVENTORY_GAP.filter((name) => !coveredNames(entries).has(name) && !excludedSet.has(name));
+  lines.push("contract: inventory gap — " + INVENTORY_GAP.length + " unaudited names: " + coveredGap.length + " covered, " +
+    excludedGap.length + " excluded, " + unreachableGap.length + " declared unreachable");
+  lines.push("contract:   covered — " + coveredGap.join(", "));
+  lines.push("contract:   excluded — " + excludedGap.join(", "));
+  lines.push("contract:   declared unreachable — " + (unreachableGap.length === 0 ? "none" : unreachableGap.join(", ")));
+  const docGaps = entries.filter((entry) => entry.kind === "surface" && entry.docGap);
+  lines.push("contract: docGap — " + docGaps.length + " surface entries cite GAP_BASIS: " + docGaps.map((entry) => entry.id).join(", "));
+
+  const fixes = entries.filter((entry): entry is FrameworkFixEntry => entry.kind === "framework-fix");
+  const byClass = (classification: Classification) => fixes.filter((entry) => entry.classification === classification);
+  const shipped = byClass("already shipped");
+  const partial = byClass("partially shipped");
+  const open = byClass("real");
+  lines.push("contract: fix ledger — " + fixes.length + " framework gaps: " + shipped.length + " fixed in this repo, " +
+    partial.length + " partially shipped, " + open.length + " still open");
+  lines.push("contract:   fixed in this repo — " + shipped.map((entry) => entry.id).join(", "));
+  lines.push("contract:   partially shipped — " + (partial.length === 0 ? "none" : partial.map((entry) => entry.id).join(", ")));
+  lines.push("contract:   still open — " + open.map((entry) => entry.id).join(", "));
   lines.push("contract: violations — " + violations.length);
   for (const violation of violations) lines.push("contract: VIOLATION " + violation.kind + " — " + violation.detail);
   for (const line of lines) console.log(line);
