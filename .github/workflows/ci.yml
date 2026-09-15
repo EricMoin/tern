@@ -335,6 +335,13 @@ jobs:
           brew install tmux
           tmux -V
 
+      # The flow CONTRACT tests and the pre-pty proof. They replay every flow's
+      # own step list against the headless app-core, so this is the half of the
+      # suite that needs no terminal; it runs in the app's own job because the
+      # root `npm test` covers packages/showcase/src/index.ts, not src/e2e.
+      - name: Flow contract + pre-pty proof (deno test)
+        run: deno test --allow-env=NODE_ENV packages/showcase/src/e2e/
+
       - name: App e2e (run-e2e-tmux.sh)
         run: bash packages/showcase/run-e2e-tmux.sh
 
