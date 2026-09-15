@@ -74,12 +74,17 @@ function parseArgs(argv) {
 }
 
 /**
- * List tracked files. Falls back to a walk when git is unavailable (a tarball
- * checkout), in which case the generated trees are excluded by hand.
+ * List tracked files, plus untracked ones that are not gitignored. Falls back
+ * to a walk when git is unavailable (a tarball checkout), in which case the
+ * generated trees are excluded by hand.
+ *
+ * --others matters: a file that has just been written but not staged is
+ * exactly when a new 2,000-line module is easiest to miss, and a check that
+ * only sees the index would stay quiet until someone ran `git add`.
  */
 function trackedFiles() {
   try {
-    const out = execFileSync("git", ["ls-files", "-z"], {
+    const out = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
       cwd: repoRoot,
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
