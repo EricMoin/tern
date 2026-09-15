@@ -26,16 +26,20 @@
 //! and recorded in barrel-types.ts, together with the compiler witnesses that
 //! keep the record honest.
 //!
-//! GAP (framework, not worked around silently): the parse cannot re-run in the
-//! canonical test run. 'deno test --allow-env=NODE_ENV' (the run line at
-//! registry_test.ts:17) grants no read permission, and Deno offers no
-//! permission-free way to obtain a module's source text, so readBarrelSource
-//! below sees the read permission in state 'prompt' and SKIPS the parse rather
-//! than stalling on a prompt it cannot answer. The compiler witnesses in
-//! barrel-types.ts carry the guarantee instead; this file re-parses and reports
-//! source-parse-drift whenever a wider permission set allows it.
+//! PERMISSION. The canonical run grants read — 'deno test
+//! --allow-env=NODE_ENV --allow-read packages/showcase/src' (package.json
+//! "test") — so the parse re-runs live and the contract reports
+//! source-parsed: true with source-parse-drift: []. When read is NOT granted,
+//! readBarrelSource below sees the permission in state 'prompt' and SKIPS the
+//! parse rather than stalling on a prompt it cannot answer: the contract keeps
+//! printing the weaker 'source-parsed: false' mode, and the compiler witnesses
+//! in barrel-types.ts carry the guarantee. It never pretends the parse ran.
 //!
-//! Run: deno test --allow-env=NODE_ENV packages/showcase/src/parity/
+//! A screen no entry is homed on is reported too: every screen in SCREENS must
+//! be named by a surface entry's `screen` field or excluded with a reason
+//! (SCREEN_EXCLUSIONS).
+//!
+//! Run: deno test --allow-env=NODE_ENV --allow-read packages/showcase/src/parity/
 
 import {
   BARRELS, BARREL_SOURCES, barrelValues, recordedTypes, type BarrelId,
@@ -43,9 +47,11 @@ import {
 import {
   INVENTORY_GAP,
   ROLES,
+  SCREENS,
   type Classification,
   type FrameworkFixEntry,
   type RegistryEntry,
+  type ScreenId,
 } from "./registry-editor.ts";
 import { REGISTRY, roleCounts, tierCounts } from "./registry-shell.ts";
 
@@ -274,6 +280,31 @@ export function coveredNames(entries: readonly RegistryEntry[]): ReadonlySet<str
 }
 
 // ---------------------------------------------------------------------------
+// The screen-level boundary: every plan screen an entry is homed on.
+// ---------------------------------------------------------------------------
+
+/**
+ * A plan screen no surface entry is homed on, and why that is acceptable. The
+ * check below FAILS on any screen that is neither named by an entry's `screen`
+ * field nor listed here — an exclusion is the only way to leave a screen
+ * unaccounted, and it must carry a reason.
+ */
+export interface ScreenExclusion {
+  /** The plan screen every surface entry's `screen` field leaves un-named. */
+  readonly screen: ScreenId;
+  /** Why no entry is homed on this screen. An exclusion with no reason fails. */
+  readonly reason: string;
+}
+
+/**
+ * The plan screens no entry names. Empty today: every screen in {@link SCREENS}
+ * is genuinely exercised (one golden fixture each) and at least one surface
+ * entry is homed on it. Empty is a measured fact about the registry, not a hole
+ * — the check below reports any screen a future change leaves un-named.
+ */
+export const SCREEN_EXCLUSIONS: readonly ScreenExclusion[] = [];
+
+// ---------------------------------------------------------------------------
 // The contract.
 // ---------------------------------------------------------------------------
 
@@ -282,7 +313,8 @@ export type ViolationKind =
   | "unregistered-value" | "unregistered-type" | "ghost-symbol" | "excluded-not-live"
   | "exclusion-of-covered" | "duplicate-exclusion" | "empty-exclusion" | "gap-not-live"
   | "gap-unaccounted" | "doc-gap-mismatch" | "recorded-type-is-a-value" | "source-parse-drift"
-  | "unreadable-export-form";
+  | "unreadable-export-form" | "unregistered-screen" | "empty-screen-exclusion"
+  | "duplicate-screen-exclusion" | "unknown-screen-exclusion" | "screen-exclusion-of-covered";
 
 /** One disagreement, reported with the name it is about. */
 export interface Violation {
@@ -300,6 +332,7 @@ export function findViolations(
   entries: readonly RegistryEntry[],
   surface: LiveSurface,
   excluded: readonly ExclusionCategory[] = EXCLUDED,
+  screenExcluded: readonly ScreenExclusion[] = SCREEN_EXCLUSIONS,
 ): Violation[] {
   const violations: Violation[] = [];
   const push = (kind: ViolationKind, name: string, detail: string) => violations.push({ kind, name, detail });
@@ -314,6 +347,25 @@ export function findViolations(
       if (!surface.symbols.has(name)) push("excluded-not-live", name, "excluded, but no barrel exports that name");
       if (covered.has(name)) push("exclusion-of-covered", name, "excluded, but a registry entry names it — coverage and exclusion must not overlap");
     }
+  }
+
+  // A surface entry's `screen` field is the ONLY thing that names a plan
+  // screen, and SCREENS is the vocabulary the plan can lay out. A screen no
+  // entry is homed on is a hole in the coverage claim unless it is excluded on
+  // the record, with a reason.
+  const namedScreens = new Set<ScreenId>();
+  for (const entry of entries) if (entry.kind === "surface") namedScreens.add(entry.screen);
+  const screenReason = new Set<ScreenId>();
+  for (const exclusion of screenExcluded) {
+    if (exclusion.reason.trim() === "") push("empty-screen-exclusion", exclusion.screen, "a screen exclusion carries no reason");
+    if (screenReason.has(exclusion.screen)) push("duplicate-screen-exclusion", exclusion.screen, "screen excluded twice — an exclusion must have exactly one reason");
+    screenReason.add(exclusion.screen);
+    if (!SCREENS.includes(exclusion.screen)) push("unknown-screen-exclusion", exclusion.screen, "excluded, but the plan lays out no such screen");
+    if (namedScreens.has(exclusion.screen)) push("screen-exclusion-of-covered", exclusion.screen, "excluded, but a registry entry names it — coverage and exclusion must not overlap");
+  }
+  for (const screen of SCREENS) {
+    if (namedScreens.has(screen) || screenReason.has(screen)) continue;
+    push("unregistered-screen", screen, "no surface entry's screen field names this plan screen, and no exclusion lists it");
   }
 
   for (const [name, symbol] of surface.symbols) {
@@ -377,12 +429,21 @@ export function reportContract(
   entries: readonly RegistryEntry[] = REGISTRY,
   excluded: readonly ExclusionCategory[] = EXCLUDED,
   violations: readonly Violation[] = [],
+  screenExcluded: readonly ScreenExclusion[] = SCREEN_EXCLUSIONS,
 ): void {
   const lines: string[] = [];
   const counts = BARRELS.map((barrel) =>
     barrel + " " + surface.counts[barrel].values + " values + " + surface.counts[barrel].types + " types").join(", ");
   const surfaces = entries.filter((entry) => entry.kind === "surface").length;
   lines.push("contract: live surface — " + counts + " (" + surface.symbols.size + " distinct names; source-parsed: " + surface.parsedSource + ")");
+  lines.push("contract: source-parse-drift: [" + surface.drift.join(", ") + "]");
+  const namedScreens = new Set<ScreenId>();
+  for (const entry of entries) if (entry.kind === "surface") namedScreens.add(entry.screen);
+  const excludedScreens = new Set<ScreenId>(screenExcluded.map((exclusion) => exclusion.screen));
+  const unaccounted = SCREENS.filter((screen) => !namedScreens.has(screen) && !excludedScreens.has(screen));
+  lines.push("contract: screens — " + SCREENS.length + " plan screens: " + namedScreens.size + " named by an entry, " +
+    excludedScreens.size + " excluded, " + unaccounted.length + " unaccounted" +
+    (unaccounted.length === 0 ? "" : " (" + unaccounted.join(", ") + ")"));
   lines.push("contract: registry — " + entries.length + " entries (" + surfaces + " surface, " + (entries.length - surfaces) + " framework-fix)");
   lines.push("contract: roles — " + reportRoles(entries));
   lines.push("contract: tiers — " + Object.entries(tierCounts(entries)).map(([tier, count]) => tier + " " + count).join(", "));

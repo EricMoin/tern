@@ -11,10 +11,11 @@
 // entry is a citation, and citing it is the whole claim this half makes.
 //
 // HALF TWO — the live-surface half — lives in contract.ts: it holds the
-// registry to the barrels' real export maps. The two contract tests at the
-// bottom of this file drive it, mutation check included.
+// registry to the barrels' real export maps AND to the plan's screen
+// vocabulary. The contract tests at the bottom of this file drive it, mutation
+// checks included: one drops a symbol, one re-homes a screen.
 //
-// Run: deno test --allow-env=NODE_ENV packages/showcase/src/parity/registry_test.ts
+// Run: deno test --allow-env=NODE_ENV --allow-read packages/showcase/src/parity/registry_test.ts
 
 import {
   GAP_BASIS,
@@ -273,3 +274,48 @@ Deno.test("contract: MUTATION — dropping one covered symbol is reported as a v
   }
   console.log("contract: mutation — " + victim + " dropped from core-canvas-minimap -> " + hit[0]!.detail);
 });
+
+Deno.test("contract: SCREENS — every plan screen is named, and a re-homed one is reported", () => {
+  const surface = enumerateLiveSurface();
+  // The shipped registry is clean: every screen in the vocabulary is named by
+  // some surface entry (or excluded with a reason — SCREEN_EXCLUSIONS is empty,
+  // because all 16 screens are exercised by a golden fixture and homed).
+  const shipped = findViolations(REGISTRY, surface, EXCLUDED);
+  const shippedGaps = shipped.filter((violation) => violation.kind === "unregistered-screen");
+  if (shippedGaps.length > 0) {
+    throw new Error("plan screens no entry names: " + shippedGaps.map((violation) => violation.name).join(", "));
+  }
+  // MUTATION: re-home the ONE entry that names "palette" onto another screen, in
+  // memory. "palette" is then named by no entry and excluded by nothing.
+  const victim = "core-palette-command-menu";
+  const mutated: readonly RegistryEntry[] = REGISTRY.map((entry): RegistryEntry =>
+    entry.kind === "surface" && entry.id === victim ? { ...entry, screen: "editor" } : entry
+  );
+  const violations = findViolations(mutated, surface, EXCLUDED);
+  const gap = violations.filter((violation) => violation.kind === "unregistered-screen" && violation.name === "palette");
+  if (gap.length !== 1) {
+    throw new Error("re-homing " + victim + " must report exactly one unregistered-screen for palette, got " + JSON.stringify(violations));
+  }
+  console.log("contract: mutation — " + victim + " re-homed to editor -> " + gap[0]!.detail);
+  // An exclusion is the ONLY way to leave a screen unaccounted, and it must
+  // carry a reason: a reasoned exclusion silences the gap, an empty reason is
+  // itself a violation, and excluding a screen an entry names is an overlap.
+  const reasoned = findViolations(mutated, surface, EXCLUDED, [
+    { screen: "palette", reason: "mutation probe — palette is genuinely unrouted on this registry" },
+  ]);
+  if (reasoned.some((violation) => violation.kind === "unregistered-screen" && violation.name === "palette")) {
+    throw new Error("an exclusion WITH a reason must silence the unregistered-screen gap");
+  }
+  const noReason = findViolations(mutated, surface, EXCLUDED, [{ screen: "palette", reason: "   " }]);
+  if (!noReason.some((violation) => violation.kind === "empty-screen-exclusion" && violation.name === "palette")) {
+    throw new Error("an exclusion with no reason must be reported as empty-screen-exclusion");
+  }
+  const overlap = findViolations(mutated, surface, EXCLUDED, [
+    { screen: "editor", reason: "mutation probe — editor is named by an entry" },
+  ]);
+  if (!overlap.some((violation) => violation.kind === "screen-exclusion-of-covered" && violation.name === "editor")) {
+    throw new Error("excluding a screen an entry names must be reported as screen-exclusion-of-covered");
+  }
+  console.log("contract: screen exclusion — a reason silences the gap; an empty reason and an overlap are violations");
+});
+

@@ -6,12 +6,12 @@
 //! from the barrels' export blocks (contract.ts:parseExportBlocks) and recorded
 //! here, one list per barrel, with the source location of each list.
 //!
-//! WHY IT IS RECORDED AND NOT READ. The canonical test run is 'deno test
-//! --allow-env=NODE_ENV packages/showcase/src/parity/' (registry_test.ts:17).
-//! It grants no read permission, and Deno offers no permission-free way to
-//! obtain a module's source text, so the parse cannot re-run at test time (the
-//! gap is reported in contract.ts, not worked around silently). The lists are
-//! held to the COMPILER instead, by the witnesses at the bottom of this file:
+//! WHY IT IS RECORDED AND ALSO PARSED. The canonical test run is 'deno test
+//! --allow-env=NODE_ENV --allow-read packages/showcase/src' (package.json
+//! "test"), so contract.ts CAN re-read the live barrels and report every
+//! disagreement with these lists as source-parse-drift. The lists are ALSO held
+//! to the COMPILER, by the witnesses at the bottom of this file, so the type
+//! surface stays correct even in a permission-narrow run that skips the parse:
 //!
 //!   *TypesExist  — every recorded name must be an export of its barrel, so a
 //!                  rename or a deletion fails 'deno check' with the name.
@@ -20,10 +20,10 @@
 //!                  fails 'deno check' too. The list cannot silently rot: a
 //!                  forgotten type name has nowhere to hide.
 //!
-//! The parse itself is not left unproven: contract.ts re-parses all three
-//! barrels whenever the environment grants read access (e.g. a probe run with
-//! --allow-read) and reports every disagreement with these lists as
-//! source-parse-drift.
+//! contract.ts re-parses all three barrels whenever the environment grants read
+//! access and reports every disagreement with these lists as source-parse-drift;
+//! a run without read keeps printing the weaker 'source-parsed: false' mode,
+//! never a silent pretence that the parse ran.
 
 import * as core from "@tern-tui/core";
 import * as react from "@tern-tui/react";

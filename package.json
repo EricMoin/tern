@@ -12,7 +12,7 @@
   "scripts": {
     "check": "deno check packages/core/src/index.ts packages/react/src/index.ts packages/solid/src/index.ts packages/examples/src/index.ts packages/showcase/src/index.ts",
     "build": "deno check packages/core/src/index.ts packages/react/src/index.ts packages/solid/src/index.ts packages/examples/src/index.ts packages/showcase/src/index.ts",
-    "test": "deno test --allow-env=NODE_ENV packages/core/src packages/react/src packages/solid/src packages/examples/src packages/showcase/src/index.ts",
+    "test": "deno test --allow-env=NODE_ENV --allow-read packages/core/src packages/react/src packages/solid/src packages/examples/src packages/showcase/src",
     "docs:api": "deno task docs:api"
   },
   "engines": {
