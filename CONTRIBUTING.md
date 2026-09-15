@@ -18,8 +18,9 @@ deviations require user approval.
   deps; `tern-terminal` is the only crate touching the terminal; `tern-layout`
   is the only crate depending on taffy. New code goes in the correct layer
   (Fuchsia-style directories: `src/core/*`, `src/bindings/`,
-  `packages/{core,react,solid,examples}`, `docs/`, `examples/`, `tools/`,
-  `tests/`, `third_party/`).
+  `packages/{core,react,solid,examples,showcase}` (`packages/showcase`
+  is a private in-repo consumer, not a published package), `docs/`,
+  `examples/`, `tools/`, `tests/`, `third_party/`).
 - **Deno-first.** `deno check` / `deno test` are the canonical checkers;
   demos and smokes run under `deno run` first. Node.js appears only in the
   napi build phase (`@napi-rs/cli` + `fix-dts.mjs`) and as an explicit,

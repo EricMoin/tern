@@ -37,7 +37,7 @@ tern/
 │   │   ├── tern-layout/          #   taffy 封装：flex、CSS grid、绝对定位、clip/scroll 区域、增量布局
 │   │   ├── tern-terminal/        #   crossterm 后端：diff flush、run 批处理、OSC 0/8/52、kitty 键盘/下划线协议、光标形状
 │   │   ├── tern-components/      #   Compositor（增量脏区重绘）+ 渲染对象（Text/Box/Input/Textarea/Spinner/Panels/StatusBar/Canvas）
-│   │   ├── tern-highlight/       #   tree-sitter 高亮（4 种语法：Rust、TS/JS、JSON、shell）
+│   │   ├── tern-highlight/       #   tree-sitter 高亮（12 种语法：Rust、TS/TSX/JS、JSON、Shell、Python、Go、TOML、YAML、C、C++）
 │   │   └── tern-wasm/            #   C-ABI 预览绑定（wasm32-unknown-unknown，浏览器 canvas demo）
 │   └── bindings/tern-node/       # napi 绑定（Node.js / Deno → Rust）
 ├── packages/                     # @tern-tui/core（TS 绑定，约 7.6k 行）· react（react-reconciler）· solid · examples
@@ -92,7 +92,7 @@ tern/
 | 9 | 性能 | 强：四轮优化 + 基准设施 | 无滚动区域优化（见 #1）；无基准回归门禁（CI 不跑 bench）；无渲染节流 | notcurses | P0 |
 | 10 | 测试设施 | 强：黄金缓冲 + PTY smoke + fuzz | 无属性测试（selection/diff 数学）；无事件路由边界用例；无终端模拟器端到端（tmux/xterm.js headless） | 各库测试实践 | P1 |
 | 11 | 文档 | 良：4 篇设计文档 + API 站点 | 无教程/cookbook；无迁移指南；无中文文档；无 API 稳定性/弃用策略 | textual docs | P1 |
-| 12 | 示例 | 良：8+ 个示例 | 无交互式 showcase 页（如 textual demo）；无性能对比 demo | textual | P2 |
+| 12 | 示例 | 良：8+ 个示例 | 无交互式 showcase 页（如 textual demo）；无性能对比 demo（已登记 M6） | textual | P2 |
 | 13 | API 稳定性 | 弱：0.2.0，表面仍在扩张 | 无 1.0 稳定化计划；无弃用策略/特性开关契约；无 API 面审计 | 各库 1.0 实践 | P1 |
 
 ### 3.2 关键差距详述
@@ -305,6 +305,37 @@ tern/
 
 ---
 
+### M6 交互式 showcase 编辑器（Interactive Showcase Editor，私有仓库内交付）
+
+**目标**：交付一个**真实可运行**的终端文本编辑器 showcase——**私有、仓库内**（`packages/showcase/`，非发布包、不进发布矩阵），作为 tern 的第一个真实消费者。其 **headless app-core** 与渲染层完全解耦：唯一「屏上是什么」的决策点是 `core/plan.ts`（产出纯数据 `ScreenPlan`：region/row/span、光标格、样式提示、mode-line segment、sidebar item），唯一「按键是什么意思」的决策点是 `core/commands.ts`（产出 Intent/命令效果，绝不直接改场景）；headless 层不 import napi addon、不建场景、不引用任何渲染器。三个渲染层（命令式 `@tern-tui/core` 工厂、React、Solid）各自只是 (a) 纯 `ScreenPlan → scene` emitter 与 (b) 喂同一个 HeadlessApp dispatcher 的事件源，不得重做布局或按键语义；一套 parity harness 以 **ScreenPlan 恒等**为跨层硬契约（黄金缓冲是逐层事实，不要求跨层逐像素一致），缓冲按 **10 万行**设计（Fenwick 行索引为必需项）。app 暴露的每个框架缺口都在本仓库内修复并由 CI 证明。
+
+> **动机（登记依据）**：附录 §3.1 第 **#12 示例** 行早已把该方向记为 P2 差距——主要差距原文「无交互式 showcase 页（如 textual demo）；无性能对比 demo」，对标参考 `textual`（该行现已加注「（已登记 M6）」）。按 §7 变更纪律，方向先登记（优先级、依赖、验收）再开工。
+
+**范围与优先级**：
+
+| 工作项 | 优先级 | 依赖 | 说明 | 状态（2026-09-15 实测） |
+|--------|--------|------|------|------|
+| M6.1 方向登记：本 M6 章节 + §3.1 #12 指针 + §6 非目标例外 + CONTRIBUTING 层归属包列表 | P0 | — | 登记先于实现（§7 变更纪律）；仅文档改动 | ✅ 达成 — 本条目即其全部交付物：(a) 本 M6 章节（§4）与 §3.1 #12 行的「（已登记 M6）」注记；(b) §6 非目标第 6 条改写——通用/第三方编辑器仍为非目标，`packages/showcase/` 私有 showcase 为唯一登记例外（M6，不发布、不进发布矩阵）；(c) `CONTRIBUTING.md` Layer ownership 目录列表改为 `packages/{core,react,solid,examples,showcase}` |
+| M6.2 headless app-core：`core/plan.ts`（ScreenPlan 纯数据）+ `core/commands.ts`（Intent）+ HeadlessApp dispatcher + Fenwick 行索引（10 万行） | P0 | M1–M4 稳定后 | 不 import napi addon、不建场景、不引用渲染器 | ⛔ 未实现 |
+| M6.3 命令式 emitter：`@tern-tui/core` 工厂层的纯 `ScreenPlan → scene` emitter + 事件源 | P0 | M6.2 | 仅 emitter + 事件源，不重做布局/按键语义 | ⛔ 未实现 |
+| M6.4 React emitter：`@tern/react` 层同上 | P0 | M6.2 | 同一 ScreenPlan 契约、同一 dispatcher | ⛔ 未实现 |
+| M6.5 Solid emitter：`@tern/solid` 层同上 | P0 | M6.2 | 三端对齐（沿用 M3 三端模板） | ⛔ 未实现 |
+| M6.6 parity harness：三层 ScreenPlan 恒等（硬契约）+ 逐层黄金缓冲 | P0 | M6.3–M6.5 | 黄金缓冲是逐层事实，不做跨层逐像素断言 | ⛔ 未实现 |
+| M6.7 框架缝 G1/G2/G3 从 `@tern-tui/core` 公开导出 + JS 侧 `editHighlight` | P1 | M6.3–M6.6（app 为探针） | 先由 app 暴露缺口，再定缝的形态 | ⛔ 未实现 |
+| M6.8 close-out：新缝的 API tier 记入 `docs/api-stability.md`；缺口修复的 CI 门禁 | P1 | M6.7（遵循 M5.1/M5.2 tier 与弃用流程） | tier 变更同步清单表 + CHANGELOG + boundary-change 段 | ⛔ 未实现 |
+
+**验收标准**：
+- [ ] 三层（命令式 / React / Solid）对同一按键序列产出**恒等**的 ScreenPlan（parity harness 强制）；（未勾选 — M6.3–M6.6 未实现）
+- [ ] 编辑器在 **10 万行**缓冲下真实可运行（Fenwick 行索引，交互无退化）；（未勾选 — M6.2 未实现）
+- [ ] app 暴露的每个框架缺口都在本仓库内修复，并有 CI 可证明的测试；（未勾选 — M6.7/M6.8 未实现）
+- [ ] 新公开缝（G1/G2/G3 + `editHighlight`）在 `docs/api-stability.md` 分级记录；（未勾选 — M6.8 未实现）
+- [ ] `node tools/check-file-size.mjs` 保持绿，`DEFERRED` 仍为 5 条（只减不增）；（未勾选 — 关闭 M6.2–M6.8 时逐条复核）
+- [x] M6.1 登记完成：本章节、§3.1 #12 指针、§6 非目标例外、CONTRIBUTING 包列表。✅ 达成 — 四项均随本次登记交付（见 M6.1 状态行）。
+
+**风险**：ScreenPlan 恒等契约要求 headless 层零框架泄漏——任何布局或按键语义下沉到渲染层都会立刻破坏 parity；缺口修复触及公共 API，必须走 M5.2 的 tier 与弃用流程，避免 showcase 反向绑架 1.0 冻结面；10 万行规模下的 Fenwick 索引与逐帧 ScreenPlan 分配需在 M6.6 一并度量，避免 showcase 变成性能反例。
+
+---
+
 ## 5. 阶段依赖与建议排期
 
 ```
@@ -334,7 +365,7 @@ M2（基准门禁）────────────────────
 3. **Sixel / kitty-graphics 内联图片**——超出 cell-buffer TUI 范畴；如未来需要，以独立可选通道评估（notcurses 类能力），不作为核心目标。
 4. **原生 GPU/离屏渲染**——终端是输出设备，不做终端外渲染。
 5. **Vue/Svelte/Preact 渲染器**——维持 React/Solid 双端（除非社区需求明确）。
-6. **完整文本编辑器**——Textarea 增强（undo/redo/查找）是组件能力，不是类 Vim/Emacs 编辑器；编辑器应用由生态基于 tern 构建。
+6. **完整文本编辑器**——Textarea 增强（undo/redo/查找）是组件能力，不是类 Vim/Emacs 编辑器；类 Vim/Emacs 的通用编辑器、编辑器应用/产品仍由生态基于 tern 构建。**唯一登记例外（M6）**：`packages/showcase/` 下的私有、仓库内 showcase 编辑器——它是 tern 的第一个真实消费者与框架缺口探针，**不发布为包、不进入发布矩阵**（见 §4 M6）。
 
 ---
 
@@ -354,10 +385,10 @@ M2（基准门禁）────────────────────
 |------|---------|-----------|---------|---------|-----------|-----------|
 | 布局引擎 | Constraint/Flex | 手工/流式 | CSS 风格 | 手工 | 手工 | taffy flex + CSS grid |
 | 双缓冲/diff | cell 级 diff | 全帧 | 区域 diff | 全帧 | 双缓冲 | retained + 增量脏区 diff（更强） |
-| 终端滚动优化 | 部分（Scrollbar 仅绘制） | — | 有 | — | 有 | **缺（M2）** |
+| 终端滚动优化 | 部分（Scrollbar 仅绘制） | — | 有 | — | 有 | 有（M2.1 ✅：`RenderBackend::flush_scroll` DECSTBM 滚动区域快路径 + `detect_vertical_scroll`/`exposed_band_updates`） |
 | 交互式能力探测 | — | 部分 | 有 | 有（DA1） | 有 | 有（M1 ✅：5 查询批量 + 超时 + 缓存） |
-| 鼠标捕获分级 | 部分 | 部分 | 有 | — | 有 | **缺（M1）** |
-| 信号处理 | — | 有 | 有 | 有 | 有 | **缺（M1）** |
+| 鼠标捕获分级 | 部分 | 部分 | 有 | — | 有 | 有（M1.3 ✅：默认 enable 序列无 `?1003h`；1003 any-event 仅在注册 motion/drag 监听后启用） |
+| 信号处理 | — | 有 | 有 | 有 | 有 | 有（M1.4 ✅：`signals.rs` SIGINT/SIGTERM/SIGHUP 清理退出 + SIGTSTP/SIGCONT 挂起恢复） |
 | 组件集 | 20+（含 Calendar） | 20+（含 Help） | 丰富（含 DataTable） | 基础 | 基础 + 图形 | 22（缺表单/Menu/Help/Calendar，M3） |
 | 无障碍 | — | — | **有（语义树）** | — | — | **语义树已落地（M4.1 ✅）；a11y 输出通道 M4.2 待办** |
 | 主题 | 样式常量 | 样式 | **运行期主题** | 样式 | — | **运行期切换（M4.5 ✅：setTheme 原地重解析 + 黄金测试）；对比度检查 API（auditTheme/contrastRatio）** |
