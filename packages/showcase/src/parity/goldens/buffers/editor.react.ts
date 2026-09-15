@@ -1,0 +1,35 @@
+// Recorded by t13 react layer (layers/react/record.ts) — regenerate with formatRecordedBuffer.
+import type { RecordedBuffer } from "../record.ts";
+
+export const BUFFER: RecordedBuffer = {
+  screen: "editor",
+  layer: "react",
+  planFingerprint: "739bcba0",
+  recordedBy: "t13 react layer (layers/react/record.ts)",
+  rows: [
+    "[demo/editor.ts ●] [No Name] ●                                                  ",
+    "1  // the editor screen: one long line that has to wrap, and one short one.     ",
+    "2  export const total = items.reduce((sum, item) => sum + item.price * item.quan",
+    "3  export { total };                                                            ",
+    "4                                                                               ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    " EDIT  demo/editor.ts  ●                                                4L  2:95",
+  ],
+};

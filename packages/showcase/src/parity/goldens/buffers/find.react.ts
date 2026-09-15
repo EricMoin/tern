@@ -1,0 +1,35 @@
+// Recorded by t13 react layer (layers/react/record.ts) — regenerate with formatRecordedBuffer.
+import type { RecordedBuffer } from "../record.ts";
+
+export const BUFFER: RecordedBuffer = {
+  screen: "find",
+  layer: "react",
+  planFingerprint: "cfb6ec94",
+  recordedBy: "t13 react layer (layers/react/record.ts)",
+  rows: [
+    "the total is the sum of every part.                                             ",
+    "a total we can check against the parts.                                         ",
+    "no other line mentions it.                                                      ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                ┌─ Find ───────┐                                ",
+    "                                │find: total   │                                ",
+    "                                │2 matches   aa│                                ",
+    "                                └──────────────┘                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    " FIND  demo/find.ts                                                      4L  2:8",
+  ],
+};

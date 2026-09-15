@@ -1,0 +1,35 @@
+// Recorded by t12a core layer (layers/core/record.ts) — regenerate with formatRecordedBuffer.
+import type { RecordedBuffer } from "../record.ts";
+
+export const BUFFER: RecordedBuffer = {
+  screen: "minimap",
+  layer: "core",
+  planFingerprint: "5e15c64c",
+  recordedBy: "t12a core layer (layers/core/record.ts)",
+  rows: [
+    "279  return { value, index };                                                   ",
+    "280                                                                             ",
+    "281  const value = compute(shape, index);                                       ",
+    "282  // a comment line, denser than the code around it                          ",
+    "283  return { value, index };                                                   ",
+    "284                                                                             ",
+    "285  const value = compute(shape, index);                                       ",
+    "286  // a comment line, denser than the code around it                          ",
+    "287  return { value, index };                                                   ",
+    "288                                                                             ",
+    "289  const value = compute(shape, index);                                       ",
+    "290  // a comment line, denser than the code around it                          ",
+    "291  return { value, index };                                                   ",
+    "292                                                                             ",
+    "293  const value = compute(shape, index);                                       ",
+    "294  // a comment line, denser than the code around it                          ",
+    "295  return { value, index };                                                   ",
+    "296                                                                             ",
+    "297  const value = compute(shape, index);                                       ",
+    "298  // a comment line, denser than the code around it                          ",
+    "299  return { value, index };                                                   ",
+    "300                                                                             ",
+    "                                                                                ",
+    " EDIT  demo/minimap.ts                                               301L  301:1",
+  ],
+};
