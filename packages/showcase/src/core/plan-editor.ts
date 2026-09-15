@@ -55,7 +55,7 @@ export function buildEditorRows(
 
 /** The tab strip's single row: one span per label, the active one bracketed, the
  * dirty ones marked. Truncated to the region's width with the framework's own
- * wrapper, exactly as the sidebar's labels are (plan.ts:399). */
+ * wrapper, exactly as the sidebar's labels are (plan-panes.ts). */
 function tabRows(tabs: TabsInput, width: number): PlanRow[] {
   const spans: PlanSpan[] = [];
   let x = 0;

@@ -283,7 +283,7 @@ function placeRow(spec: RowSpec, width: number): { spans: PlanSpan[]; caret: num
 }
 
 /** The longest prefix of `text` that fits in `cells` cells — the framework's own
- * first display row, the same measure `plan.ts`'s `fit` uses (plan.ts:399-406), so
+ * first display row, the same measure `plan-panes.ts`'s `fit` uses, so
  * nothing is cut mid-glyph. */
 function fit(text: string, cells: number): string {
   if (cells <= 0) return "";
