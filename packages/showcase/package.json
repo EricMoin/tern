@@ -1,0 +1,25 @@
+{
+  "name": "@tern-tui/showcase",
+  "version": "0.2.0",
+  "private": true,
+  "license": "MIT",
+  "description": "tern showcase — a real, runnable terminal text editor built on tern (private, in-repo; the first real consumer of the published surface)",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "check": "deno check src/index.ts",
+    "test": "deno test src",
+    "e2e": "bash run-e2e-tmux.sh"
+  },
+  "dependencies": {
+    "@tern-tui/core": "0.2.0",
+    "@tern-tui/react": "0.2.0",
+    "@tern-tui/solid": "0.2.0",
+    "react": "^19.2.0",
+    "react-reconciler": "^0.33.0",
+    "solid-js": "^1.9.14"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0"
+  }
+}
