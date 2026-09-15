@@ -1,19 +1,6 @@
-/**
- * Unit tests for the @tern-tui/core MarkdownView element.
- *
- * Like the factory tests in `index_test.ts`, these exercise the declarative
- * composition surface without touching the native addon or a real terminal:
- * `MarkdownView` parses its `source` into pure `Text`/`Box` node objects
- * (native materialization is lazy), so the tests run under plain `deno test`
- * with no permission flags.
- *
- * The tests cover the block styles (headings, lists, blockquotes, horizontal
- * rules, code fences — including half-open fences — and paragraphs), the
- * inline styles (`**bold**`, `*italic*`, `` `code` ``, `[links](url)`), and a
- * golden composition test asserting the full node tree of a representative
- * document.
- */
+//! Markdown rendering tests: MarkdownView composes a wrapping column box and consumes the.
 
+import { goldenSource, textOf, withHighlightAddon } from "./testkit.ts";
 import {
   MARKDOWN_CODE_FG,
   MARKDOWN_FENCE_BG,
@@ -28,17 +15,6 @@ import {
   resetIncrementalHighlightCache,
   type Span,
 } from "./index.ts";
-import type { HighlightAppendJs, HighlightSpanJs, TernAddon } from "./addon.ts";
-import { setAddonForTesting } from "./addon.ts";
-
-/** The text of a node's `text` prop, or `null` for a missing/non-text node. */
-function textOf(node: { props: { text?: unknown } } | undefined): string | null {
-  return typeof node?.props.text === "string" ? node.props.text : null;
-}
-
-// ---------------------------------------------------------------------------
-// Root composition
-// ---------------------------------------------------------------------------
 
 Deno.test("MarkdownView composes a wrapping column box and consumes the source key", () => {
   const view = MarkdownView({ source: "hello" });
@@ -69,10 +45,6 @@ Deno.test("markdown is registered as a themeable component", () => {
     throw new Error("defaultTheme must carry the markdown component preset");
   }
 });
-
-// ---------------------------------------------------------------------------
-// Block styles
-// ---------------------------------------------------------------------------
 
 Deno.test("headings render bold, with the H1 additionally underlined", () => {
   const view = MarkdownView({ source: "# One\n## Two\n###### Six" });
@@ -219,10 +191,6 @@ Deno.test("tilde fences and empty fences compose; content after the fence is a p
     throw new Error(`empty fence must have no lines`);
   }
 });
-
-// ---------------------------------------------------------------------------
-// Inline styles
-// ---------------------------------------------------------------------------
 
 Deno.test("a uniform styled line composes as a single text leaf", () => {
   const view = MarkdownView({ source: "**bold**" });
@@ -378,10 +346,6 @@ Deno.test("links stamp the OSC 8 href style key (clickable in supporting termina
   }
 });
 
-// ---------------------------------------------------------------------------
-// Task lists
-// ---------------------------------------------------------------------------
-
 Deno.test("task list items render the checkbox glyph; unchecked and checked variants", () => {
   const view = MarkdownView({ source: "- [ ] open\n- [x] done\n* [X] also done" });
   const first = view.children[0];
@@ -407,10 +371,6 @@ Deno.test("task list items render the checkbox glyph; unchecked and checked vari
     throw new Error(`plain = ${JSON.stringify(textOf(plain.children[0]))}`);
   }
 });
-
-// ---------------------------------------------------------------------------
-// Pipe tables
-// ---------------------------------------------------------------------------
 
 Deno.test("a pipe table composes a Table node with header + body rows", () => {
   const view = MarkdownView({
@@ -455,10 +415,6 @@ Deno.test("a line with a pipe but no separator row is a paragraph", () => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// Inline styles within block styles
-// ---------------------------------------------------------------------------
-
 Deno.test("inline styles compose inside headings, lists and block quotes", () => {
   const view = MarkdownView({ source: "# **Title**\n- **bold** item\n> *it*" });
   // Heading: the bold span merges with the heading's own bold style into one
@@ -482,10 +438,6 @@ Deno.test("inline styles compose inside headings, lists and block quotes", () =>
   }
 });
 
-// ---------------------------------------------------------------------------
-// Layout props
-// ---------------------------------------------------------------------------
-
 Deno.test("the width prop soft-wraps plain leaves and spans the horizontal rule", () => {
   const view = MarkdownView({ source: "a line\n---", width: 20 });
   // The width flows to the root box (like Textarea) and to the paragraph leaf.
@@ -507,32 +459,6 @@ Deno.test("a non-positive width is treated as unset on the leaves", () => {
     throw new Error(`leaf = ${JSON.stringify(leaf?.props)}`);
   }
 });
-
-// ---------------------------------------------------------------------------
-// Golden composition
-// ---------------------------------------------------------------------------
-
-/**
- * A representative document exercising every block and inline style, joined
- * exactly as a streamed agent answer might settle.
- */
-const goldenSource = [
-  "# Title",
-  "",
-  "Intro **bold** and `code` and [link](https://tern.dev).",
-  "",
-  "- first",
-  "- second",
-  "  - nested",
-  "",
-  "> a quote",
-  "",
-  "---",
-  "",
-  "```rust",
-  "fn main() {}",
-  "```",
-].join("\n");
 
 Deno.test("golden composition: a full document composes the expected node tree", () => {
   const view = MarkdownView({ source: goldenSource });
@@ -605,40 +531,6 @@ Deno.test("golden composition: a full document composes the expected node tree",
     throw new Error(`fence lines = ${JSON.stringify(fence.children.map(textOf))}`);
   }
 });
-
-// ---------------------------------------------------------------------------
-// Code fence syntax highlighting (roadmap Phase 4)
-// ---------------------------------------------------------------------------
-
-/** A fake `highlight` mirroring the native engine's output shape for the
- * `let x = 1;` snippet: a complete span stream (gaps carry `fg: null`) with
- * the One-Dark token colors. */
-const highlightFakeAddon = {
-  TuiRenderer: class {},
-  NodeHandle: class {},
-  create_node: () => ({} as never),
-  highlight: (language: string, source: string): HighlightSpanJs[] => {
-    if (language === "rust" && source === "let x = 1;") {
-      return [
-        { text: "let", fg: "#c678dd", bold: false, italic: false, dim: false, underline: false },
-        { text: " x = ", bold: false, italic: false, dim: false, underline: false },
-        { text: "1", fg: "#d19a66", bold: false, italic: false, dim: false, underline: false },
-        { text: ";", bold: false, italic: false, dim: false, underline: false },
-      ];
-    }
-    return [{ text: source, bold: false, italic: false, dim: false, underline: false }];
-  },
-} as unknown as TernAddon;
-
-/** Run `fn` with the fake highlight addon installed, resetting the seam. */
-function withHighlightAddon(fn: () => void): void {
-  setAddonForTesting(highlightFakeAddon);
-  try {
-    fn();
-  } finally {
-    setAddonForTesting(null);
-  }
-}
 
 Deno.test("highlightCode falls back to an empty stream without the native addon", () => {
   const spans = highlightCode("rust", "let x = 1;");
@@ -721,277 +613,4 @@ Deno.test("a uniform highlighted code line composes as a single text leaf", () =
       throw new Error(`line = ${JSON.stringify(line?.props)}`);
     }
   });
-});
-
-// ---------------------------------------------------------------------------
-// Incremental fence highlighting (Phase 9)
-// ---------------------------------------------------------------------------
-
-/** Deterministic fake span stream for the incremental fence tests: one span
- * per code line (the trailing newline included except on the last line),
- * styled from the line's first word — keyword purple for rust keywords,
- * italic grey for comment lines, string green for lines with a string
- * literal, plain otherwise. The concatenation of the span texts reconstructs
- * the source exactly, mirroring the native engine's coverage contract. */
-function fakeSpanStream(_language: string, source: string): HighlightSpanJs[] {
-  const lines = source.split("\n");
-  const spans: HighlightSpanJs[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    const isLast = i === lines.length - 1;
-    if (isLast && line === "") break; // the trailing "\n" split is empty
-    const firstWord = line.trimStart().split(/\s+/)[0] ?? "";
-    let fg: string | null = null;
-    let italic = false;
-    if (["fn", "let", "use", "pub", "impl", "struct", "enum"].includes(firstWord)) {
-      fg = "#c678dd";
-    } else if (line.includes("//")) {
-      fg = "#7f848e";
-      italic = true;
-    } else if (line.includes('"')) {
-      fg = "#98c379";
-    }
-    const span: HighlightSpanJs = {
-      text: isLast ? line : line + "\n",
-      bold: false,
-      italic,
-      dim: false,
-      underline: false,
-    };
-    if (fg !== null) span.fg = fg;
-    spans.push(span);
-  }
-  return spans;
-}
-
-/** A fake addon whose `highlight` counts every call and whose incremental
- * highlighter records every append result, so tests can assert the JS cache
- * drives the native surface exactly as intended. */
-function makeIncrementalFakeAddon(): {
-  addon: TernAddon;
-  highlightCalls: () => number;
-  appendCalls: () => number;
-  appendResults: () => HighlightAppendJs[];
-} {
-  let highlightCalls = 0;
-  let appendCalls = 0;
-  const appendResults: HighlightAppendJs[] = [];
-  const addon = {
-    TuiRenderer: class {},
-    NodeHandle: class {},
-    create_node: () => ({} as never),
-    highlight: (language: string, source: string): HighlightSpanJs[] => {
-      highlightCalls++;
-      return fakeSpanStream(language, source);
-    },
-    IncrementalHighlighter: class {
-      #language: string;
-      #source = "";
-      #appended = false;
-      constructor(language: string) {
-        this.#language = language;
-      }
-      append(chunk: string): HighlightAppendJs {
-        appendCalls++;
-        const prevLen = this.#source.length;
-        this.#source += chunk;
-        const spans = fakeSpanStream(this.#language, this.#source);
-        // A pure tail append reworks exactly the appended region — the range
-        // the native engine reports for the same append. Before the first
-        // append the field is absent, mirroring the binding's `Option` (the
-        // generated d.ts surfaces it as `changed?: number[]`).
-        const result: HighlightAppendJs = { spans };
-        if (this.#appended) result.changed = [prevLen, this.#source.length];
-        this.#appended = true;
-        appendResults.push(result);
-        return result;
-      }
-      reset(): void {
-        this.#source = "";
-        this.#appended = false;
-      }
-    },
-  } as unknown as TernAddon;
-  return {
-    addon,
-    highlightCalls: () => highlightCalls,
-    appendCalls: () => appendCalls,
-    appendResults: () => appendResults,
-  };
-}
-
-/** Deep-compare two span streams: text and style keys per span. */
-function spansEqual(a: Span[], b: Span[]): boolean {
-  if (a.length !== b.length) return false;
-  return a.every((s, i) => {
-    const other = b[i]!;
-    return (
-      s.text === other.text &&
-      JSON.stringify(s.style ?? {}) === JSON.stringify(other.style ?? {})
-    );
-  });
-}
-
-/** A large deterministic rust fence body: `lines` code lines (default 200)
- * exercising keywords, numbers, strings and comments, plus an optional `tail`
- * appended verbatim at the end. */
-function fenceCode(lines: number, tail = ""): string {
-  const body: string[] = [];
-  for (let i = 0; i < lines; i++) {
-    if (i % 4 === 0) body.push(`fn helper_${i}() {`);
-    else if (i % 4 === 1) body.push(`    let value = ${i}; // count`);
-    else if (i % 4 === 2) body.push(`    let name = "item_${i}";`);
-    else body.push("}");
-  }
-  return body.join("\n") + tail;
-}
-
-/** A markdown source wrapping `code` in a rust fence. */
-function rustFenceSource(code: string): string {
-  return "```rust\n" + code + "\n```\n";
-}
-
-/** The leaves of one fence row (a single text leaf, or a box of per-span
- * leaves). */
-function rowLeaves(row: { type: string; children?: readonly unknown[] }): Array<{ props: { text?: unknown } }> {
-  if (row.type === "text") return [row as unknown as { props: { text?: unknown } }];
-  return (row.children ?? []) as unknown as Array<{ props: { text?: unknown } }>;
-}
-
-/** The rows of a fence box. */
-function fenceRows(fence: { children: readonly unknown[] }): Array<{ type: string; children?: readonly unknown[] }> {
-  return fence.children as Array<{ type: string; children?: readonly unknown[] }>;
-}
-
-/** The text a fence renders: its rows joined by newlines (the trailing empty
- * line after a final newline renders as an empty row, so a source ending in
- * `"\n"` reconstructs verbatim). */
-function fenceText(fence: { children: readonly unknown[] }): string {
-  return fenceRows(fence).map((row) => rowLeaves(row).map(textOf).join("")).join("\n");
-}
-
-const LARGE_FENCE_LINES = 200;
-
-Deno.test("incremental fence highlighting: appends re-parse only the tail and unchanged re-renders make no native calls", () => {
-  const { addon, highlightCalls, appendCalls, appendResults } = makeIncrementalFakeAddon();
-  setAddonForTesting(addon);
-  try {
-    resetIncrementalHighlightCache();
-
-    const code1 = fenceCode(LARGE_FENCE_LINES);
-    const tail = "\nfn appended() {\n    let fresh = true;\n}\n";
-    const code2 = fenceCode(LARGE_FENCE_LINES, tail);
-
-    // Render 1: the full large fence — a fresh per-language highlighter,
-    // exactly one append, no one-shot `highlight` call.
-    const view1 = MarkdownView({ source: rustFenceSource(code1) });
-    const fence1 = view1.children[0]!;
-    if (fenceText(fence1) !== code1) {
-      throw new Error(`fence 1 text mismatch`);
-    }
-    if (appendCalls() !== 1) throw new Error(`appendCalls after render 1 = ${appendCalls()}`);
-    if (highlightCalls() !== 0) throw new Error(`highlightCalls after render 1 = ${highlightCalls()}`);
-
-    // The incremental stream is byte-identical to a full one-shot highlight.
-    const spans1 = incrementalHighlight("rust", code1);
-    if (spans1.map((s) => s.text).join("") !== code1) {
-      throw new Error("render 1 spans must reconstruct the source");
-    }
-    if (!spansEqual(spans1, highlightCode("rust", code1))) {
-      throw new Error("render 1 spans differ from a full one-shot highlight");
-    }
-
-    // Render 2: the fence grew by `tail` — a pure append re-parse.
-    const view2 = MarkdownView({ source: rustFenceSource(code2) });
-    const fence2 = view2.children[0]!;
-    if (fenceText(fence2) !== code2) {
-      throw new Error(`fence 2 text mismatch`);
-    }
-    if (appendCalls() !== 2) throw new Error(`appendCalls after render 2 = ${appendCalls()}`);
-
-    // The appended stream is still byte-identical to a full highlight of the
-    // grown source, and the recorded changed range stays within the tail.
-    const spans2 = incrementalHighlight("rust", code2);
-    if (spans2.map((s) => s.text).join("") !== code2) {
-      throw new Error("render 2 spans must reconstruct the source");
-    }
-    if (!spansEqual(spans2, highlightCode("rust", code2))) {
-      throw new Error("render 2 spans differ from a full one-shot highlight");
-    }
-    const recorded = appendResults();
-    const changed = recorded[1]!.changed;
-    if (changed === undefined) throw new Error("the second append must report a changed range");
-    const headLen = code1.length;
-    if (changed[0]! < headLen) {
-      throw new Error(`changed start ${changed} must be within the tail (head ${headLen})`);
-    }
-    if (changed[1]! > code2.length) {
-      throw new Error(`changed end ${changed} must be within the source (${code2.length})`);
-    }
-
-    // The appended tail's tokens actually flow into the fence rows.
-    const appendedRow = fenceRows(fence2).find((row) =>
-      rowLeaves(row).map(textOf).join("").includes("fn appended"),
-    );
-    const kwLeaf = appendedRow === undefined
-      ? undefined
-      : rowLeaves(appendedRow).find((leaf) => (textOf(leaf) ?? "").includes("fn appended"));
-    if (kwLeaf === undefined || textOf(kwLeaf) !== "fn appended() {") {
-      throw new Error(`appended row = ${JSON.stringify(appendedRow)}`);
-    }
-    if ((kwLeaf as { props: { fg?: unknown } }).props.fg !== "#c678dd") {
-      throw new Error(`appended keyword must be token-colored`);
-    }
-
-    // Render 3: the unchanged source re-rendered — zero native calls.
-    const before = { highlight: highlightCalls(), append: appendCalls() };
-    const view3 = MarkdownView({ source: rustFenceSource(code2) });
-    if (fenceText(view3.children[0]!) !== code2) {
-      throw new Error(`fence 3 text mismatch`);
-    }
-    if (highlightCalls() !== before.highlight || appendCalls() !== before.append) {
-      throw new Error(
-        `an unchanged re-render must make no native calls: before ${JSON.stringify(before)}, after ` +
-          JSON.stringify({ highlight: highlightCalls(), append: appendCalls() }),
-      );
-    }
-  } finally {
-    setAddonForTesting(null);
-    resetIncrementalHighlightCache();
-  }
-});
-
-Deno.test("incremental fence highlighting: an edit that breaks the prefix re-highlights from scratch", () => {
-  const { addon, appendCalls, appendResults } = makeIncrementalFakeAddon();
-  setAddonForTesting(addon);
-  try {
-    resetIncrementalHighlightCache();
-
-    const code1 = fenceCode(LARGE_FENCE_LINES);
-    const view1 = MarkdownView({ source: rustFenceSource(code1) });
-    if (fenceText(view1.children[0]!) !== code1) {
-      throw new Error(`fence 1 text mismatch`);
-    }
-    if (appendCalls() !== 1) throw new Error(`appendCalls after render 1 = ${appendCalls()}`);
-
-    // The first line is edited: the cached previous code is no longer a
-    // prefix — the highlighter resets and re-appends the whole source.
-    const edited = "fn renamed() {\n" + code1.split("\n").slice(1).join("\n");
-    const view2 = MarkdownView({ source: rustFenceSource(edited) });
-    if (fenceText(view2.children[0]!) !== edited) {
-      throw new Error(`fence 2 text mismatch`);
-    }
-    if (appendCalls() !== 2) throw new Error(`appendCalls after edit = ${appendCalls()}`);
-    const recorded = appendResults();
-    // The post-reset re-append is a fresh first append: no changed range.
-    if (recorded[1]!.changed !== undefined) {
-      throw new Error(`a post-reset append must report no changed range`);
-    }
-    if (!spansEqual(incrementalHighlight("rust", edited), highlightCode("rust", edited))) {
-      throw new Error("edited spans differ from a full one-shot highlight");
-    }
-  } finally {
-    setAddonForTesting(null);
-    resetIncrementalHighlightCache();
-  }
 });
