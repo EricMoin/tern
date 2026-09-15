@@ -50,6 +50,7 @@ import { createSignal } from "solid-js";
 import {
   createComponent,
   render,
+  subscribeClickFocus,
   subscribeInput,
   subscribePaste,
   subscribeResize,
@@ -58,6 +59,7 @@ import type { Node, Renderer } from "@tern-tui/core";
 import type { ScreenPlan } from "../../core/plan.ts";
 import type { HeadlessApp } from "../../core/state.ts";
 import type { ViewportSize } from "../../core/viewport.ts";
+import { pointerEventOf } from "../core/input.ts";
 import { applyEffect, type HostIO } from "../core/io.ts";
 import { App } from "./App.ts";
 
@@ -147,6 +149,22 @@ export function attachLayerInput(
     app.dispatch({ kind: "paste", text });
     void settle();
   });
+  // MOUSE IS THE FRAMEWORK'S, THE MEANING IS THE CORE'S. The pointer resolver
+  // (core/pointer.ts) owns which pane a cell names; this subscription only turns
+  // the framework's own mouse event into the app's `PointerEvent`
+  // (core/events.ts) through layer A's one translation and hands it to
+  // `HeadlessApp.dispatch` — the same route the keys take. `subscribeClickFocus`
+  // is the framework's own focus routing for the click; `subscribeWheelScroll` and
+  // `subscribePanelDrag` are deliberately NOT used: they move a scene's scroll
+  // offset or a panel's flex basis, which is a second decision point about the
+  // plan the core now owns.
+  const offClick = subscribeClickFocus(renderer);
+  const offMouse = renderer.onMouse((event) => {
+    const pointer = pointerEventOf(event);
+    if (pointer === null) return;
+    app.dispatch(pointer);
+    void settle();
+  });
   const offResize = subscribeResize(renderer, (event) => {
     frame({ rows: event.height, cols: event.width });
   });
@@ -154,6 +172,8 @@ export function attachLayerInput(
   return () => {
     offKey();
     offPaste();
+    offClick();
+    offMouse();
     offResize();
   };
 }

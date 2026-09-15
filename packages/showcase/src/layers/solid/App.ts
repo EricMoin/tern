@@ -69,6 +69,8 @@ import type {
   SidebarRegion,
   StyleHint,
 } from "../../core/plan.ts";
+import { controlSpec } from "../pane-elements.ts";
+import { controlNode } from "./pane-elements.ts";
 
 /**
  * The theme role each plan hint paints with. The plan names a SEMANTIC role
@@ -240,8 +242,31 @@ export function modalElement(region: ModalRegion): Node {
     height: region.height,
     z_index: MODAL_Z_INDEX,
     flex_direction: "column",
-    children: region.rows.map((row) => rowElement(row.spans)),
+    children: region.rows.map((row) => modalRowElement(region, row.spans)),
   });
+}
+
+/**
+ * One overlay row: its spans, with the framework form element mounted where the
+ * plan's row is a form control.
+ *
+ * THE ELEMENT REPLACES NOTHING. The plan's text span IS the element's own
+ * composition (the glyph is the element's state, the text after it its label), so
+ * the mounted node reproduces the row's cells exactly; the plan still places them.
+ * The `Checkbox` / `Radio` / `Toggle` factories come from `@tern-tui/core` — a
+ * solid tree takes the core scene `Node` a factory returns, which is the seam
+ * layer B's React reconciler cannot offer.
+ */
+function modalRowElement(region: ModalRegion, spans: readonly PlanSpan[]): Node {
+  const nodes: Node[] = [];
+  for (const span of spans) {
+    if (span.text === "") continue;
+    const spec = controlSpec(region.id, span.text);
+    nodes.push(spec === null ? Text({ text: span.text, role: ROLE_OF_HINT[span.hint] }) : controlNode(spec));
+  }
+  if (nodes.length === 0) return Text({ text: "" });
+  if (nodes.length === 1) return nodes[0]!;
+  return Box({ flex_direction: "row", height: 1, children: nodes });
 }
 
 /** The engine-facing rectangle of a pane: the plan's own, in scene cells. */

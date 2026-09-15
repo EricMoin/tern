@@ -30,6 +30,7 @@
 //! convention layer A's `composeRows` produces (layers/core/frame.ts:121-132).
 //! `app_test.ts` holds the two side by side for all twelve fixtures.
 
+import type { ReactElement } from "react";
 import { Box as CoreBox, type Node, type Renderer } from "@tern-tui/core";
 import { createRoot } from "@tern-tui/react";
 import type { ScreenPlan } from "../../core/plan.ts";
@@ -77,6 +78,34 @@ export function withScene<T>(plan: ScreenPlan, use: (mounted: Node) => T): T {
     if (mounted.length !== 1) {
       throw new Error("the React commit left " + mounted.length +
         " children on the scene root, expected the one mounted plan");
+    }
+    return use(mounted[0]!);
+  } finally {
+    root.unmount();
+  }
+}
+
+/**
+ * Mount ONE React element through the same reconciler `withScene` uses, hand the
+ * committed node to `use`, then unmount — the construction proof for the layer's
+ * `pane-elements.ts` (a `Menu`/`Select` element is only real once it commits).
+ */
+export function mountElement<T>(element: ReactElement, use: (mounted: Node) => T): T {
+  const sceneRoot = CoreBox();
+  const renderer = {
+    root: sceneRoot,
+    render: () => {},
+    // A `Menu`/`Select` host component subscribes to the renderer on mount, so the
+    // test seam has to answer the subscription even though nothing is painted here.
+    onMouse: () => () => {},
+    hit_test: () => [],
+  } as unknown as Renderer;
+  const root = createRoot(renderer);
+  try {
+    root.render(element);
+    const mounted = sceneRoot.children;
+    if (mounted.length !== 1) {
+      throw new Error("the React commit left " + mounted.length + " children on the scene root, expected one element");
     }
     return use(mounted[0]!);
   } finally {

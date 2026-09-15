@@ -28,10 +28,11 @@
 //! layer never splices the buffer, never learns where the caret is and cannot drift
 //! from what `ctrl+v`-style typing would do. No key gains a meaning here.
 
-import { useCallback, useRef } from "react";
-import { useInput, usePaste, useResize } from "@tern-tui/react";
+import { useCallback, useEffect, useRef } from "react";
+import { useApp, useClickToFocus, useInput, usePaste, useResize } from "@tern-tui/react";
 import type { HeadlessApp } from "../../core/state.ts";
 import type { ViewportSize } from "../../core/viewport.ts";
+import { pointerEventOf } from "../core/input.ts";
 import { applyEffect, type HostIO } from "../core/io.ts";
 
 /** Repaint at `size`, or at the size the app already knows when omitted. The same
@@ -48,6 +49,7 @@ export type FrameSink = (size?: ViewportSize) => void;
  * than repainting a lie (io.ts:9-12).
  */
 export function useLayerInput(app: HeadlessApp, io: HostIO, frame: FrameSink): void {
+  const { renderer } = useApp();
   const queue = useRef<Promise<void>>(Promise.resolve());
 
   /** Drain the app's effects, then repaint — one at a time, in request order. */
@@ -70,6 +72,26 @@ export function useLayerInput(app: HeadlessApp, io: HostIO, frame: FrameSink): v
     app.dispatch({ kind: "paste", text });
     void settle();
   });
+
+  // MOUSE IS THE FRAMEWORK'S, THE MEANING IS THE CORE'S. The pointer resolver
+  // (core/pointer.ts) owns which pane a cell names; this subscription only turns
+  // the framework's own mouse event into the app's `PointerEvent`
+  // (core/events.ts) through layer A's one translation and hands it to
+  // `HeadlessApp.dispatch` — the same route the keys take. `useClickToFocus` is
+  // the framework's own focus routing for the click; the wheel and panel-drag
+  // hooks are deliberately NOT used: they move a scene's scroll offset or a
+  // panel's flex basis, which is a second decision point about the plan the core
+  // now owns (the React host components forward no ref to their node either, the
+  // G2 gap App.ts reports).
+  useClickToFocus(renderer);
+  useEffect(() => {
+    return renderer.onMouse((event) => {
+      const pointer = pointerEventOf(event);
+      if (pointer === null) return;
+      app.dispatch(pointer);
+      void settle();
+    });
+  }, [renderer, app, settle]);
 
   useResize((event) => {
     frame({ rows: event.height, cols: event.width });

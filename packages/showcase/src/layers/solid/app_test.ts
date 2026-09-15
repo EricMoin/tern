@@ -36,6 +36,7 @@ import {
   createRenderer,
   scrollTo,
   type KeyEvent,
+  type MouseEventJs,
   type Node,
   type Renderer,
   type ResizeHandler,
@@ -43,7 +44,7 @@ import {
 import { withFakeAddon } from "../../../../core/src/testkit/fakes.ts";
 import { Buffer } from "../../core/buffer.ts";
 import type { FileSystem } from "../../core/fs.ts";
-import type { EditorRegion, ScreenPlan, SidebarRegion } from "../../core/plan.ts";
+import type { EditorRegion, ModalRegion, ScreenPlan, SidebarRegion } from "../../core/plan.ts";
 import { HeadlessApp } from "../../core/state.ts";
 import { cellWidth, type ViewportSize } from "../../core/viewport.ts";
 import { appOptions, chars, key, referencePlan } from "../../parity/goldens/fixture.ts";
@@ -53,8 +54,10 @@ import { composeRows } from "../core/frame.ts";
 import type { HostIO } from "../core/io.ts";
 import { LAYER as coreLayer } from "../core/index.ts";
 import { LAYER as reactLayer } from "../react/index.ts";
+import { controlSpec, paletteMenuSpec, pickerSelectSpec } from "../pane-elements.ts";
 import { LAYER, mountPlanScene, paintMounted, paintPlan, withScene } from "./index.ts";
 import { attachLayerInput, createPlanStore } from "./primitives.ts";
+import { menuNode, selectNode } from "./pane-elements.ts";
 
 /** Fail unless `condition`. */
 function check(condition: boolean, what: string): void {
@@ -81,6 +84,7 @@ interface MockRenderer {
   readonly keys: Set<(event: KeyEvent) => void>;
   readonly pastes: Set<(text: string) => void>;
   readonly resizes: Set<ResizeHandler>;
+  readonly mice: Set<(event: MouseEventJs) => void>;
   readonly renders: () => number;
 }
 
@@ -95,6 +99,7 @@ function mockRenderer(width: number, height: number): MockRenderer {
   const keys = new Set<(event: KeyEvent) => void>();
   const pastes = new Set<(text: string) => void>();
   const resizes = new Set<ResizeHandler>();
+  const mice = new Set<(event: MouseEventJs) => void>();
   let renders = 0;
   const renderer = {
     root,
@@ -104,13 +109,14 @@ function mockRenderer(width: number, height: number): MockRenderer {
     onResize: (handler: ResizeHandler) => { resizes.add(handler); return () => resizes.delete(handler); },
     onPaste: (handler: (text: string) => void) => { pastes.add(handler); return () => pastes.delete(handler); },
     onFocus: () => () => {},
-    onMouse: () => () => {},
+    onMouse: (handler: (event: MouseEventJs) => void) => { mice.add(handler); return () => mice.delete(handler); },
+    hit_test: () => [],
     clearCursor: () => {},
     setCursor: () => {},
     setTitle: () => {},
     destroy: () => {},
   } as unknown as Renderer;
-  return { renderer, root, keys, pastes, resizes, renders: () => renders };
+  return { renderer, root, keys, pastes, resizes, mice, renders: () => renders };
 }
 
 /** A host that reads and writes nothing, for the tests that do not exercise IO. */
@@ -555,4 +561,73 @@ Deno.test("solid: a plan write re-emits into the committed root and the paint fo
   );
   dispose();
   console.log("solid reactive: one plan write — the emitter re-ran in place and the committed root is the new plan's frame");
+});
+
+// --- 5. the framework elements (the form primitives and the pointer route) -----
+
+/** Every node of `types` in `node`'s subtree, pre-order. */
+function collect(node: Node, types: ReadonlySet<string>, out: string[]): void {
+  if (types.has(node.type)) out.push(node.type);
+  for (const child of node.children) collect(child, types, out);
+}
+
+/** Press `event` at the layer's mouse subscription, waiting for it to exist. */
+async function mouse(mock: MockRenderer, event: MouseEventJs): Promise<void> {
+  await until(() => mock.mice.size > 0, "the layer's mouse subscription");
+  for (const handler of mock.mice) handler(event);
+}
+
+Deno.test("solid: the mouse translation reaches the one dispatcher", async () => {
+  const size: ViewportSize = { rows: 12, cols: 30 };
+  const app = new HeadlessApp({ buffer: Buffer.fromString("alpha\nbeta\ngamma\n"), size });
+  const mock = mockRenderer(size.cols, size.rows);
+  const mounted = mountLayer(app, inertHost(), mock, size);
+  // The layer resolves NOTHING: the cell goes to the core's pointer resolver, which
+  // reads it against the plan. A press on editor row 2 names document row 2.
+  await mouse(mock, { kind: "down_left", column: 1, row: 2 } as MouseEventJs);
+  await until(() => app.caret.row === 2, "the caret to follow the press");
+  check(app.plan(size).cursor?.row === 2, "the plan's cursor did not follow the pointer");
+  mounted.unmount();
+  console.log("solid mouse: a press reaches the one dispatcher and the plan's cursor follows it");
+});
+
+Deno.test("solid: the preferences and theme overlays mount the framework form elements", () => {
+  const formTypes: ReadonlySet<string> = new Set(["checkbox", "radio", "toggle"]);
+  const preferences: string[] = [];
+  const theme: string[] = [];
+  const preferencesPlan = referencePlan(FIXTURES.find((fixture) => fixture.screen === "preferences")!);
+  const themePlan = referencePlan(FIXTURES.find((fixture) => fixture.screen === "theme")!);
+  withScene(preferencesPlan, (mounted) => collect(mounted, formTypes, preferences));
+  withScene(themePlan, (mounted) => collect(mounted, formTypes, theme));
+  check(preferences.length === 4, "the preferences overlay mounted " + preferences.length + " form elements, expected 4");
+  check(preferences.includes("checkbox") && preferences.includes("radio") && preferences.includes("toggle"),
+    "the preferences overlay did not mount all three primitives: " + preferences.join(","));
+  check(theme.length === 3 && theme.every((type) => type === "radio"),
+    "the theme overlay's choices are not three radio rows: " + theme.join(","));
+  console.log("solid pane: preferences mounts checkbox + radio + toggle, theme mounts a 3-row radio group");
+});
+
+Deno.test("solid: the palette Menu factory composes the plan's command rows", () => {
+  const plan = referencePlan(FIXTURES.find((fixture) => fixture.screen === "palette")!);
+  const modal = plan.regions.find((region) => region.kind === "modal") as ModalRegion | undefined;
+  check(modal !== undefined, "the palette plan has no modal region");
+  const spec = paletteMenuSpec(modal!);
+  check(spec !== null, "the palette modal yielded no Menu spec");
+  const labels = spec!.items.map((item) => item.label);
+  const rows = menuNode(spec!).children.map((child) => String(child.props.text ?? ""));
+  check(rows.join("|") === labels.join("|"),
+    "the Menu rows are not the plan's command labels:\n  " + JSON.stringify(rows) + "\n  " + JSON.stringify(labels));
+  console.log("solid pane: the palette Menu composes " + labels.length + " command rows");
+});
+
+Deno.test("solid: the picker Select factory composes the plan's option rows", () => {
+  const plan = referencePlan(FIXTURES.find((fixture) => fixture.screen === "chooser")!);
+  const modal = plan.regions.find((region) => region.kind === "modal") as ModalRegion | undefined;
+  check(modal !== undefined && modal.id === "picker", "the chooser plan has no picker modal");
+  const spec = pickerSelectSpec(modal!);
+  check(spec !== null, "the picker modal yielded no Select spec");
+  const options = selectNode(spec!).children.slice(1).map((child) => String(child.props.text ?? ""));
+  check(options.join("|") === spec!.options.map((option) => option.label).join("|"),
+    "the Select option rows are not the picker's files:\n  " + JSON.stringify(options));
+  console.log("solid pane: the picker Select composes " + spec!.options.length + " option rows");
 });

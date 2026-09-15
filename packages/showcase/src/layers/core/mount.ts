@@ -54,12 +54,15 @@ import {
 import type {
   EditorRegion,
   ModalRegion,
+  ModalRow,
   ModeRegion,
   PlanSpan,
   ScreenPlan,
   SidebarRegion,
   StyleHint,
 } from "../../core/plan.ts";
+import { controlSpec } from "../pane-elements.ts";
+import { controlNode } from "./pane-elements.ts";
 
 /**
  * The theme role each plan hint paints with. The plan names a SEMANTIC role
@@ -143,7 +146,32 @@ export function modalScene(region: ModalRegion, theme: Theme = getTheme()): Node
     height: region.height,
     z_index: MODAL_Z_INDEX,
     flex_direction: "column",
-  }, ...region.rows.map((row) => spanRow(theme, row.spans)));
+  }, ...region.rows.map((row) => modalRow(theme, region, row)));
+}
+
+/**
+ * One overlay row: its spans, with the framework form element mounted where the
+ * plan's row is a form control.
+ *
+ * THE ELEMENT REPLACES NOTHING. The plan's text span IS the element's own
+ * composition — the glyph the row carries is the state the element paints and the
+ * label after it is the element's label — so `controlNode` reproduces the row's
+ * cells exactly (asserted for every fixture by `pane_test.ts`); the plan still
+ * places them. A row that is not a control (the overlay's frame, title, key column,
+ * footer, the theme audit's findings) stays the plan's styled text.
+ */
+function modalRow(theme: Theme, region: ModalRegion, row: ModalRow): Node {
+  const nodes: Node[] = [];
+  for (const span of row.spans) {
+    if (span.text === "") continue;
+    const spec = controlSpec(region.id, span.text);
+    nodes.push(spec === null
+      ? Text(resolveTheme(theme, { role: ROLE_OF_HINT[span.hint], text: span.text }))
+      : controlNode(spec));
+  }
+  if (nodes.length === 0) return Text({ text: "" });
+  if (nodes.length === 1) return nodes[0]!;
+  return Box({ flex_direction: "row", height: 1 }, ...nodes);
 }
 
 /**

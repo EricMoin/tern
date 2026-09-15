@@ -32,13 +32,15 @@ import { createElement } from "react";
 import {
   Box as CoreBox,
   type KeyEvent,
+  type MouseEventJs,
   type Renderer,
   type ResizeHandler,
 } from "@tern-tui/core";
+import * as reactBarrel from "@tern-tui/react";
 import { createRoot } from "@tern-tui/react";
 import { Buffer } from "../../core/buffer.ts";
 import type { FileSystem } from "../../core/fs.ts";
-import type { ScreenPlan } from "../../core/plan.ts";
+import type { ModalRegion, ScreenPlan } from "../../core/plan.ts";
 import { HeadlessApp } from "../../core/state.ts";
 import { cellWidth, type ViewportSize } from "../../core/viewport.ts";
 import { appOptions, chars, key, referencePlan } from "../../parity/goldens/fixture.ts";
@@ -47,8 +49,11 @@ import { compareFrames, comparePlans, frameProblems, planKey, runLayer } from ".
 import { composeRows } from "../core/frame.ts";
 import type { HostIO } from "../core/io.ts";
 import { LAYER as coreLayer } from "../core/index.ts";
+import { controlSpec, paletteMenuSpec, pickerSelectSpec } from "../pane-elements.ts";
 import { App } from "./App.ts";
 import { LAYER, paintPlan, withScene } from "./index.ts";
+import { mountElement } from "./frame.ts";
+import { controlElement, paletteMenuElement, pickerSelectElement } from "./pane-elements.ts";
 
 /** Fail unless `condition`. */
 function check(condition: boolean, what: string): void {
@@ -75,6 +80,7 @@ interface MockRenderer {
   readonly keys: Set<(event: KeyEvent) => void>;
   readonly pastes: Set<(text: string) => void>;
   readonly resizes: Set<ResizeHandler>;
+  readonly mice: Set<(event: MouseEventJs) => void>;
   readonly renders: () => number;
 }
 
@@ -89,6 +95,7 @@ function mockRenderer(width: number, height: number): MockRenderer {
   const keys = new Set<(event: KeyEvent) => void>();
   const pastes = new Set<(text: string) => void>();
   const resizes = new Set<ResizeHandler>();
+  const mice = new Set<(event: MouseEventJs) => void>();
   let renders = 0;
   const renderer = {
     root,
@@ -98,13 +105,14 @@ function mockRenderer(width: number, height: number): MockRenderer {
     onResize: (handler: ResizeHandler) => { resizes.add(handler); return () => resizes.delete(handler); },
     onPaste: (handler: (text: string) => void) => { pastes.add(handler); return () => pastes.delete(handler); },
     onFocus: () => () => {},
-    onMouse: () => () => {},
+    onMouse: (handler: (event: MouseEventJs) => void) => { mice.add(handler); return () => mice.delete(handler); },
+    hit_test: () => [],
     clearCursor: () => {},
     setCursor: () => {},
     setTitle: () => {},
     destroy: () => {},
   } as unknown as Renderer;
-  return { renderer, keys, pastes, resizes, renders: () => renders };
+  return { renderer, keys, pastes, resizes, mice, renders: () => renders };
 }
 
 /** A host that reads and writes nothing, for the tests that do not exercise IO. */
@@ -397,4 +405,60 @@ Deno.test("react: a resize rebuilds the plan at the new size and repaints", asyn
   check(paintProblems(plan).length === 0, "the resized plan does not paint as the plan lays out");
   mounted.unmount();
   console.log("react resize: 40x12 — the plan is rebuilt and the committed scene still is the plan's frame");
+});
+
+// --- 4. the framework elements (the form primitives and the pointer route) -----
+
+/** Press `event` at the layer's mouse subscription, waiting for it to exist. */
+async function mouse(mock: MockRenderer, event: MouseEventJs): Promise<void> {
+  await until(() => mock.mice.size > 0, "the layer's mouse subscription");
+  for (const handler of mock.mice) handler(event);
+}
+
+Deno.test("react: the mouse translation reaches the one dispatcher", async () => {
+  const size: ViewportSize = { rows: 12, cols: 30 };
+  const app = new HeadlessApp({ buffer: Buffer.fromString("alpha\nbeta\ngamma\n"), size });
+  const mock = mockRenderer(size.cols, size.rows);
+  const mounted = mountLayer(app, inertHost(), mock, size);
+  // The layer resolves NOTHING: the cell goes to the core's pointer resolver, which
+  // reads it against the plan. A press on editor row 2 names document row 2.
+  await mouse(mock, { kind: "down_left", column: 1, row: 2 } as MouseEventJs);
+  await until(() => app.caret.row === 2, "the caret to follow the press");
+  check(app.plan(size).cursor?.row === 2, "the plan's cursor did not follow the pointer");
+  mounted.unmount();
+  console.log("react mouse: a press reaches the one dispatcher and the plan's cursor follows it");
+});
+
+Deno.test("react: the palette Menu and picker Select are constructed; the form primitives are not", () => {
+  const palette = FIXTURES.find((fixture) => fixture.screen === "palette")!;
+  const paletteModal = referencePlan(palette).regions.find((region) => region.kind === "modal") as ModalRegion | undefined;
+  const menu = paletteMenuSpec(paletteModal!);
+  check(menu !== null, "the palette plan yielded no Menu spec");
+  const menuRows = mountElement(paletteMenuElement(menu!), (node) =>
+    node.children.map((child) => String(child.props.text ?? "")));
+  check(menuRows.join("|") === menu!.items.map((item) => item.label).join("|"),
+    "the committed Menu rows are not the palette's commands:\n  " + JSON.stringify(menuRows));
+
+  const chooser = FIXTURES.find((fixture) => fixture.screen === "chooser")!;
+  const pickerModal = referencePlan(chooser).regions.find((region) => region.kind === "modal") as ModalRegion | undefined;
+  check(pickerModal !== undefined && pickerModal.id === "picker", "the chooser plan has no picker modal");
+  const select = pickerSelectSpec(pickerModal!);
+  check(select !== null, "the picker plan yielded no Select spec");
+  const options = mountElement(pickerSelectElement(select!), (node) =>
+    node.children.slice(1).map((child) => String(child.props.text ?? "")));
+  check(options.join("|") === select!.options.map((option) => option.label).join("|"),
+    "the committed Select rows are not the picker's files:\n  " + JSON.stringify(options));
+
+  // The gap, asserted rather than assumed: the barrel exports no host component for
+  // the form primitives, and a core scene Node is not a React child.
+  check(!("Checkbox" in reactBarrel) && !("Radio" in reactBarrel) && !("Toggle" in reactBarrel),
+    "a form primitive is now exported by @tern-tui/react — mount it and drop the gap");
+  const preferences = FIXTURES.find((fixture) => fixture.screen === "preferences")!;
+  const modal = referencePlan(preferences).regions.find((region) => region.kind === "modal") as ModalRegion | undefined;
+  const span = modal!.rows.flatMap((row) => row.spans).find((entry) => entry.text.startsWith("["));
+  check(span !== undefined, "the preferences plan has no checkbox row");
+  const spec = controlSpec(modal!.id, span!.text);
+  check(spec !== null, "the preferences checkbox row yielded no control spec");
+  check(controlElement(spec!) === null, "React constructed a form primitive it cannot host");
+  console.log("react elements: palette Menu + picker Select commit; Checkbox/Radio/Toggle remain unhosted (fix-react-form-primitives-unhosted)");
 });
