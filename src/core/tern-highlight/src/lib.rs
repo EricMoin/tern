@@ -31,12 +31,15 @@
 //!
 //! [`IncrementalHighlighter`] (Phase 9) is the streaming variant: it buffers
 //! the source, keeps the previous parse tree, and re-parses only the tail on
-//! each [`append`](IncrementalHighlighter::append). The grammar's highlight
-//! queries are compiled once in
-//! [`new`](IncrementalHighlighter::new) and reused for every append, and
+//! each [`append`](IncrementalHighlighter::append) — or only the affected
+//! window on each [`apply_edit`](IncrementalHighlighter::apply_edit), which
+//! hands the previous tree a tree-sitter `InputEdit` for a mid-file
+//! replacement. The grammar's highlight queries are compiled once in
+//! [`new`](IncrementalHighlighter::new) and reused for every parse, and
 //! [`last_changed_span`](IncrementalHighlighter::last_changed_span) reports
 //! the byte span the last incremental parse actually reworked (the
-//! "instrumented node count" proxy).
+//! "instrumented node count" proxy); [`spans_in_window`] narrows a span
+//! stream to that window for consumers that repaint only what changed.
 
 
 use tree_sitter::{
@@ -285,14 +288,33 @@ fn parse_captures(language: Language, source: &str) -> Option<Vec<Capture>> {
     Some(collect_captures(&queries, tree.root_node(), source))
 }
 
+/// The tree-sitter [`Point`] for byte offset `byte` of `source`: the number
+/// of newlines before it (its zero-based row) and the number of bytes since the
+/// last newline (its zero-based column).
+///
+/// Columns count bytes, not characters — tree-sitter's lexer advances
+/// `extent.column` by the lookahead's byte size — so this is the point shape
+/// an [`InputEdit`] carries. `byte` must be `<= source.len()` and lie on a
+/// character boundary.
+fn point_at(source: &str, byte: usize) -> Point {
+    let prefix = &source[..byte];
+    let row = prefix.bytes().filter(|&b| b == b'\n').count();
+    let column = match prefix.rfind('\n') {
+        Some(newline) => byte - newline - 1,
+        None => byte,
+    };
+    Point::new(row, column)
+}
+
 /// An incremental token highlighter.
 ///
-/// Buffers the accumulated source and re-parses only the tail on each append,
+/// Buffers the accumulated source and re-parses only the tail on each append —
+/// or only the reworked window on each [`apply_edit`](Self::apply_edit) —
 /// reusing the previous tree so tree-sitter skips the untouched head. The
 /// highlight queries are compiled once here — the one-shot [`highlight`] path
-/// recompiles them per call. Each [`append`](Self::append) returns the
-/// complete span stream for the accumulated text, with the same coverage
-/// contract as [`highlight`].
+/// recompiles them per call. Both entry points return the complete span stream
+/// for the accumulated text, with the same coverage contract as
+/// [`highlight`].
 pub struct IncrementalHighlighter {
     /// The language being highlighted (also the parser's grammar).
     language: Language,
@@ -374,9 +396,77 @@ impl IncrementalHighlighter {
             });
         }
 
-        // Incremental parse against the (edited) previous tree. The callback
-        // returns the text starting at the requested byte offset — the same
-        // slicing `Parser::parse` uses internally.
+        self.reparse((old_len, new_len))
+    }
+
+    /// Replace the byte range `[start, old_end)` of the buffered source with
+    /// `new_text` and return the complete span stream over the resulting text
+    /// (the same coverage contract as [`append`](Self::append) and
+    /// [`highlight`]).
+    ///
+    /// The mid-file counterpart to `append`: the replacement is handed to the
+    /// previous parse tree as a tree-sitter [`InputEdit`], so the parser
+    /// reuses its untouched subtrees and re-parses only the affected window
+    /// instead of the whole file — the change `append` cannot express, and the
+    /// reason [`last_changed_span`](Self::last_changed_span) is useful after
+    /// it. With no previous tree (before the first call, or after
+    /// [`reset`](Self::reset)) the edited text is parsed from scratch.
+    ///
+    /// `start` and `old_end` are byte offsets into the *current* buffered
+    /// source and must lie on character boundaries. An out-of-range or
+    /// misaligned edit is a no-op — the buffered source and tree stay
+    /// untouched, the returned stream is empty and the reported window is
+    /// zero-length. An empty replacement of an empty range is a no-op too
+    /// (mirroring the empty-chunk rule on `append`), reported as a
+    /// zero-length window at `start`.
+    pub fn apply_edit(&mut self, start: usize, old_end: usize, new_text: &str) -> Vec<Span> {
+        if start == old_end && new_text.is_empty() {
+            self.last_changed = (start, start);
+            return Vec::new();
+        }
+        if start > old_end
+            || old_end > self.source.len()
+            || !self.source.is_char_boundary(start)
+            || !self.source.is_char_boundary(old_end)
+        {
+            self.last_changed = (0, 0);
+            return Vec::new();
+        }
+
+        // The edit's old-document points come from the pre-edit source, its
+        // new-document end point from the post-edit source (tree-sitter's
+        // `InputEdit` contract). Columns count bytes, not characters: the
+        // lexer advances a column by the lookahead's byte size.
+        let start_position = point_at(&self.source, start);
+        let old_end_position = point_at(&self.source, old_end);
+        self.source.replace_range(start..old_end, new_text);
+        let new_end_byte = start + new_text.len();
+
+        if let Some(tree) = self.tree.as_mut() {
+            tree.edit(&InputEdit {
+                start_byte: start,
+                old_end_byte: old_end,
+                new_end_byte,
+                start_position,
+                old_end_position,
+                new_end_position: point_at(&self.source, new_end_byte),
+            });
+        }
+
+        self.reparse((start, new_end_byte))
+    }
+
+    /// Parse incrementally against the (already edited) previous tree and fold
+    /// the captures into the complete span stream over the buffered source,
+    /// recording the reworked window in `last_changed`.
+    ///
+    /// `fallback` is the window reported when the two trees' changed ranges
+    /// come back empty (a pure append reports its appended tail; an edit
+    /// reports the replaced range); the first parse — with no old tree to
+    /// reuse — reports the whole source.
+    fn reparse(&mut self, fallback: (usize, usize)) -> Vec<Span> {
+        // The callback returns the text starting at the requested byte offset —
+        // the same slicing `Parser::parse` uses internally.
         let Some(new_tree) = self.parser.parse_with_options(
             &mut |byte, _point| {
                 let src = self.source.as_str();
@@ -395,13 +485,13 @@ impl IncrementalHighlighter {
             let Some(captures) = parse_captures(self.language, &self.source) else {
                 return Vec::new();
             };
-            self.last_changed = (0, new_len);
+            self.last_changed = (0, self.source.len());
             return segments_from_captures(&self.source, &captures);
         };
 
         // The reworked span: the union of the changed ranges between the
-        // edited old tree and the new tree — the whole source on the first
-        // append, when there is no old tree to reuse.
+        // edited old tree and the new tree — the whole source on a first
+        // parse, when there is no old tree to reuse.
         self.last_changed = match self.tree.as_ref() {
             Some(old) => {
                 let ranges: Vec<(usize, usize)> = old
@@ -409,17 +499,26 @@ impl IncrementalHighlighter {
                     .map(|r| (r.start_byte, r.end_byte))
                     .collect();
                 (
-                    ranges.iter().map(|&(start, _)| start).min().unwrap_or(old_len),
-                    ranges.iter().map(|&(_, end)| end).max().unwrap_or(new_len),
+                    ranges.iter().map(|&(start, _)| start).min().unwrap_or(fallback.0),
+                    ranges.iter().map(|&(_, end)| end).max().unwrap_or(fallback.1),
                 )
             }
-            None => (0, new_len),
+            None => (0, self.source.len()),
         };
 
         let root = new_tree.root_node();
         let captures = collect_captures(&self.queries, root, &self.source);
         self.tree = Some(new_tree);
         segments_from_captures(&self.source, &captures)
+    }
+
+    /// The byte length of the buffered source.
+    ///
+    /// The napi wrapper uses it to keep its own bookkeeping honest across
+    /// [`apply_edit`](Self::apply_edit), whose no-op paths leave the buffer
+    /// untouched.
+    pub fn source_len(&self) -> usize {
+        self.source.len()
     }
 
     /// Drop the buffered source and the parse tree; the next
@@ -486,6 +585,69 @@ fn segments_from_captures(source: &str, captures: &[Capture]) -> Vec<Span> {
         }
     }
     spans
+}
+
+/// The sub-stream of `spans` covering the byte window `[start, end)` of the
+/// source the spans were built from.
+///
+/// Spans that cross a window boundary are split, and equal-style neighbors
+/// merge again, so the concatenated window texts reproduce
+/// `source[start..end]` exactly — the window an
+/// [`apply_edit`](IncrementalHighlighter::apply_edit) reworked, ready for a
+/// consumer that repaints only what changed. Offsets are clamped to the
+/// stream's own length; a window that lands inside a multi-byte character is
+/// widened outward to the enclosing character boundaries (tree-sitter's own
+/// offsets always land on them for valid UTF-8, so this only keeps a hand-built
+/// stream from panicking). An empty or inverted window yields no spans.
+pub fn spans_in_window(spans: &[Span], start: usize, end: usize) -> Vec<Span> {
+    if start >= end {
+        return Vec::new();
+    }
+    let mut window: Vec<Span> = Vec::new();
+    let mut cursor = 0usize;
+    for span in spans {
+        let span_start = cursor;
+        cursor += span.text.len();
+        if cursor <= start {
+            continue;
+        }
+        if span_start >= end {
+            break;
+        }
+        // Offsets local to this span, widened to character boundaries.
+        let from = floor_boundary(&span.text, start.saturating_sub(span_start));
+        let to = ceil_boundary(&span.text, end - span_start);
+        if from >= to {
+            continue;
+        }
+        let text = span.text[from..to].to_string();
+        match window.last_mut() {
+            Some(last) if last.style == span.style => last.text.push_str(&text),
+            _ => window.push(Span {
+                text,
+                style: span.style.clone(),
+            }),
+        }
+    }
+    window
+}
+
+/// The nearest character boundary of `text` at or below `byte`.
+fn floor_boundary(text: &str, byte: usize) -> usize {
+    let mut at = byte.min(text.len());
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// The nearest character boundary of `text` at or above `byte`.
+fn ceil_boundary(text: &str, byte: usize) -> usize {
+    let mut at = byte.min(text.len());
+    while at < text.len() && !text.is_char_boundary(at) {
+        at += 1;
+    }
+    at
 }
 
 #[cfg(test)]

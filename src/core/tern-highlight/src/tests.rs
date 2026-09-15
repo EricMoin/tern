@@ -657,3 +657,131 @@ fn incremental_reset_starts_a_fresh_full_parse() {
     assert_eq!(concat(&spans), fence);
     assert_eq!(hl.last_changed_span(), (0, fence.len()));
 }
+
+/// Assert `spans` is byte-identical to a full one-shot highlight of `source`
+/// — same span texts and styles in the same order — and reconstructs it.
+fn assert_matches_full_highlight(spans: &[Span], source: &str) {
+    let one_shot = highlight(Language::Rust, source);
+    assert_eq!(concat(spans), source, "the stream must reconstruct the source");
+    assert_eq!(
+        spans.len(),
+        one_shot.len(),
+        "span counts differ ({} vs {})",
+        spans.len(),
+        one_shot.len()
+    );
+    for (i, (inc, one)) in spans.iter().zip(one_shot.iter()).enumerate() {
+        assert_eq!(inc.text, one.text, "span {i} text differs");
+        assert_eq!(inc.style, one.style, "span {i} style differs");
+    }
+}
+
+#[test]
+fn apply_edit_spans_are_byte_identical_to_full_highlight() {
+    let fence = big_rust_fence();
+    let mut hl = IncrementalHighlighter::new(Language::Rust).expect("rust grammar/query load");
+    hl.append(&fence);
+
+    // A mid-file replacement — the change a pure append cannot express and
+    // the reason apply_edit exists.
+    let needle = "fn f0100()";
+    let at = fence.find(needle).expect("generated item in the fence");
+    let renamed = "fn renamed_0100()";
+    let mut edited = fence.clone();
+    edited.replace_range(at..at + needle.len(), renamed);
+    let spans = hl.apply_edit(at, at + needle.len(), renamed);
+    assert_matches_full_highlight(&spans, &edited);
+
+    // The re-parse reworked a window around the edit, not the whole file.
+    // tree-sitter reports the *structurally* changed nodes — the renamed
+    // identifier — so the window need not cover the whole replaced range (the
+    // unchanged `fn` keyword the edit starts on stays out of it).
+    let (start, end) = hl.last_changed_span();
+    assert!(
+        start > 0 && end < edited.len(),
+        "a mid-file edit must not rework everything ({start}..{end})"
+    );
+    assert!(
+        end - start <= renamed.len() + 64,
+        "the window stays near the edit: {} bytes for a {}-byte replacement",
+        end - start,
+        renamed.len()
+    );
+    let identifier = at + "fn ".len();
+    assert!(
+        start <= identifier && end >= identifier + "renamed_0100".len(),
+        "the window must cover the renamed identifier ({start}..{end})"
+    );
+
+    // A pure insertion at the end of the buffer, then a pure deletion of it:
+    // the buffer round-trips to the pre-insertion text.
+    let tail = "fn inserted() -> u32 { 7 }\n";
+    let mut inserted = edited.clone();
+    inserted.push_str(tail);
+    let spans = hl.apply_edit(edited.len(), edited.len(), tail);
+    assert_matches_full_highlight(&spans, &inserted);
+
+    let from = inserted.find("fn inserted()").expect("inserted item");
+    let spans = hl.apply_edit(from, from + tail.len(), "");
+    assert_matches_full_highlight(&spans, &edited);
+}
+
+#[test]
+fn apply_edit_reparses_around_multibyte_characters() {
+    let source = "fn main() {\n    let s = \"héllo → wörld\"; // ünïcode\n}\n";
+    let literal = "\"héllo → wörld\"";
+    // Byte offsets, not characters: 15 characters, 19 bytes.
+    assert_eq!(literal.len(), 19);
+    let at = source.find(literal).expect("string literal in the source");
+    let edited = source.replace(literal, "\"bye\"");
+
+    let mut hl = IncrementalHighlighter::new(Language::Rust).expect("rust grammar/query load");
+    hl.append(source);
+    let spans = hl.apply_edit(at, at + literal.len(), "\"bye\"");
+    assert_matches_full_highlight(&spans, &edited);
+}
+
+#[test]
+fn apply_edit_out_of_range_is_a_no_op() {
+    let mut hl = IncrementalHighlighter::new(Language::Rust).expect("rust grammar/query load");
+    hl.append("fn é() {}\n");
+    // Past the end of the buffer, inverted, and inside the two-byte é.
+    assert!(hl.apply_edit(99, 99, "x").is_empty(), "past the end");
+    assert!(hl.apply_edit(5, 2, "").is_empty(), "inverted");
+    assert!(hl.apply_edit(4, 4, "x").is_empty(), "mid-character");
+    assert_eq!(hl.last_changed_span(), (0, 0));
+    // The buffer survived: an edit from its head still sees the original text.
+    let spans = hl.apply_edit(0, 0, "// hi\n");
+    assert_matches_full_highlight(&spans, "// hi\nfn é() {}\n");
+}
+
+#[test]
+fn apply_edit_window_slices_only_the_changed_bytes() {
+    // A hand-built stream over "abcdefghi": [abc][defg][hi].
+    let stream = vec![
+        Span { text: "abc".to_string(), style: fg(KEYWORD_FG) },
+        Span { text: "defg".to_string(), style: Style::new() },
+        Span { text: "hi".to_string(), style: fg(STRING_FG) },
+    ];
+    // A window cutting two spans keeps their bytes and their styles.
+    let window = spans_in_window(&stream, 1, 8);
+    assert_eq!(concat(&window), "bcdefgh");
+    assert_eq!(window.len(), 3, "both cut spans stay separate: {window:?}");
+    assert_eq!(window[0].style, fg(KEYWORD_FG));
+    assert_eq!(window[1].style, Style::new());
+    assert_eq!(window[2].style, fg(STRING_FG));
+    // Equal-style neighbours merge back together inside the window.
+    let same = vec![
+        Span { text: "abc".to_string(), style: Style::new() },
+        Span { text: "def".to_string(), style: Style::new() },
+    ];
+    assert_eq!(concat(&spans_in_window(&same, 1, 5)), "bcde");
+    assert_eq!(spans_in_window(&same, 1, 5).len(), 1);
+    // Clamping, empty and inverted windows.
+    assert_eq!(concat(&spans_in_window(&stream, 4, usize::MAX)), "efghi");
+    assert!(spans_in_window(&stream, 5, 5).is_empty());
+    assert!(spans_in_window(&stream, 7, 2).is_empty());
+    // A boundary inside a multi-byte character widens outward, never panics.
+    let wide = vec![Span { text: "é!".to_string(), style: Style::new() }];
+    assert_eq!(concat(&spans_in_window(&wide, 1, 3)), "é!");
+}

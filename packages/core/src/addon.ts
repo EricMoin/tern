@@ -79,10 +79,32 @@ export interface HighlightAppendJs {
   changed?: number[];
 }
 
+/**
+ * The result of one incremental `apply_edit`: the spans covering ONLY the
+ * changed window of the edited source (concatenating their texts reproduces
+ * that window byte-for-byte), plus the `[start, end)` byte range of the
+ * window in the new source. Unlike {@link HighlightAppendJs} this is not the
+ * whole document — a mid-file edit crosses the binding as the reworked window
+ * alone.
+ */
+export interface HighlightEditJs {
+  /** The span stream covering only the changed window. */
+  spans: HighlightSpanJs[];
+  /** The `[start, end)` byte window in the new source `spans` cover. */
+  changed: [number, number];
+}
+
 /** The native incremental highlighter instance surface. */
 export interface NativeIncrementalHighlighter {
   /** Append `chunk`; returns the full stream over the accumulated source. */
   append(chunk: string): HighlightAppendJs;
+  /**
+   * Replace the byte range `[start, oldEnd)` of the buffered source with
+   * `newText` and return the spans covering only the reworked window. A
+   * binding that predates this method has no edit surface — the JS layer
+   * checks for it and degrades (see `editHighlight`).
+   */
+  apply_edit(start: number, oldEnd: number, newText: string): HighlightEditJs;
   /** Drop the buffered source and tree; the next append is a fresh parse. */
   reset(): void;
 }

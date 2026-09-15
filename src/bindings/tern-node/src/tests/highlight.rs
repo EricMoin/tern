@@ -135,6 +135,82 @@ fn incremental_highlighter_reset_round_trips() {
     assert_eq!(concat_spans(&third.spans), "fn b() {}\nfn c() {}\n");
 }
 
+/// The binding's edit surface must cross the napi boundary with the changed
+/// window alone: the returned spans cover the reworked bytes of the edited
+/// source, and the engine's buffer advances to the edited text so later
+/// appends stay incremental.
+#[test]
+fn incremental_edit_returns_only_the_changed_window() {
+    let hl = IncrementalHighlighter::new("rust".to_string()).expect("rust highlighter");
+    let head = large_rust_source();
+    let _ = hl.append(head.clone());
+
+    // Rename an interior helper — the mid-file edit append cannot express.
+    let needle = "fn helper_4()";
+    let at = head.find(needle).expect("interior declaration");
+    let renamed = "fn renamed_4()";
+    let edited = head.replacen(needle, renamed, 1);
+    let edit = hl.apply_edit(at as u32, (at + needle.len()) as u32, renamed.to_string());
+
+    let (start, end) = (edit.changed[0] as usize, edit.changed[1] as usize);
+    assert!(
+        start > 0 && end < edited.len(),
+        "a mid-file edit must report a window inside the file, got {start}..{end}"
+    );
+    let window = concat_spans(&edit.spans);
+    assert_eq!(
+        window,
+        edited[start..end],
+        "the window spans must reconstruct their own slice of the new source"
+    );
+    assert!(
+        window.len() < edited.len(),
+        "only the changed window may cross the boundary ({} of {} bytes)",
+        window.len(),
+        edited.len()
+    );
+
+    // The buffer now holds the edited source: the next append is a tail
+    // re-parse whose stream matches a one-shot highlight of the full text.
+    let tail = "\nfn appended_after_edit() {}\n";
+    let appended = hl.append(tail.to_string());
+    let full = format!("{edited}{tail}");
+    assert_eq!(concat_spans(&appended.spans), full);
+    let one_shot = highlight("rust".to_string(), full).expect("one-shot highlight");
+    assert_eq!(appended.spans.len(), one_shot.len(), "span counts differ");
+    for (i, (a, b)) in appended.spans.iter().zip(one_shot.iter()).enumerate() {
+        assert_eq!(a.text, b.text, "span {i} text");
+        assert_eq!(a.fg, b.fg, "span {i} fg");
+        assert_eq!(a.italic, b.italic, "span {i} italic");
+    }
+}
+
+/// An edit that describes no well-formed change is a no-op: no spans, an empty
+/// window, and a buffer left exactly as it was.
+#[test]
+fn incremental_edit_rejects_out_of_range_edits() {
+    let hl = IncrementalHighlighter::new("rust".to_string()).expect("rust highlighter");
+    let source = "fn é() {}\n";
+    let _ = hl.append(source.to_string());
+    // Past the end of the buffer, inverted, and inside the two-byte é.
+    for (start, old_end, new_text) in [(99u32, 99u32, "x"), (5, 2, ""), (4, 4, "x")] {
+        let rejected = hl.apply_edit(start, old_end, new_text.to_string());
+        assert!(
+            rejected.spans.is_empty(),
+            "an edit {start}..{old_end} must return no spans"
+        );
+        assert_eq!(rejected.changed, [0, 0], "an edit {start}..{old_end} has no window");
+    }
+    // The buffer survived untouched: a later append's complete stream covers
+    // the original text plus the tail, matching a one-shot highlight — a
+    // partially applied rejection would show up here as a wrong tree.
+    let tail = hl.append("// tail\n".to_string());
+    let full = "fn é() {}\n// tail\n";
+    assert_eq!(concat_spans(&tail.spans), full);
+    let one_shot = highlight("rust".to_string(), full.to_string()).expect("one-shot highlight");
+    assert_eq!(tail.spans.len(), one_shot.len(), "span counts differ");
+}
+
 #[test]
 fn incremental_highlighter_empty_append_is_a_no_op() {
     let hl = IncrementalHighlighter::new("rust".to_string()).expect("rust highlighter");

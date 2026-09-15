@@ -85,6 +85,30 @@ pub struct HighlightAppendJs {
     pub changed: Option<[u32; 2]>,
 }
 
+/// The result of one [`IncrementalHighlighter::apply_edit`]: the spans covering
+/// ONLY the changed window of the edited source, plus that window's
+/// `[start, end)` byte range in the new source.
+///
+/// Unlike [`HighlightAppendJs`] this is not the whole document: the window the
+/// incremental parse reworked is `last_changed_span` (the union of
+/// tree-sitter's changed ranges between the pre- and post-edit trees), sliced
+/// out of the complete stream. A mid-file edit therefore crosses the napi
+/// boundary as the reworked window instead of every span in the file — the
+/// point of the edit surface for a large buffer. The window is the
+/// structurally changed region, so it can be narrower than the replaced byte
+/// range (an unchanged `fn` keyword at the head of a renamed declaration stays
+/// out of it). Output-only (`object_from_js = false`), like
+/// [`HighlightAppendJs`].
+#[napi(object, object_from_js = false)]
+#[derive(Debug)]
+pub struct HighlightEditJs {
+    /// The span stream covering only the changed window.
+    pub spans: Vec<HighlightSpanJs>,
+    /// The `[start, end)` byte window in the new source `spans` covers — an
+    /// empty window ([start, start)) when the edit changed nothing.
+    pub changed: [u32; 2],
+}
+
 /// One styled run in a [`TuiRenderer::render_to_buffer_styled`] snapshot row:
 /// the run's text plus the style keys its cells share. Adjacent cells with
 /// identical style merge into one run, so concatenating a row's run texts

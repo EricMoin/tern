@@ -150,6 +150,38 @@ impl IncrementalHighlighter {
         }
     }
 
+    /// Replace the byte range `[start, old_end)` of the buffered source with
+    /// `new_text` and return the spans covering ONLY the window the
+    /// incremental re-parse reworked, plus that window's `[start, end)` byte
+    /// range in the new source.
+    ///
+    /// The mid-file counterpart to [`append`](Self::append): the previous tree
+    /// absorbs the replacement as a tree-sitter `InputEdit`, so only the
+    /// affected subtrees are re-parsed and only the affected spans cross the
+    /// napi boundary. The engine still holds the complete stream for the
+    /// edited source (see [`append`](Self::append)), but this call returns the
+    /// window alone. Offsets are UTF-8 bytes into the current buffered source;
+    /// an out-of-range or misaligned edit is a no-op reporting an empty
+    /// window.
+    #[napi]
+    pub fn apply_edit(&self, start: u32, old_end: u32, new_text: String) -> HighlightEditJs {
+        let mut inner = self.inner.lock().expect("incremental highlighter poisoned");
+        let before = inner.engine.source_len();
+        let spans = inner.engine.apply_edit(start as usize, old_end as usize, &new_text);
+        let (window_start, window_end) = inner.engine.last_changed_span();
+        let window = tern_highlight::spans_in_window(&spans, window_start, window_end);
+        // An applied edit leaves a parse tree behind, exactly like an append:
+        // the bookkeeping that suppresses the first append's changed range must
+        // see it too.
+        if inner.engine.source_len() != before {
+            inner.appended = true;
+        }
+        HighlightEditJs {
+            spans: window.into_iter().map(span_to_highlight_js).collect(),
+            changed: [window_start as u32, window_end as u32],
+        }
+    }
+
     /// Drop the buffered source and the parse tree; the next
     /// [`append`](Self::append) is a full parse from scratch (and reports no
     /// changed range, like any first append).
