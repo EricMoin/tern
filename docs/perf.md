@@ -528,6 +528,54 @@ Both benches exercise the path: the Rust scroll-churn bench wires
 authoritative byte measurement), and TS scenario 4 reports the renderer's
 `lastFlushBytes`.
 
+## Showcase app: editor viewport windowing
+
+The private showcase editor (`packages/showcase`) is the first app to drive the
+framework's windowing on real documents, so its two measurable baselines live
+here rather than in a new file. Full context: docs/components.md, "Showcase
+editor".
+
+**App e2e.** The editor's end-to-end gate is CI's `app-e2e` job
+(`.github/workflows/ci.yml`, macOS):
+
+```sh
+deno test --allow-env=NODE_ENV packages/showcase/src/e2e/   # flow contract + pre-pty proof
+bash packages/showcase/run-e2e-tmux.sh                      # real-tmux flows (needs a PTY)
+```
+
+The tmux half has never run in a sandboxed development session: `/dev/ptmx` is
+denied, so the pty write, the `pipe-pane` stream and the session teardown are
+UNOBSERVED; the pre-pty half replays the same flow steps headlessly. Recorded
+honestly in docs/components.md, "Showcase editor" → "What this work does NOT
+establish". `bash tools/verify.sh` gate 5 (the PTY smoke) cannot run from a
+sandboxed session at all.
+
+**Viewport windowing — measured.** The app's own perf case
+(`packages/showcase/src/core/viewport_test.ts`, "the 100k-line perf case…"):
+
+```sh
+deno test --allow-env=NODE_ENV --allow-read packages/showcase/src/core/viewport_test.ts \
+  --filter "100k-line perf case"
+```
+
+On this checkout (Deno 2.9.6, Apple silicon) that run printed, exit 0:
+
+```text
+100k perf case: 1k 0.2714ms/window, 100k 0.1945ms/window, ratio 0.72 (bound 15);
+  506 line-touches / 506 wraps over 45 windows at both sizes, 2 caret measurements each
+```
+
+Read it structurally, not as a benchmark. Every window is a 40-row region plus
+`DEFAULT_OVERSCAN` 2 = 42 rows; the 506 line-touches / 506 wraps over 45 windows
+are **~11 wrapped lines per update at BOTH 1k and 100k lines** — the work is a
+property of the window (40 visible + 2 overscan), not of the document. The
+1k and 100k runs do byte-for-byte identical structural work (same line-touches,
+same wraps, same first window); the test's own bounds are
+`linesTouched <= 40 + 2` and `ratio <= 15`, and the per-window wall clock stays
+a small constant factor across the 100× file (0.72 here, i.e. 100k no slower
+than 1k). The absolute `ms/window` figures move with the machine and are not a
+gate; the structural equality and the bound are what the test asserts. Contrast
+the synthetic scene benches below, which measure frame cost, not window work.
 ## Architecture diagram: unchanged
 
 The data-flow diagram in [`architecture.md`](architecture.md) (steps 1–8:

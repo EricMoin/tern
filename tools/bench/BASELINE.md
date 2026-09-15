@@ -1158,3 +1158,16 @@ bytes 5009 (unchanged — full-repaint byte cost is the same seam).
   bench's direct wiring. No thresholds were weakened: the refreshed
   constants are the freshly measured current-tree values, and the gate
   tolerance (±10%) is unchanged.
+
+## Showcase editor viewport (not part of this bench)
+
+The private showcase editor's windowing baseline is separate from the synthetic
+compositor benches above and lives in docs/perf.md, "Showcase app: editor
+viewport windowing": a 40-row window plus 2 overscan rows wraps **~11 lines per
+update at both 1k and 100k lines**, and the two file sizes do byte-for-byte
+identical structural work (506 line-touches / 506 wraps over 45 windows, 2 caret
+measurements each). Its e2e gate is CI's `app-e2e` job —
+`deno test --allow-env=NODE_ENV packages/showcase/src/e2e/` and
+`bash packages/showcase/run-e2e-tmux.sh`. Do not fold those numbers into the
+tables above: they measure window work, not frame cost.
+

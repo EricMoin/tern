@@ -5,7 +5,7 @@ The deprecation policy and feature-flag pattern that implement the
 surface is deprecated (deprecate → warn → remove), how experimental surface is
 opted into and graduates to stable, and how real runtime behavior switches are
 gated. The M5.1 audit ([api-stability.md](api-stability.md), 2026-08-27) is the
-input: a **519-symbol freeze set** (stable), an **86-symbol experimental band**,
+input: a **519-symbol freeze set** (stable), a **101-symbol experimental band** (85 at the 2026-08-27 audit + the 16 G1/G2/G3 showcase additions, api-stability.md §Post-audit additions),
 23 internal symbols, and 0 deprecation candidates — so this document is the
 forward-looking contract that governs the first deprecation whenever the
 boundary narrows.

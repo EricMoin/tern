@@ -17,7 +17,7 @@ recording a per-symbol stability intent:
 
 | Surface | Entry file(s) | Size | Symbols |
 |---------|---------------|------|---------|
-| `@tern-tui/core` | `packages/core/src/index.ts` (barrel over 28 topic modules) | 255 lines | 238 |
+| `@tern-tui/core` | `packages/core/src/index.ts` (barrel over 28 topic modules) | 255 lines | 254 |
 | `@tern-tui/react` | `packages/react/src/index.ts` + `packages/react/src/reconciler.ts` (barrels over 10 modules) | 143 + 92 lines | 167 |
 | `@tern-tui/solid` | `packages/solid/src/index.ts` + `packages/solid/src/universal.ts` | 1,697 + 342 lines | 170 |
 | napi backside | `src/bindings/tern-node/index.d.ts` (NAPI-RS generated) | 868 lines | 53 surface items |
@@ -52,13 +52,14 @@ kind, category, stability, and the audit note that justifies the tag. These tabl
 are the exhaustive per-symbol record — the freeze boundary in the next section is
 defined *over* them.
 
-### 1. `@tern-tui/core` — `packages/core/src/index.ts` (238 symbols)
+### 1. `@tern-tui/core` — `packages/core/src/index.ts` (254 symbols)
 
 Category legend: `renderer` · `scene-node` · `component` · `event` · `theme-style`
 · `a11y-semantics` · `focus` · `selection` · `highlight` · `stream` · `contrast` ·
-`utility`. 218 export statements expand to 238 symbols via the multi-symbol
-re-export blocks (L113, L117, L118–124, L125, L126–141 napi DTO block — 5
-statements contributing 25 symbols); no duplicates, no `export default`.
+`utility`. The M5.1 audit's 218 export statements expanded to 238 symbols via
+the multi-symbol re-export blocks (L113, L117, L118–124, L125, L126–141 napi DTO
+block — 5 statements contributing 25 symbols). The 16 post-audit additions below
+bring the core table to 254; no duplicates, no `export default`.
 
 | # | Symbol | Kind | Category | Stability | Notes |
 |---|--------|------|----------|-----------|-------|
@@ -300,10 +301,66 @@ statements contributing 25 symbols); no duplicates, no `export default`.
 | 236 | `createRenderer` | function | renderer | stable | renderer factory |
 | 237 | `framesEqual` | function | renderer | internal | frame equality — test/snapshot only |
 | 238 | `styledFramesEqual` | function | renderer | internal | styled frame equality — test/snapshot only |
+| 239 | `caretDisplayIn` | function | utility | experimental | @since 0.3.0 (unreleased) — G1 textarea windowing seam: caret cell → display position |
+| 240 | `caretDisplayRow` | function | utility | experimental | @since 0.3.0 (unreleased) — G1 textarea windowing seam: caret line → display row |
+| 241 | `charAtDisplayCol` | function | utility | experimental | @since 0.3.0 (unreleased) — G1 textarea windowing seam: display cell → source char |
+| 242 | `currentDisplayCol` | function | utility | experimental | @since 0.3.0 (unreleased) — G1 textarea windowing seam: caret's display column |
+| 243 | `displayBase` | function | utility | experimental | @since 0.3.0 (unreleased) — G1 textarea windowing seam: display row a logical line starts on |
+| 244 | `logicalAtDisplayRow` | function | utility | experimental | @since 0.3.0 (unreleased) — G1 textarea windowing seam: display row → logical line |
+| 245 | `offsetOfCol` | function | utility | experimental | @since 0.3.0 (unreleased) — G1 textarea windowing seam: source column → display cell |
+| 246 | `textareaHeight` | function | utility | experimental | @since 0.3.0 (unreleased) — G1 textarea windowing seam: total display height |
+| 247 | `textareaWidth` | function | utility | experimental | @since 0.3.0 (unreleased) — G1 textarea windowing seam: cell width of a line |
+| 248 | `totalDisplayRows` | function | utility | experimental | @since 0.3.0 (unreleased) — G1 textarea windowing seam: display rows over lines |
+| 249 | `wrapCount` | function | utility | experimental | @since 0.3.0 (unreleased) — G1 textarea windowing seam: display rows one line wraps to |
+| 250 | `visibleScroll` | function | utility | experimental | @since 0.3.0 (unreleased) — G1 textarea windowing seam; takes `lines: string[]`, so the showcase (rows, not strings) cannot call it (registry `fix-visible-scroll-needs-string-array`) |
+| 251 | `declareVirtualContent` | function | component | experimental | @since 0.3.0 (unreleased) — G2: any scroll region declares its content geometry; `maxScroll`/`scrollTo` measure it before the per-child walk |
+| 252 | `editHighlight` | function | highlight | experimental | @since 0.3.0 (unreleased) — G3: mid-file incremental highlight edit returning only the changed window |
+| 253 | `HighlightEdit` | type | highlight | experimental | @since 0.3.0 (unreleased) — G3 napi DTO: a mid-file edit (start, old_end, new_text) |
+| 254 | `HighlightEditResult` | type | highlight | experimental | @since 0.3.0 (unreleased) — G3 result of `editHighlight`: changed span window |
 
-**Totals (core):** 238 symbols — **198 stable**, **28 experimental**, **12
+**Totals (core):** 254 symbols — **198 stable**, **44 experimental**, **12
 internal**, **0 deprecation-candidate**.
 
+#### Post-audit additions (0.3.0 — showcase)
+
+The private showcase editor (docs/components.md, "Showcase editor") forced
+three framework seams open, and this section closes the audit gap they left.
+Per the **new symbol** row of the Boundary-change process below and
+CONTRIBUTING.md ("Deprecation & API stability"), each of these exports enters
+as **experimental** with `@since 0.3.0` (unreleased) and becomes stable only
+after a release cycle with no contract change:
+
+| seam | symbols added to the table | row(s) |
+|------|----------------------------|--------|
+| **G1 — textarea windowing** (`packages/core/src/textwrap.ts`) | `caretDisplayIn`, `caretDisplayRow`, `charAtDisplayCol`, `currentDisplayCol`, `displayBase`, `logicalAtDisplayRow`, `offsetOfCol`, `textareaHeight`, `textareaWidth`, `totalDisplayRows`, `wrapCount`, `visibleScroll` | 239–250 |
+| **G2 — virtual content** (`packages/core/src/scrollview.ts`) | `declareVirtualContent` | 251 |
+| **G3 — incremental highlight edit** (`packages/core/src/highlight.ts`) | `editHighlight`, `HighlightEdit`, `HighlightEditResult` | 252–254 |
+
+**Why this was a gap.** The registry
+(`packages/showcase/src/parity/registry-editor.ts`) measured 20 names the
+`@tern-tui/core` barrel exports with no audited row. This audit resolves them:
+
+- **16 names got new rows** — the 12 G1 textwrap symbols above plus
+  `declareVirtualContent` (G2) and `editHighlight` / `HighlightEdit` /
+  `HighlightEditResult` (G3). This includes `visibleScroll`, which the registry
+  additionally lists as app-unreachable (`fix-visible-scroll-needs-string-array`);
+  the row records its tier, the registry records the reachability gap.
+- **4 names get a stated reason instead of a new row** — `checkboxLabels`,
+  `radioOptions`, `selectOptions` and `toggleLabels` are the WeakMap registries
+  already inventoried as **internal** (rows 87, 106, 107, 108) and already
+  excluded from the freeze boundary (see "Excluded from the boundary" below).
+  They are live exports that no app entry can reach, so the registry accounts
+  for them in its exclusion list rather than as a coverage claim; no new audit
+  row is warranted.
+
+**Registry reconciliation note.** The registry entries `core-caret-display`,
+`core-display-rows`, `core-highlight-edit` and `core-scroll-virtual-content`
+carry `docGap: true` and inherit **stable** from their module's audited siblings
+(`GAP_BASIS`). These rows supersede that inheritance: the audited tier for the
+G1/G2/G3 additions is **experimental** until a release cycle proves the
+contracts, per the Boundary-change process. The registry's own data is left
+unchanged per its source-of-truth rule; a later registry pass should repoint
+those entries' `tierBasis` at rows 239–254.
 ### 2. `@tern-tui/react` — `packages/react/src/index.ts` + `reconciler.ts` (167 symbols)
 
 Classification rule: **stable** = shipped in a released version (0.1.0 —
@@ -969,12 +1026,12 @@ above** (198 core + 134 react + 140 solid + 47 napi). Composition:
   (`create_node`, `highlight`) pinned transitively by core's `Node`/`highlightCode`
   materialization.
 
-### Stays experimental (opt-out, may break in minor — 85 symbols)
+### Stays experimental (opt-out, may break in minor — 101 symbols)
 
 Not part of the 1.0 promise. Consumers opt in at their own risk; the surface may
 change or move within 0.x and may break in a minor. Per surface:
 
-- **`@tern-tui/core` (28)** — the M4.1 semantics surface (`syncSemantics`,
+- **`@tern-tui/core` (44)** — the M4.1 semantics surface (`syncSemantics`,
   `SemanticsDescriptor`, `SceneSemanticsJs`, `SemanticsNodeJs`), the M4.2
   `A11yStream` / `A11Y_STREAM_VERSION`, the M4.5 contrast checker
   (`auditTheme`, `contrastRatio`, `parseThemeColor`, `relativeLuminance`,
@@ -983,7 +1040,12 @@ change or move within 0.x and may break in a minor. Per surface:
   `SELECTION_DOUBLE_CLICK_MS`, `selectWordAt`, `startSelection`,
   `dragSelection`, `endSelection`, `copySelection`, `selectionKey`), and the
   stream follow helpers (`isStreamFollowing`, `syncStreamTail`, `followTail`,
-  `STREAM_AFFORDANCE_CHAR`, `scrollToBottom`).
+  `STREAM_AFFORDANCE_CHAR`, `scrollToBottom`), and the showcase-forced G1/G2/G3
+  additions (`caretDisplayIn`, `caretDisplayRow`, `charAtDisplayCol`,
+  `currentDisplayCol`, `displayBase`, `logicalAtDisplayRow`, `offsetOfCol`,
+  `textareaHeight`, `textareaWidth`, `totalDisplayRows`, `wrapCount`,
+  `visibleScroll`, `declareVirtualContent`, `editHighlight`, `HighlightEdit`,
+  `HighlightEditResult` — the post-audit additions above).
 - **`@tern-tui/react` (28)** — the `Menu` family (10: `MenuProps`, `Menu`,
   `MenuItem`, `MenuState`, `closeMenu`, `MENU_Z_INDEX`, `menuClick`,
   `menuHover`, `menuKey`, `openMenu`), the `Tree` family (10: `TreeProps`,
@@ -1164,3 +1226,14 @@ a **major** version. **M5.7 checklist:** re-verify the 13-symbol contested band
 (selection/stream-follow helpers) and the `setTheme`/`getTheme` tag before the
 1.0 declaration, and confirm no experimental symbol has silently shipped in a
 release since this audit.
+
+### Recorded transitions
+
+| Date | Transition | Symbols | Basis |
+|------|------------|---------|-------|
+| 2026-09-15 | **new symbol → experimental** | G1 textwrap windowing (12 names, rows 239–250), G2 `declareVirtualContent` (row 251), G3 `editHighlight` / `HighlightEdit` / `HighlightEditResult` (rows 252–254) | The showcase editor forced the three seams open (commits `ce1f547`, `7fb6874`, `610946c`); the core inventory is extended and CHANGELOG.md "Unreleased" notes the additions. `@since 0.3.0` (unreleased). |
+
+No promotion (experimental → stable) and no deprecation has been recorded since
+the 2026-08-27 audit. The experimental band moved **85 → 101** with the 0.3.0
+additions above.
+

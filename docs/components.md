@@ -104,6 +104,7 @@ Input/Textarea design notes in this document).
 
 | Component | Status | Needs |
 |-----------|--------|-------|
+| [Box](#box) | ✅ Shipped | — (container: border ring, padding, flex layout) |
 | [StreamingText](#streamingtext) | ✅ Shipped | — |
 | [MarkdownView](#markdownview) | ✅ Shipped | — |
 | [DiffView](#diffview) | ✅ Shipped | — |
@@ -116,6 +117,13 @@ Input/Textarea design notes in this document).
 | [Table](#table) | ✅ Shipped | — |
 | [Textarea](#textarea) | ✅ Shipped | — |
 | [Modal](#modal) | ✅ Shipped | — |
+| [Tabs](#tabs) | ✅ Shipped | — (tab bar + content region; `ctrl+tab` / `ctrl+w` routing) |
+| [Progress](#progress) | ✅ Shipped | — (framed gauge with label + percentage readout; `setProgress`) |
+| Tree | ✅ Shipped | — (roadmap Phase 8; `Tree` + `treeKey` + `visibleTreeRows` in `@tern-tui/core`) |
+| Canvas | ✅ Shipped | — (`Canvas` + braille-dot helpers in `@tern-tui/core`) |
+| Chart | ✅ Shipped | — (`Chart` / `BarChart` / `Sparkline` in `@tern-tui/core`) |
+| BarChart | ✅ Shipped | — (bar chart factory in `@tern-tui/core`) |
+| Sparkline | ✅ Shipped | — (sparkline factory in `@tern-tui/core`) |
 | [Selection](#selection) | ✅ Shipped | — |
 | [Theme system](#theme-system--soft-wrap) | ✅ Shipped | — |
 | [Soft wrap (`wrap` prop)](#theme-system--soft-wrap) | ✅ Shipped | — |
@@ -127,6 +135,105 @@ Input/Textarea design notes in this document).
 
 ---
 
+## Showcase editor (private, in-repo)
+
+`packages/showcase` is a real, runnable terminal text editor built on tern —
+the engine's first non-trivial consumer. It is **private and in-repo**: never
+published, never in the release matrix (CONTRIBUTING.md, "Layer ownership").
+Its job is to prove that a non-trivial application can be carried by the
+published surface, and to expose every framework gap that application needs —
+each gap is fixed in this repository and proven by CI.
+
+**Architecture.** A headless app-core (no addon, no scene, no renderer) owns
+every decision: `core/plan.ts` is the ONE decision point for what is on screen
+(it yields a plain `ScreenPlan` of regions, rows, spans, the cursor cell), and
+`core/commands.ts` is the ONE decision point for what a key means (an Intent or
+a command effect — never a scene mutation). Three renderer layers
+(`layers/core`, `layers/react`, `layers/solid`) are each only (a) a pure
+`ScreenPlan`-to-scene emitter and (b) an event source feeding the same
+dispatcher; no layer re-implements layout or key meaning. One parity harness
+holds all three to `ScreenPlan` identity. The completeness registry (`parity/`)
+is the app's own record of which shipped framework symbols it exercises, how
+honestly, and which gaps it is still paying for.
+
+Run it (needs the native addon built — see README.md, "Installation"):
+
+```sh
+deno run --allow-all packages/showcase/src/layers/core/main.ts [path]
+```
+
+Tests:
+
+```sh
+deno test --allow-env=NODE_ENV --allow-read packages/showcase/src   # app suite, 224 tests
+deno test --allow-env=NODE_ENV packages/showcase/src/e2e/            # e2e flow contract + pre-pty proof
+bash packages/showcase/run-e2e-tmux.sh                               # real-tmux flows (needs a PTY; CI job app-e2e)
+```
+
+The app suite also runs through the root `npm test`; CI's `app-e2e` job
+(`.github/workflows/ci.yml`, macOS) runs the e2e tests and the tmux runner.
+
+### The registry, as measured
+
+The registry prints its own numbers on every run of
+`deno test --allow-env=NODE_ENV --allow-read packages/showcase/src`:
+
+- **65 entries** — 45 surface, 20 framework-fix.
+- **16 plan screens**, every one named by an entry; **0 contract violations**.
+- **20 framework gaps**: **3 fixed in this repo**, **1 partially shipped**,
+  **16 still open** (listed below).
+- **INVENTORY_GAP**: 20 names the `@tern-tui/core` barrel exports with no
+  audited row in docs/api-stability.md — now closed there (see that document's
+  "Post-audit additions").
+
+Quote the numbers from the run; never hand-edit them. The registry is the
+source of truth.
+
+### What this work does NOT establish (honest ledger)
+
+**The tmux e2e flows have never been executed against a real pty in this
+development sandbox.** `/dev/ptmx` is denied here (`forkpty` returns EPERM), so
+the pty write, the `pipe-pane` raw-byte stream and the tmux session teardown
+are **UNOBSERVED**. Every flow's assertions are proven at the pre-pty level
+only — the same `FlowSpec` step lists replayed against the real `HeadlessApp`
+and the host effect port (`packages/showcase/src/e2e/prepty_test.ts`) — and the
+`app-e2e` CI job is what actually exercises the tmux layer. **`bash
+tools/verify.sh` gate 5 (the PTY smoke) cannot run from a sandboxed session at
+all** for the same reason; that is an environment fact worth recording for
+whoever tries next, not a code failure.
+
+**16 of the 20 framework gaps the app exposed remain OPEN.** Each is listed by
+id with the one-line gap, so a future reader can pick one up without
+re-deriving the investigation. The full record (exact file:line, reproduction,
+proposed fix, regression case) is the `framework-fix` entries in
+`packages/showcase/src/parity/registry-editor.ts`, `registry-panes.ts` and
+`registry-shell.ts`:
+
+| id | gap (one line) |
+|----|----------------|
+| `fix-grapheme-primitives-unexported` | The grapheme primitives exist and are tested, but the barrel exports none of them. |
+| `fix-caret-math-rewraps-the-line` | The caret helpers re-wrap the line they measure, so a motion costs 2–3 fresh wraps. |
+| `fix-wrapcache-has-no-batch-splice` | `WrapCache` moves one row per call, so a 1000-line paste is 1000 splices plus 1000 treap split/merge pairs. |
+| `fix-help-combo-hint-private` | `helpComboHint` is module-private, so no combo formatter is exported and the app re-implements it verbatim. |
+| `fix-modal-factory-centers-content` | The `Modal` factory centers and sizes its own content, so a plan-exact overlay cannot ride it without a second centering decision. |
+| `fix-tree-row-text-private` | The tree's PAINTED row text (indentation guides + glyph + label) is private, so a plan that paints the tree re-derives the exact cell string. |
+| `fix-visible-scroll-needs-string-array` | `visibleScroll` requires a `string[]` the app cannot supply, so the plan is built TWICE on a scroll frame. |
+| `fix-scroll-view-flow-default-undocumented` | DOC GAP — a `ScrollView`'s content flow direction is undocumented and the engine's default is a ROW. |
+| `fix-scroll-view-clip-rect-coordinate-space` | DOC GAP — the clip rect's coordinate space is undocumented: the origin is the SCENE's, not the view's own box. |
+| `fix-solid-barrel-hides-virtual-content` | G2 — a Solid pane must reach past the `@tern-tui/solid` barrel to declare its content geometry. |
+| `fix-react-declare-virtual-content-unreachable` | G2/React — the virtual-content seam is unreachable from the React layer (barrel does not re-export it; no host ref). |
+| `fix-react-form-primitives-unhosted` | G4 — React cannot host the `Checkbox`/`Radio`/`Toggle` form primitives (no host component, no reconciler case). |
+| `fix-react-statusbar-element-segments` | React cannot take the framework's element-valued `StatusBar` segments, so the React layer composes the strip's scene shape itself. |
+| `fix-keymap-cannot-be-queried` | The keymap cannot answer which combo matches without running the handler. |
+| `fix-buffer-clamp-is-private` | The document model's clamp policy is private, so it is copied four times in the app. |
+| `fix-solid-bare-specifier-loads-server-build` | A bare `solid-js` import outside `packages/solid` resolves to the SERVER build, so a consumer's signal is never tracked by the renderer's effects. |
+
+The three gaps that DID land (`fix-textarea-per-keystroke-remeasure`,
+`fix-highlighter-midfile-edit`, `fix-scroll-region-virtual-content`) and the one
+partially shipped (`fix-planrow-screenrow-doc-mislabels`) are recorded in the
+same registry files and in CHANGELOG.md, "Unreleased".
+
+---
 ## Box
 
 **Purpose:** the container primitive — background fill, optional border ring,

@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Showcase editor (`@tern-tui/showcase`, private and in-repo):** tern's first
+  real consumer — a runnable terminal text editor built on the published
+  surface. A headless app-core plus three renderer layers (core / react /
+  solid) held to `ScreenPlan` identity by one parity harness, a completeness
+  registry (65 entries: 45 surface + 20 framework-fix; 16 plan screens; 0
+  contract violations), and five end-to-end flows. **Never published, never in
+  the release matrix.** Run:
+  `deno run --allow-all packages/showcase/src/layers/core/main.ts [path]`.
+  Its 224-test suite runs through the root `npm test`; CI's `app-e2e` job runs
+  the e2e flows. Details: docs/components.md, "Showcase editor".
+- **Textarea windowing seam (G1):** the caret/window math is now a pure
+  function of `(line, width)` and exported from `@tern-tui/core` — the new
+  `textwrap.ts` adds `caretDisplayIn`, `caretDisplayRow`, `charAtDisplayCol`,
+  `currentDisplayCol`, `displayBase`, `logicalAtDisplayRow`, `offsetOfCol`,
+  `textareaHeight`, `textareaWidth`, `totalDisplayRows`, `wrapCount` and
+  `visibleScroll` beside the existing `wrapLineWithOffsets` / `measureText`, so
+  a host can size a window against the framework's own semantics instead of
+  re-deriving them. **New exports enter experimental** (docs/api-stability.md,
+  "Boundary-change process").
+- **`declareVirtualContent` (G2):** `declareVirtualContent(view, size)` lets
+  any scroll region declare its content geometry, consulted by `maxScroll` and
+  `scrollTo` before the per-child walk — so a view that materializes only its
+  visible window can clamp against the whole dataset. Additive: no napi change,
+  no new node kind. **New export enters experimental.**
+- **Incremental mid-file highlighting (G3):** `IncrementalHighlighter::apply_edit`
+  in Rust (`tern-highlight`) plus the napi binding, surfaced as
+  `editHighlight(language, edit)` returning only the changed window of spans
+  (`HighlightEdit`, `HighlightEditResult`). The Rust test holds the incremental
+  span stream byte-identical to a full re-highlight, so the incremental path
+  cannot drift from the batch one. **New exports enter experimental.**
 - **Tree / TreeView widget (roadmap Phase 8):** a `Tree` element in
   `@tern-tui/core` — a flex column of text leaves, one per *visible* row of a
   hierarchical node model: an indentation guide (`│ ` under a continuing
@@ -42,6 +72,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `createTextNode`/`insertNode`/`setProp`/`mergeProps`/`effect`/`memo`/
   `createComponent`/`use`) instead; deprecated in 0.3.0, scheduled for removal
   in 0.4.0 (≥1 minor cycle, per `docs/api-lifecycle.md`).
+
+### Showcase — what is not established (honest ledger)
+
+- The tmux e2e flows have **never been executed against a real pty** in this
+  repository's development sandbox: `/dev/ptmx` is denied (`forkpty` returns
+  EPERM), so the pty write, the `pipe-pane` raw stream and the session teardown
+  are **UNOBSERVED**. Every flow is proven at the pre-pty level only
+  (`packages/showcase/src/e2e/prepty_test.ts`); CI's `app-e2e` job exercises
+  the tmux layer. `bash tools/verify.sh` gate 5 (the PTY smoke) cannot run from
+  a sandboxed session at all — an environment fact, not a code failure.
+- **16 of the 20 framework gaps** the app exposed remain open:
+  `fix-grapheme-primitives-unexported`, `fix-caret-math-rewraps-the-line`,
+  `fix-wrapcache-has-no-batch-splice`, `fix-help-combo-hint-private`,
+  `fix-modal-factory-centers-content`, `fix-tree-row-text-private`,
+  `fix-visible-scroll-needs-string-array`,
+  `fix-scroll-view-flow-default-undocumented`,
+  `fix-scroll-view-clip-rect-coordinate-space`,
+  `fix-solid-barrel-hides-virtual-content`,
+  `fix-react-declare-virtual-content-unreachable`,
+  `fix-react-form-primitives-unhosted`,
+  `fix-react-statusbar-element-segments`, `fix-keymap-cannot-be-queried`,
+  `fix-buffer-clamp-is-private`, `fix-solid-bare-specifier-loads-server-build`.
+  One line each, with file:line and a regression case, is in docs/components.md,
+  "Showcase editor" → "What this work does NOT establish".
 
 ## [0.2.0] - 2026-08-10
 

@@ -329,6 +329,34 @@ npm run demo:kitchen-solid -w @tern-tui/examples
 Each demo renders a scene, asserts it against the scene tree, and quits on
 `q`.
 
+## Showcase editor
+
+`packages/showcase` is a real, runnable terminal text editor built on tern —
+the engine's first non-trivial consumer. It is **private and in-repo**: it is
+never published and never enters the release matrix. It exists to prove that a
+non-trivial application can be carried by the published surface, and to expose
+every framework gap that application needs.
+
+Run it from the repo root (needs the native addon built — see
+[Installation](#installation)):
+
+```sh
+deno run --allow-all packages/showcase/src/layers/core/main.ts [path]
+```
+
+Run its tests:
+
+```sh
+deno test --allow-env=NODE_ENV --allow-read packages/showcase/src   # app suite (224 tests)
+deno test --allow-env=NODE_ENV packages/showcase/src/e2e/            # e2e flow contract + pre-pty proof
+bash packages/showcase/run-e2e-tmux.sh                               # real-tmux flows (needs a PTY; CI job app-e2e)
+```
+
+The app suite is also part of the root `npm test`. The architecture, the
+completeness registry the app ships, and an explicit ledger of what the work
+does **not** establish are in
+[docs/components.md](docs/components.md#showcase-editor-private-in-repo).
+
 ## Packages
 
 | Package | What it is |
