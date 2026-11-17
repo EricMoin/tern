@@ -1,7 +1,10 @@
 # tern
 
 <p align="center">
-  <img src="assets/tern-lockup.svg" alt="tern" width="300">
+  <picture>
+    <source srcset="assets/tern-lockup-dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="assets/tern-lockup.svg" alt="A tern in flight, its swept wings doubling as the shell-prompt chevron" width="300">
+  </picture>
 </p>
 
 <p align="center">
